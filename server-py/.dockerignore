@@ -1,0 +1,12 @@
+﻿.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+uploads/            # 小票图片是运行时数据，不进镜像（compose 走 named volume）
+# 本地环境文件与临时文件不进镜像（防密钥泄漏）
+.env
+.env.*
+*.log
+*.sqlite3
+tests/

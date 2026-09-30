@@ -1,0 +1,59 @@
+# 班费收支系统 · Docker Compose（复用服务器上已有的 MySQL/MariaDB）
+#
+# 与 docker-compose.yml 的差别：**不创建数据库容器**，backend 直接连服务器上已在跑的 MySQL。
+# 用法（与主 compose 完全一致的命令）：
+#   docker compose -f docker-compose.use-existing-db.yml up -d --build
+#
+# 部署前必做三件事：
+#   1) 在数据库里建库 + 建账号（命令见下方 SQL），并授权给 Docker 网段来源
+#   2) 复制 .env.example 为 .env，填 DB_HOST / DB_PORT / DB_NAME / DB_USERNAME / DB_PASSWORD
+#   3) 确认数据库监听外部连接（非 127.0.0.1），否则容器连不上
+#
+# 数据在服务器自己的库里：docker compose down 不影响数据（它本来就不归容器管）。
+
+services:
+  backend:
+    build: ./server-py
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 数据库连接（SQLAlchemy 原生写法）：URL 与账号密码分开给，凭据不进 URL
+      # DB_HOST 填 127.0.0.1 表示「同一台服务器上已有的 MySQL/MariaDB」
+      # 字符集用 charset（PyMySQL 认这个）；时区由上面的 TZ=Asia/Shanghai 保证
+      CLASSFEE_DB_URL: "mysql+pymysql://${DB_HOST:-127.0.0.1}:${DB_PORT:-3306}/${DB_NAME:-classfee}?charset=utf8mb4"
+      CLASSFEE_DB_USERNAME: ${DB_USERNAME:-classfee}
+      CLASSFEE_DB_PASSWORD: ${DB_PASSWORD:?请在 .env 里填写 DB_PASSWORD}
+      # JWT 签名密钥（后端签发/校验登录令牌用）：openssl rand -hex 32
+      CLASSFEE_JWT_SECRET: ${CLASSFEE_JWT_SECRET:?请在 .env 里填写 CLASSFEE_JWT_SECRET}
+      # 班主任（运营）账号：.env 里「声明即生效」，仅在库中不存在时创建，不覆盖已有账号
+      CLASSFEE_TEACHER_USERNAME: ${CLASSFEE_TEACHER_USERNAME:-}
+      CLASSFEE_TEACHER_PASSWORD: ${CLASSFEE_TEACHER_PASSWORD:-}
+      CLASSFEE_TEACHER_NAME: ${CLASSFEE_TEACHER_NAME:-}
+      CLASSFEE_TEACHER_ROLE: ${CLASSFEE_TEACHER_ROLE:-TEACHER}
+      # 小票图片目录（compose 已挂 named volume，容器重建不丢）
+      CLASSFEE_UPLOAD_DIR: ${CLASSFEE_UPLOAD_DIR:-/app/uploads}
+    volumes:
+      - classfee_uploads:/app/uploads
+    healthcheck:
+      # 单行可执行的 Python 探活：未带 token 拿到 401 = 服务已就绪
+      test: ["CMD", "python", "-c", "import urllib.request,urllib.error,sys;exec(\"try:\\n r=urllib.request.urlopen('http://127.0.0.1:8080/api/auth/me',timeout=3)\\nexcept urllib.error.HTTPError as e:\\n sys.exit(0 if e.code in (401,403) else 1)\\nexcept Exception:\\n sys.exit(1)\")"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # 调试时可放开下面两行直连后端：
+    # ports:
+    #   - "8080:8080"
+
+  frontend:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+
+volumes:
+  # 只有小票图片在卷里；数据库归服务器自己管，本文件不碰它
+  classfee_uploads:

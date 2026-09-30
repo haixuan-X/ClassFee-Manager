@@ -1,0 +1,49 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: classfee-server
+  datasource:
+    # 本机为 MariaDB 12；生产 MySQL 8 时改为 jdbc:mysql://localhost:3306/classfee...
+    url: jdbc:mariadb://localhost:3306/classfee?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+    username: classfee
+    password: classfee123
+    driver-class-name: org.mariadb.jdbc.Driver
+  sql:
+    init:
+      mode: always                       # 启动时执行 schema.sql（已用 IF NOT EXISTS 幂等）
+      schema-locations: classpath:db/schema.sql
+      continue-on-error: true
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+classfee:
+  jwt:
+    # 生产环境务必改成随机长串并从环境变量注入，不要提交到仓库
+    secret: classfee-m1-dev-secret-please-change-me-0123456789
+    expire-hours: 2
+  init:
+    # 首次启动自动建演示数据：管理员账号 + 默认类别，便于跑通流程
+    enabled: true
+    username: admin
+    password: admin123
+    real-name: 班长-张伟
+    class-name: 计科2201班
+    grade: 2022级
+    head-teacher: 测试班主任
+
+logging:
+  level:
+    com.classfee: info
+    org.springframework.web: info

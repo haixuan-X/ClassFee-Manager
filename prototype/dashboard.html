@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="班费收支系统仪表盘原型：班级余额、月度收支趋势、支出分类占比、缴费完成率与收支明细。">
+<title>班费收支系统 · 仪表盘原型</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/fira-sans@5.0.0/index.min.css">
+<style>
+/* ============ Design Tokens（源自 design-system/classfee-manager/MASTER.md） ============ */
+:root{
+  --color-primary:#0F172A; --color-on-primary:#fff; --color-secondary:#1E293B;
+  --color-accent:#22C55E; --color-on-accent:#0F172A;
+  --color-background:#F5F7FB; --color-foreground:#0F172A;
+  --color-card:rgba(255,255,255,.72); --color-card-fg:#0F172A;
+  --color-muted:#EEF2F7; --color-muted-fg:#5A6779;
+  --color-border:rgba(15,23,42,.08);
+  --color-destructive:#DC2626; --color-destructive-text:#B91C1C;
+  --color-income:#146C36; --color-expense:#DC2626; --color-info:#2563EB;
+  --ring:0 0 0 3px rgba(37,99,235,.35);
+  --space-xs:4px; --space-sm:8px; --space-md:16px; --space-lg:24px; --space-xl:32px;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.06);
+  --shadow-md:0 4px 12px rgba(15,23,42,.08);
+  --shadow-lg:0 12px 32px rgba(15,23,42,.12);
+  --radius:8px; --radius-lg:12px;
+  --font-body:"Fira Sans","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-num:"Fira Code","SFMono-Regular",Consolas,monospace;
+  --ease:cubic-bezier(.4,0,.2,1);
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:var(--font-body); font-size:14px; line-height:1.5;
+  color:var(--color-foreground); background:var(--color-background);
+  -webkit-font-smoothing:antialiased;
+}
+/* 玻璃拟态背景光斑 */
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(600px 400px at 12% -10%, rgba(34,197,94,.16), transparent 60%),
+    radial-gradient(700px 500px at 100% 0%, rgba(37,99,235,.14), transparent 60%),
+    radial-gradient(500px 400px at 60% 110%, rgba(139,92,246,.10), transparent 60%);}
+button,input,select,textarea{font:inherit;color:inherit}
+a{color:var(--color-info)}
+:focus-visible{outline:none;box-shadow:var(--ring);border-radius:var(--radius)}
+.num{font-family:var(--font-num);font-variant-numeric:tabular-nums}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.icon{width:18px;height:18px;stroke:currentColor;stroke-width:1.8;fill:none;
+  stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+/* ============ Layout ============ */
+.app{display:flex;min-height:100vh}
+.sidebar{
+  width:220px;flex:none;position:fixed;inset:0 auto 0 0;z-index:40;
+  background:rgba(255,255,255,.72);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-right:1px solid var(--color-border);
+  padding:var(--space-md) var(--space-sm);display:flex;flex-direction:column;gap:2px;
+  transition:transform .25s var(--ease);
+}
+.brand{display:flex;align-items:center;gap:10px;padding:8px 10px 18px;}
+.brand-mark{width:34px;height:34px;border-radius:9px;background:var(--color-primary);
+  color:#fff;display:grid;place-items:center;flex:none}
+.brand-name{font-weight:600;font-size:15px;letter-spacing:.2px}
+.brand-sub{font-size:11px;color:var(--color-muted-fg)}
+.nav-label{font-size:11px;color:var(--color-muted-fg);padding:14px 10px 6px;letter-spacing:.6px}
+.nav-item{
+  display:flex;align-items:center;gap:10px;padding:0 10px;height:40px;min-height:40px;
+  border-radius:var(--radius);color:#334155;text-decoration:none;cursor:pointer;
+  border:0;background:none;width:100%;text-align:left;font-size:14px;
+  transition:background .2s var(--ease),color .2s var(--ease);
+}
+.nav-item:hover{background:rgba(15,23,42,.05);color:var(--color-primary)}
+.nav-item.active{background:var(--color-primary);color:#fff;box-shadow:var(--shadow-sm)}
+.nav-item .badge{margin-left:auto;font-size:11px;background:var(--color-muted);
+  color:var(--color-muted-fg);border-radius:999px;padding:1px 7px}
+.nav-item.active .badge{background:rgba(255,255,255,.18);color:#fff}
+.sidebar-foot{margin-top:auto;padding:10px;font-size:12px;color:var(--color-muted-fg);
+  border-top:1px solid var(--color-border)}
+
+.main{flex:1;min-width:0;margin-left:220px;display:flex;flex-direction:column}
+.topbar{
+  position:sticky;top:0;z-index:30;height:60px;display:flex;align-items:center;gap:12px;
+  padding:0 var(--space-xl);background:rgba(245,247,251,.8);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--color-border);
+}
+.topbar h1{font-size:16px;font-weight:600;margin:0}
+.topbar .crumb{font-size:12px;color:var(--color-muted-fg)}
+.spacer{flex:1}
+.icon-btn{width:40px;height:40px;display:grid;place-items:center;border-radius:var(--radius);
+  border:1px solid var(--color-border);background:#fff;cursor:pointer;color:#334155;
+  transition:background .2s var(--ease),box-shadow .2s var(--ease)}
+.icon-btn:hover{background:var(--color-muted);box-shadow:var(--shadow-sm)}
+.avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#22C55E,#0F172A);
+  color:#fff;display:grid;place-items:center;font-size:13px;font-weight:600;flex:none}
+.user-chip{display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border-radius:999px;
+  border:1px solid var(--color-border);background:#fff;cursor:pointer}
+.user-chip small{color:var(--color-muted-fg);font-size:11px;display:block}
+.hamburger{display:none}
+
+.content{padding:var(--space-xl);display:flex;flex-direction:column;gap:var(--space-lg);
+  max-width:1440px;width:100%;margin:0 auto}
+.page-head{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.page-head h2{margin:0;font-size:24px;font-weight:600;line-height:1.3}
+.page-head p{margin:2px 0 0;color:var(--color-muted-fg);font-size:13px}
+
+/* ============ Cards ============ */
+.card{
+  background:var(--color-card);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border:1px solid var(--color-border);border-radius:var(--radius-lg);
+  padding:var(--space-md);box-shadow:var(--shadow-sm);
+  transition:box-shadow .2s var(--ease);
+}
+.card-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.card-head h3{margin:0;font-size:15px;font-weight:600}
+.card-head .hint{font-size:12px;color:var(--color-muted-fg)}
+.grid{display:grid;gap:var(--space-md)}
+.stats{grid-template-columns:repeat(4,1fr)}
+.grid-2{grid-template-columns:1.6fr 1fr}
+
+/* Stat card */
+.stat .label{font-size:13px;color:var(--color-muted-fg);display:flex;align-items:center;gap:6px}
+.stat .value{font-family:var(--font-num);font-variant-numeric:tabular-nums;
+  font-size:32px;font-weight:600;line-height:1.25;margin:6px 0 4px;letter-spacing:-.5px}
+.stat .delta{font-size:12px;color:var(--color-muted-fg)}
+.stat .delta .up{color:var(--color-income);font-weight:600}
+.stat .delta .down{color:var(--color-expense);font-weight:600}
+.stat .chip{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;
+  padding:2px 8px;border-radius:999px}
+.chip.income{background:rgba(34,197,94,.14);color:var(--color-income)}
+.chip.expense{background:rgba(220,38,38,.12);color:var(--color-destructive-text)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;
+  padding:0 18px;border-radius:var(--radius);font-weight:600;font-size:14px;border:1px solid transparent;
+  cursor:pointer;transition:background .2s var(--ease),box-shadow .2s var(--ease),transform .15s var(--ease)}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--color-primary);color:#fff}
+.btn-primary:hover{background:var(--color-secondary);box-shadow:var(--shadow-md)}
+.btn-accent{background:var(--color-accent);color:var(--color-on-accent)}
+.btn-accent:hover{background:#1EB055;box-shadow:var(--shadow-md)}
+.btn-danger{background:var(--color-destructive);color:#fff}
+.btn-danger:hover{background:#B91C1C}
+.btn-ghost{background:#fff;border-color:var(--color-border);color:#334155}
+.btn-ghost:hover{background:var(--color-muted)}
+.btn-sm{height:32px;padding:0 12px;font-size:13px}
+
+/* ============ Charts ============ */
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#475569}
+.legend i{width:18px;height:3px;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:6px}
+.chart{width:100%;height:auto;display:block;overflow:visible}
+.chart text{font-family:var(--font-body);font-size:11px;fill:var(--color-muted-fg)}
+.gridline{stroke:rgba(15,23,42,.08);stroke-width:1}
+.donut-wrap{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.donut-center{font-family:var(--font-num);text-anchor:middle;fill:var(--color-foreground)}
+.donut-center tspan.sub{font-family:var(--font-body);font-size:10px;fill:var(--color-muted-fg)}
+.cat-list{flex:1;min-width:170px;display:flex;flex-direction:column;gap:9px}
+.cat-row{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap;overflow:hidden}
+.cat-row .dot{width:9px;height:9px;border-radius:3px;flex:none}
+.cat-row .nm{flex:none}
+.cat-row .amt{margin-left:auto;font-family:var(--font-num);font-variant-numeric:tabular-nums;
+  color:#334155;font-size:12.5px;flex:none}
+.cat-row .pct{width:38px;text-align:right;color:var(--color-muted-fg);font-size:12px}
+
+/* Progress */
+.progress{height:10px;border-radius:999px;background:var(--color-muted);overflow:hidden}
+.progress > span{display:block;height:100%;border-radius:999px;
+  background:linear-gradient(90deg,#22C55E,#4ADE80);width:0;
+  animation:grow 900ms var(--ease) forwards}
+@keyframes grow{to{width:var(--w)}}
+.progress-meta{display:flex;justify-content:space-between;font-size:12px;
+  color:var(--color-muted-fg);margin-top:8px}
+
+/* ============ Table ============ */
+.table-scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+thead th{
+  background:var(--color-muted);color:#475569;font-weight:600;font-size:12px;
+  text-align:left;padding:9px 12px;white-space:nowrap}
+thead th:first-child{border-radius:var(--radius) 0 0 var(--radius)}
+thead th:last-child{border-radius:0 var(--radius) var(--radius) 0}
+tbody td{padding:11px 12px;border-bottom:1px solid var(--color-border);vertical-align:middle}
+tbody tr{transition:background .15s var(--ease)}
+tbody tr:hover{background:rgba(15,23,42,.035)}
+tbody tr:last-child td{border-bottom:0}
+.amt-cell{text-align:right;font-family:var(--font-num);font-variant-numeric:tabular-nums;
+  font-weight:600;white-space:nowrap}
+.amt-in{color:var(--color-income)}
+.amt-out{color:var(--color-expense)}
+.tag{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:2px 9px;
+  border-radius:999px;background:var(--color-muted);color:#475569;white-space:nowrap}
+.tag.ok{background:rgba(34,197,94,.14);color:var(--color-income);font-weight:600}
+.tag.warn{background:rgba(245,158,11,.16);color:#92400E;font-weight:600}
+.muted{color:var(--color-muted-fg)}
+
+/* Notice */
+.notice-item{display:flex;gap:10px;padding:11px 0;border-bottom:1px dashed var(--color-border)}
+.notice-item:last-child{border-bottom:0}
+.notice-pin{font-size:11px;font-weight:600;color:#1D4ED8;background:rgba(37,99,235,.1);
+  border-radius:999px;padding:2px 8px;height:fit-content;white-space:nowrap}
+.notice-item h4{margin:0 0 3px;font-size:13.5px;font-weight:600}
+.notice-item p{margin:0;font-size:12.5px;color:var(--color-muted-fg);
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+
+.empty{display:flex;flex-direction:column;align-items:center;gap:12px;padding:34px 0;
+  color:var(--color-muted-fg);font-size:13px}
+
+/* ============ Modal / Form ============ */
+.modal-overlay{position:fixed;inset:0;z-index:60;background:rgba(15,23,42,.45);
+  backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:16px}
+.modal-overlay.open{display:flex;animation:fade .18s var(--ease)}
+.modal{background:#fff;border-radius:16px;box-shadow:var(--shadow-lg);
+  width:min(560px,94vw);max-height:90vh;overflow:auto;padding:24px;animation:pop .2s var(--ease)}
+@keyframes fade{from{opacity:0}}
+@keyframes pop{from{opacity:0;transform:translateY(10px) scale(.98)}}
+.modal h3{margin:0 0 4px;font-size:18px;font-weight:600}
+.modal .sub{margin:0 0 18px;font-size:13px;color:var(--color-muted-fg)}
+.seg{display:flex;background:var(--color-muted);border-radius:var(--radius);padding:4px;gap:4px;margin-bottom:16px}
+.seg button{flex:1;height:36px;border:0;background:none;border-radius:6px;cursor:pointer;
+  font-weight:600;font-size:13.5px;color:#475569;transition:all .2s var(--ease)}
+.seg button[aria-pressed="true"]{background:#fff;color:var(--color-primary);box-shadow:var(--shadow-sm)}
+.seg button.in[aria-pressed="true"]{color:var(--color-income)}
+.seg button.out[aria-pressed="true"]{color:var(--color-expense)}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+.field label .req{color:var(--color-destructive);margin-left:2px}
+.field input,.field select,.field textarea{
+  width:100%;height:44px;padding:0 14px;border:1px solid #E2E8F0;border-radius:var(--radius);
+  background:#fff;font-size:15px;transition:border-color .2s var(--ease),box-shadow .2s var(--ease)}
+.field textarea{height:auto;padding:11px 14px;resize:vertical;min-height:74px;font-size:14px}
+.field input:focus,.field select:focus,.field textarea:focus{
+  outline:none;border-color:var(--color-primary);box-shadow:0 0 0 3px rgba(15,23,42,.12)}
+.field .help{font-size:12px;color:var(--color-muted-fg);margin-top:5px}
+.field .err{font-size:12.5px;color:var(--color-destructive-text);margin-top:5px;display:none}
+.field.invalid input,.field.invalid select{border-color:var(--color-destructive)}
+.field.invalid .err{display:block}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.error-summary{display:none;border:1px solid rgba(220,38,38,.35);background:rgba(220,38,38,.06);
+  color:var(--color-destructive-text);border-radius:var(--radius);padding:11px 13px;margin-bottom:16px;
+  font-size:13px}
+.error-summary.show{display:block}
+.error-summary ul{margin:6px 0 0;padding-left:18px}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+.toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
+  background:var(--color-primary);color:#fff;padding:11px 18px;border-radius:999px;font-size:13.5px;
+  box-shadow:var(--shadow-lg);opacity:0;pointer-events:none;transition:all .25s var(--ease);z-index:80}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* FAB (mobile) */
+.fab{display:none;position:fixed;right:16px;bottom:16px;z-index:50;height:48px;padding:0 20px;
+  border-radius:999px;border:0;background:var(--color-primary);color:#fff;font-weight:600;
+  box-shadow:var(--shadow-lg);cursor:pointer;align-items:center;gap:6px}
+.overlay{position:fixed;inset:0;background:rgba(15,23,42,.4);z-index:35;display:none}
+
+/* ============ Responsive ============ */
+@media (max-width:1180px){ .stats{grid-template-columns:repeat(2,1fr)} .grid-2{grid-template-columns:1fr} }
+@media (max-width:768px){
+  .sidebar{transform:translateX(-100%);box-shadow:var(--shadow-lg)}
+  .sidebar.open{transform:none}
+  .overlay.open{display:block}
+  .main{margin-left:0}
+  .hamburger{display:grid}
+  .topbar{padding:0 var(--space-md);height:56px}
+  .content{padding:var(--space-md);padding-bottom:88px;gap:var(--space-md)}
+  .stats{grid-template-columns:repeat(2,1fr);gap:10px}
+  .stat .value{font-size:24px}
+  .page-head h2{font-size:20px}
+  .btn-primary.top-cta{display:none}
+  .fab{display:inline-flex}
+  .user-chip small{display:none}
+  /* 表格转卡片列表 */
+  .table-scroll thead{display:none}
+  .table-scroll table,.table-scroll tbody,.table-scroll tr,.table-scroll td{display:block;width:100%}
+  .table-scroll tr{border:1px solid var(--color-border);border-radius:var(--radius);
+    margin-bottom:10px;padding:6px 4px;background:rgba(255,255,255,.6)}
+  .table-scroll td{border-bottom:0;padding:5px 10px;display:flex;justify-content:space-between;gap:12px}
+  .table-scroll td::before{content:attr(data-label);color:var(--color-muted-fg);font-size:12.5px;flex:none}
+  .table-scroll td.amt-cell{text-align:right}
+}
+@media (max-width:375px){ .stats{grid-template-columns:1fr} .field-row{grid-template-columns:1fr} }
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}
+  .progress > span{width:var(--w)}
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ================= Sidebar ================= -->
+  <aside class="sidebar" id="sidebar" aria-label="主导航">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">班费收支系统</div>
+        <div class="brand-sub">计科 2201 班</div>
+      </div>
+    </div>
+
+    <div class="nav-label">总览</div>
+    <button class="nav-item active" aria-current="page">
+      <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+      仪表盘
+    </button>
+
+    <div class="nav-label">账目</div>
+    <button class="nav-item">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+      账本明细 <span class="badge num">128</span>
+    </button>
+    <button class="nav-item">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M12 17V3"/><path d="m6 11 6 6 6-6"/><path d="M19 21H5"/></svg>
+      收入登记
+    </button>
+    <button class="nav-item">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="m18 11-6-6-6 6"/><path d="M5 3h14"/></svg>
+      支出登记
+    </button>
+
+    <div class="nav-label">班级</div>
+    <button class="nav-item">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      成员缴费 <span class="badge num">4</span>
+    </button>
+    <button class="nav-item">
+      <svg class="icon" viewBox="0 0 24 24"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>
+      公告
+    </button>
+    <button class="nav-item">
+      <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      设置
+    </button>
+
+    <div class="sidebar-foot">余额由流水实时对账<br><span class="num">v1.0 · 标准版</span></div>
+  </aside>
+  <div class="overlay" id="overlay"></div>
+
+  <!-- ================= Main ================= -->
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn hamburger" id="hamburger" aria-label="打开导航菜单" aria-expanded="false">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>
+      </button>
+      <div>
+        <div class="crumb">首页 / 仪表盘</div>
+        <h1>班级账目总览</h1>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn btn-primary top-cta" data-open-modal>
+        <svg class="icon" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        记一笔
+      </button>
+      <button class="user-chip">
+        <span class="avatar" aria-hidden="true">张</span>
+        <span style="text-align:left">张伟<small>班级管理员</small></span>
+      </button>
+    </header>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h2>仪表盘</h2>
+          <p>数据更新于 2026-09-25 14:32 · 单位：元</p>
+        </div>
+      </div>
+
+      <!-- ---------- 统计卡 ---------- -->
+      <section class="grid stats" aria-label="关键指标">
+        <div class="card stat">
+          <div class="label">当前余额</div>
+          <div class="value">¥8,432.50</div>
+          <div class="delta">较上月 <span class="up">+¥1,240.00</span></div>
+        </div>
+        <div class="card stat">
+          <div class="label">本月收入 <span class="chip income">收入</span></div>
+          <div class="value">¥4,800.00</div>
+          <div class="delta">共 <span class="num">12</span> 笔 · 9 月</div>
+        </div>
+        <div class="card stat">
+          <div class="label">本月支出 <span class="chip expense">支出</span></div>
+          <div class="value">¥2,340.00</div>
+          <div class="delta">共 <span class="num">9</span> 笔 · 9 月</div>
+        </div>
+        <div class="card stat">
+          <div class="label">缴费完成率</div>
+          <div class="value">90.5%</div>
+          <div class="progress" style="margin-top:8px"><span style="--w:90.5%"></span></div>
+          <div class="delta" style="margin-top:8px">已交 <span class="num">38</span> / 42 人 · 剩 4 人</div>
+        </div>
+      </section>
+
+      <!-- ---------- 图表 ---------- -->
+      <section class="grid grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h3>近 6 个月收支趋势</h3>
+            <span class="hint">折线图 · 悬浮查看数值</span>
+            <div class="spacer"></div>
+            <div class="legend">
+              <span><i style="background:#22C55E"></i>收入</span>
+              <span><i style="background:#EF4444;height:0;border-top:3px dashed #EF4444"></i>支出</span>
+            </div>
+          </div>
+          <svg class="chart" viewBox="0 0 640 236" aria-hidden="true">
+            <desc>趋势折线图，数据同时以下方表格提供给读屏用户</desc>
+            <!-- 网格 & Y 轴 -->
+            <g>
+              <line class="gridline" x1="48" y1="16"  x2="632" y2="16"/>
+              <line class="gridline" x1="48" y1="64"  x2="632" y2="64"/>
+              <line class="gridline" x1="48" y1="112" x2="632" y2="112"/>
+              <line class="gridline" x1="48" y1="160" x2="632" y2="160"/>
+              <line class="gridline" x1="48" y1="208" x2="632" y2="208"/>
+              <text x="40" y="20"  text-anchor="end">5000</text>
+              <text x="40" y="68"  text-anchor="end">3750</text>
+              <text x="40" y="116" text-anchor="end">2500</text>
+              <text x="40" y="164" text-anchor="end">1250</text>
+              <text x="40" y="212" text-anchor="end">0</text>
+            </g>
+            <!-- 收入面积 + 线 -->
+            <path d="M48,85.1 L163,150.4 L278,46.7 L394,177.3 L509,185 L624,23.7 L624,208 L48,208 Z"
+                  fill="rgba(34,197,94,.14)"/>
+            <polyline points="48,85.1 163,150.4 278,46.7 394,177.3 509,185 624,23.7"
+                      fill="none" stroke="#22C55E" stroke-width="2.5"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+            <!-- 支出虚线 -->
+            <polyline points="48,173.4 163,156.2 278,127.4 394,190.7 509,138.9 624,118.1"
+                      fill="none" stroke="#EF4444" stroke-width="2.5" stroke-dasharray="6 4"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+            <!-- 数据点 + 直接标注 -->
+            <g fill="#fff" stroke="#22C55E" stroke-width="2.5">
+              <circle cx="48" cy="85.1" r="3.5"/><circle cx="163" cy="150.4" r="3.5"/>
+              <circle cx="278" cy="46.7" r="3.5"/><circle cx="394" cy="177.3" r="3.5"/>
+              <circle cx="509" cy="185" r="3.5"/><circle cx="624" cy="23.7" r="3.5"/>
+            </g>
+            <text x="624" y="14" text-anchor="end" fill="#15803D" font-weight="600">4800</text>
+            <text x="624" y="134" text-anchor="end" fill="#B91C1C" font-weight="600">2340</text>
+            <!-- X 轴标签 -->
+            <g text-anchor="middle">
+              <text x="48"  y="228">4月</text><text x="163" y="228">5月</text>
+              <text x="278" y="228">6月</text><text x="394" y="228">7月</text>
+              <text x="509" y="228">8月</text><text x="624" y="228">9月</text>
+            </g>
+          </svg>
+          <!-- 图表的无障碍数据表兜底（视觉隐藏，读屏可读） -->
+          <table class="sr-only">
+            <caption>近 6 个月收支趋势数据表（单位：元）</caption>
+            <thead><tr><th scope="col">月份</th><th scope="col">收入</th><th scope="col">支出</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">4月</th><td>3200</td><td>900</td></tr>
+              <tr><th scope="row">5月</th><td>1500</td><td>1350</td></tr>
+              <tr><th scope="row">6月</th><td>4200</td><td>2100</td></tr>
+              <tr><th scope="row">7月</th><td>800</td><td>450</td></tr>
+              <tr><th scope="row">8月</th><td>600</td><td>1800</td></tr>
+              <tr><th scope="row">9月</th><td>4800</td><td>2340</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>支出分类占比</h3>
+            <span class="hint">近 6 月 · 合计 ¥8,940</span>
+          </div>
+          <div class="donut-wrap">
+            <svg width="150" height="150" viewBox="0 0 150 150" aria-hidden="true">
+              <g transform="rotate(-90 75 75)">
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#EEF2F7" stroke-width="20"/>
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#0F172A" stroke-width="20"
+                        stroke-dasharray="118.7 220.6" stroke-dashoffset="0"/>
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#334155" stroke-width="20"
+                        stroke-dasharray="67.9 271.4" stroke-dashoffset="-118.7"/>
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#2563EB" stroke-width="20"
+                        stroke-dasharray="50.9 288.4" stroke-dashoffset="-186.6"/>
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#22C55E" stroke-width="20"
+                        stroke-dasharray="40.7 298.6" stroke-dashoffset="-237.5"/>
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#F59E0B" stroke-width="20"
+                        stroke-dasharray="33.9 305.4" stroke-dashoffset="-278.2"/>
+                <circle cx="75" cy="75" r="54" fill="none" stroke="#94A3B8" stroke-width="20"
+                        stroke-dasharray="27.1 312.2" stroke-dashoffset="-312.1"/>
+              </g>
+              <text class="donut-center" x="75" y="72" font-size="19" font-weight="600">¥8,940</text>
+              <text class="donut-center sub" x="75" y="90">6 个月支出</text>
+            </svg>
+            <div class="cat-list">
+              <div class="cat-row"><span class="dot" style="background:#0F172A"></span>活动物资<span class="amt">¥3,129.00</span><span class="pct">35%</span></div>
+              <div class="cat-row"><span class="dot" style="background:#334155"></span>打印资料<span class="amt">¥1,788.00</span><span class="pct">20%</span></div>
+              <div class="cat-row"><span class="dot" style="background:#2563EB"></span>饮用水<span class="amt">¥1,341.00</span><span class="pct">15%</span></div>
+              <div class="cat-row"><span class="dot" style="background:#22C55E"></span>班会布置<span class="amt">¥1,072.80</span><span class="pct">12%</span></div>
+              <div class="cat-row"><span class="dot" style="background:#F59E0B"></span>交通<span class="amt">¥894.00</span><span class="pct">10%</span></div>
+              <div class="cat-row"><span class="dot" style="background:#94A3B8"></span>其他<span class="amt">¥715.20</span><span class="pct">8%</span></div>
+            </div>
+          </div>
+          <p class="muted" style="font-size:12px;margin:14px 0 0">
+            环形图 ≤6 类，超出部分归入「其他」；数值同时以表格列出，不依赖颜色识别。
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------- 流水 + 公告 ---------- -->
+      <section class="grid grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h3>最新收支</h3>
+            <span class="hint">共 128 条</span>
+            <div class="spacer"></div>
+            <button class="btn btn-ghost btn-sm">查看全部</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <caption class="sr-only" style="position:absolute;left:-9999px">最近五笔班费收支记录</caption>
+              <thead>
+                <tr><th scope="col">日期</th><th scope="col">摘要</th><th scope="col">类别</th>
+                    <th scope="col" style="text-align:right">金额</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td data-label="日期" class="num muted">09-25</td>
+                  <td data-label="摘要">收取 9 月班费 · 张伟</td>
+                  <td data-label="类别"><span class="tag">班费收取</span></td>
+                  <td data-label="金额" class="amt-cell amt-in">+¥50.00</td>
+                </tr>
+                <tr>
+                  <td data-label="日期" class="num muted">09-24</td>
+                  <td data-label="摘要">购买运动会矿泉水 2 箱</td>
+                  <td data-label="类别"><span class="tag">活动物资</span></td>
+                  <td data-label="金额" class="amt-cell amt-out">−¥86.50</td>
+                </tr>
+                <tr>
+                  <td data-label="日期" class="num muted">09-23</td>
+                  <td data-label="摘要">期末复习资料打印 62 份</td>
+                  <td data-label="类别"><span class="tag">打印资料</span></td>
+                  <td data-label="金额" class="amt-cell amt-out">−¥132.00</td>
+                </tr>
+                <tr>
+                  <td data-label="日期" class="num muted">09-22</td>
+                  <td data-label="摘要">收取 9 月班费 · 李娜</td>
+                  <td data-label="类别"><span class="tag">班费收取</span></td>
+                  <td data-label="金额" class="amt-cell amt-in">+¥50.00</td>
+                </tr>
+                <tr>
+                  <td data-label="日期" class="num muted">09-20</td>
+                  <td data-label="摘要">9 月桶装水 4 桶</td>
+                  <td data-label="类别"><span class="tag">饮用水</span></td>
+                  <td data-label="金额" class="amt-cell amt-out">−¥60.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="grid" style="align-content:start">
+          <div class="card">
+            <div class="card-head"><h3>班级公告</h3>
+              <div class="spacer"></div><button class="btn btn-ghost btn-sm">发布</button></div>
+            <div class="notice-item">
+              <span class="notice-pin">置顶</span>
+              <div>
+                <h4>关于秋季运动会班费使用的说明</h4>
+                <p>本次运动会购置饮用水、号码布与医药包共支出 ¥218.50，明细与票据已上传，可在账本中查看。</p>
+              </div>
+            </div>
+            <div class="notice-item">
+              <span class="notice-pin">置顶</span>
+              <div>
+                <h4>9 月班费收取（¥50/人）</h4>
+                <p>请于 9 月 30 日前交给生活委员或微信转账，转账请备注姓名。目前 38/42 人已交。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h3>缴费状态</h3><span class="hint">2026 秋季班费 · ¥50/人</span></div>
+            <div class="progress"><span style="--w:90.5%"></span></div>
+            <div class="progress-meta">
+              <span>已交 <b class="num" style="color:var(--color-income)">38</b> 人</span>
+              <span>未交 <b class="num" style="color:#92400E">4</b> 人</span>
+              <span class="num">90.5%</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+              <span class="tag ok">已交 38</span>
+              <span class="tag warn">未交 4</span>
+              <span class="tag">截止 09-30</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- 移动端主操作 -->
+<button class="fab" data-open-modal aria-label="记一笔收支">
+  <svg class="icon" viewBox="0 0 24 24" style="width:17px;height:17px"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+  记一笔
+</button>
+
+<!-- ================= 记一笔 · 表单弹窗 ================= -->
+<div class="modal-overlay" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal">
+    <h3 id="modal-title">记一笔</h3>
+    <p class="sub">录入后将计入班级余额，可在「账本明细」中作废（红冲）。</p>
+
+    <!-- 提交失败时的错误摘要：role=alert 且可获得焦点 -->
+    <div class="error-summary" id="summary" role="alert" tabindex="-1" aria-labelledby="summary-title">
+      <b id="summary-title">表单有 <span id="err-count">0</span> 处问题需要修改：</b>
+      <ul id="err-list"></ul>
+    </div>
+
+    <div class="seg" role="group" aria-label="收支类型">
+      <button type="button" class="out" aria-pressed="true" data-type="EXPENSE">支出</button>
+      <button type="button" class="in" aria-pressed="false" data-type="INCOME">收入</button>
+    </div>
+
+    <form id="rec-form" novalidate>
+      <div class="field-row">
+        <div class="field" id="f-amount">
+          <label for="amount">金额<span class="req" aria-hidden="true">*</span></label>
+          <input id="amount" name="amount" inputmode="decimal" placeholder="0.00" autocomplete="off"
+                 aria-describedby="amount-help amount-err" required>
+          <div class="help" id="amount-help">最多两位小数，单位：元</div>
+          <div class="err" id="amount-err"></div>
+        </div>
+        <div class="field" id="f-date">
+          <label for="date">发生日期<span class="req" aria-hidden="true">*</span></label>
+          <input id="date" name="date" type="date" value="2026-09-25" aria-describedby="date-err" required>
+          <div class="err" id="date-err"></div>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field" id="f-category">
+          <label for="category">类别<span class="req" aria-hidden="true">*</span></label>
+          <select id="category" name="category" aria-describedby="category-err" required>
+            <option value="">请选择类别</option>
+            <option>活动物资</option><option>打印资料</option>
+            <option>饮用水</option><option>班会布置</option><option>交通</option><option>其他</option>
+          </select>
+          <div class="err" id="category-err"></div>
+        </div>
+        <div class="field" id="f-channel">
+          <label for="channel">支付方式</label>
+          <select id="channel" name="channel">
+            <option>微信</option><option>支付宝</option><option>现金</option><option>银行卡</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field" id="f-title">
+        <label for="title">摘要<span class="req" aria-hidden="true">*</span></label>
+        <input id="title" name="title" maxlength="60" placeholder="如：购买运动会矿泉水 2 箱"
+               aria-describedby="title-err title-help" required>
+        <div class="help" id="title-help">写清楚用途，方便同学核对（2–60 字）</div>
+        <div class="err" id="title-err"></div>
+      </div>
+
+      <div class="field" id="f-remark">
+        <label for="remark">备注</label>
+        <textarea id="remark" placeholder="票据编号、参与人等（选填）"></textarea>
+      </div>
+
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="cancel">取消</button>
+        <button type="submit" class="btn btn-danger" id="submit">保存支出</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const $$ = s => Array.from(document.querySelectorAll(s));
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---------- 移动端抽屉 ---------- */
+  const sidebar=$('#sidebar'), overlay=$('#overlay'), burger=$('#hamburger');
+  const toggleNav = open => {
+    sidebar.classList.toggle('open', open);
+    overlay.classList.toggle('open', open);
+    burger.setAttribute('aria-expanded', String(open));
+  };
+  burger.addEventListener('click', ()=>toggleNav(!sidebar.classList.contains('open')));
+  overlay.addEventListener('click', ()=>toggleNav(false));
+
+  /* ---------- 侧栏选中态（原型：仅演示） ---------- */
+  $$('.nav-item').forEach(btn=>btn.addEventListener('click', ()=>{
+    $$('.nav-item').forEach(b=>{b.classList.remove('active');b.removeAttribute('aria-current')});
+    btn.classList.add('active'); btn.setAttribute('aria-current','page');
+    if(innerWidth<=768) toggleNav(false);
+  }));
+
+  /* ---------- 弹窗 + 焦点管理 ---------- */
+  const modal=$('#modal'); let lastFocus=null;
+  function openModal(){
+    lastFocus=document.activeElement;
+    modal.classList.add('open');
+    document.body.style.overflow='hidden';
+    setTimeout(()=>$('#amount').focus(), reduce?0:60);
+  }
+  function closeModal(){
+    modal.classList.remove('open');
+    document.body.style.overflow='';
+    clearErrors();
+    lastFocus && lastFocus.focus();   /* 焦点还给触发按钮 */
+  }
+  $$('[data-open-modal]').forEach(b=>b.addEventListener('click', openModal));
+  $('#cancel').addEventListener('click', closeModal);
+  modal.addEventListener('mousedown', e=>{ if(e.target===modal) closeModal(); });
+  document.addEventListener('keydown', e=>{
+    if(e.key==='Escape' && modal.classList.contains('open')) closeModal();
+    /* 简易焦点陷阱 */
+    if(e.key==='Tab' && modal.classList.contains('open')){
+      const f=modal.querySelectorAll('button,input,select,textarea,[tabindex]:not([tabindex="-1"])');
+      const first=f[0], last=f[f.length-1];
+      if(e.shiftKey && document.activeElement===first){e.preventDefault();last.focus();}
+      else if(!e.shiftKey && document.activeElement===last){e.preventDefault();first.focus();}
+    }
+  });
+
+  /* ---------- 收/支切换 ---------- */
+  let type='EXPENSE';
+  $$('.seg button').forEach(b=>b.addEventListener('click', ()=>{
+    $$('.seg button').forEach(x=>x.setAttribute('aria-pressed','false'));
+    b.setAttribute('aria-pressed','true');
+    type=b.dataset.type;
+    const save=$('#submit');
+    save.textContent = type==='INCOME' ? '保存收入' : '保存支出';
+    save.classList.toggle('btn-danger', type==='EXPENSE');
+    save.classList.toggle('btn-accent', type==='INCOME');
+    $('#title').placeholder = type==='INCOME' ? '如：收取 9 月班费 · 王小明' : '如：购买运动会矿泉水 2 箱';
+    const opt=$('#category');
+    opt.options[0].textContent = type==='INCOME' ? '请选择收入类别' : '请选择支出类别';
+  }));
+
+  /* ---------- 表单校验：blur 即校验 + 就地错误 + 顶部错误摘要 ---------- */
+  const rules = {
+    amount: v => {
+      if(!v.trim()) return '请输入金额';
+      if(!/^\d+(\.\d{1,2})?$/.test(v.trim())) return '金额只能是数字，且最多两位小数';
+      if(parseFloat(v)<=0) return '金额必须大于 0';
+      if(parseFloat(v)>100000) return '单笔金额不能超过 100,000 元';
+      return '';
+    },
+    date: v => v ? '' : '请选择发生日期',
+    category: v => v ? '' : (type==='INCOME'?'请选择收入类别':'请选择支出类别'),
+    title: v => {
+      if(!v.trim()) return '请填写摘要';
+      if(v.trim().length<2) return '摘要至少 2 个字';
+      return '';
+    }
+  };
+  function setError(id,msg){
+    const field=$('#f-'+id), input=$('#'+id), err=$('#'+id+'-err');
+    field.classList.toggle('invalid', !!msg);
+    err.textContent=msg||'';
+    input.setAttribute('aria-invalid', msg?'true':'false');
+    if(msg){ input.setAttribute('aria-describedby', `${id}-err`); }
+  }
+  function clearErrors(){
+    Object.keys(rules).forEach(k=>setError(k,''));
+    $('#summary').classList.remove('show');
+  }
+  Object.keys(rules).forEach(id=>{
+    const el=$('#'+id);
+    el.addEventListener('blur', ()=>setError(id, rules[id](el.value)));
+    el.addEventListener('input', ()=>{
+      if($('#f-'+id).classList.contains('invalid')) setError(id, rules[id](el.value));
+    });
+  });
+
+  /* ---------- 提交 ---------- */
+  $('#rec-form').addEventListener('submit', e=>{
+    e.preventDefault();
+    const errs=[];
+    Object.keys(rules).forEach(id=>{
+      const msg=rules[id]($('#'+id).value);
+      setError(id,msg);
+      if(msg) errs.push({id,msg});
+    });
+
+    const summary=$('#summary');
+    if(errs.length){
+      $('#err-count').textContent=errs.length;
+      $('#err-list').innerHTML=errs.map(x=>
+        `<li><a href="#${x.id}">${x.msg}</a></li>`).join('');
+      summary.classList.add('show');
+      summary.focus();                 /* 焦点移到错误摘要，键盘/读屏可发现 */
+      return;
+    }
+    summary.classList.remove('show');
+
+    /* 演示：格式化金额 + 成功反馈 */
+    const v=parseFloat($('#amount').value).toFixed(2);
+    closeModal();
+    $('#rec-form').reset();
+    $('#date').value='2026-09-25';
+    toast(`已保存${type==='INCOME'?'收入':'支出'} ¥${Number(v).toLocaleString('zh-CN',{minimumFractionDigits:2})}`);
+  });
+
+  /* ---------- 金额失焦格式化 ---------- */
+  $('#amount').addEventListener('blur', e=>{
+    const v=e.target.value.trim();
+    if(/^\d+(\.\d{1,2})?$/.test(v)){
+      e.target.value=Number(v).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    }
+  });
+  $('#amount').addEventListener('focus', e=>{
+    e.target.value=e.target.value.replace(/,/g,'');
+  });
+
+  /* ---------- Toast ---------- */
+  let t;
+  function toast(msg){
+    const el=$('#toast'); el.textContent=msg; el.classList.add('show');
+    clearTimeout(t); t=setTimeout(()=>el.classList.remove('show'), 2600);
+  }
+})();
+</script>
+</body>
+</html>

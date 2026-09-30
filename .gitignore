@@ -1,0 +1,63 @@
+# ---- 密钥与本地环境（绝不入库）----
+.env
+.env.local
+*.pem
+*.key
+*.p12
+*.jks
+id_rsa*
+
+# ---- Python 后端 ----
+server-py/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# 小票图片是运行时数据（compose 里走 named volume，本地直接落盘）
+server-py/uploads/
+
+# ---- 前端 ----
+web/node_modules/
+web/dist/
+web/.vite/
+*.local
+
+# ---- Java 存档（server/ 不参与运行）----
+server/target/
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 打包产物与备份（别把 60MB+ 的压缩包和数据库 dump 提交进来）----
+*.7z
+*.zip
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.sql
+*.sql.gz
+backup/
+backups/
+
+# ---- 日志 ----
+*.log
+logs/
+
+# ---- 编码提醒（不是 gitignore 规则，是给维护者看的）----
+# 提交前请确认：nginx / shell / Dockerfile / *.sql / *.json / *.yml 这些
+# **被程序按字节解析**的文件保存为 UTF-8 **无 BOM**（带 BOM 会让 nginx 报
+# unknown directive " server"、让 schema.sql 静默少建一张表）。
+# 而 docs/*.md 这类**给人读**的文档需要**保留 BOM**（中文 Windows 的 GBK 工具依赖它）。
+# 自动化检查见 server-py/tests/api_regression.py 的第一个用例 test_a00_encoding_guards。
+# **不要用 Windows 记事本编辑这些文件**（默认写 GBK，部分版本还会追加 BOM）。

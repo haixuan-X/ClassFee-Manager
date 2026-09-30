@@ -1,0 +1,335 @@
+/* ============================================================================
+   班费收支系统 · Design Tokens
+   来源：design-system/classfee-manager/MASTER.md —— 全局唯一视觉真相
+   规则：组件里禁止写裸 hex，一律引用这里的语义变量
+   ========================================================================== */
+
+/* 全局盒模型：宽高一律含 padding/border，否则 width:100% + padding 会撑出横向滚动 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  /* ---------- Color ---------- */
+  --color-primary: #0f172a;
+  --color-on-primary: #ffffff;
+  --color-secondary: #1e293b;
+  --color-accent: #22c55e;
+  --color-on-accent: #0f172a;
+  /* accent 的「文字/小图形」变体：#22c55e 对白底只有 2.3:1，达不到 §8 的 4.5:1，
+     文字与小尺寸图形一律用这个（对白底 7.0:1、对灰底 6.5:1），亮绿只留给大色块/图表系列色 */
+  --color-accent-text: #166534;
+
+  --color-background: #f5f7fb;
+  --color-foreground: #0f172a;
+
+  --color-card: rgba(255, 255, 255, 0.72);
+  --color-card-foreground: #0f172a;
+  --color-surface: #ffffff;
+  --color-muted: #eef2f7;
+  --color-muted-fg: #5a6779;
+  --color-border: rgba(15, 23, 42, 0.08);
+
+  --color-destructive: #dc2626;
+  --color-destructive-text: #b91c1c;
+  --color-income: #146c36;
+  --color-expense: #dc2626;
+  --color-info: #2563eb;
+  --ring: 0 0 0 3px rgba(37, 99, 235, 0.35);
+
+  /* 图表配色（MASTER.md §1.2），ECharts 从这里取值，组件/图表都不写裸 hex */
+  --chart-income: #22c55e;
+  --chart-expense: #ef4444;
+  --chart-balance: #2563eb;
+  --chart-slice-1: #2563eb;
+  --chart-slice-2: #22c55e;
+  --chart-slice-3: #f59e0b;
+  --chart-slice-4: #8b5cf6;
+  --chart-slice-5: #14b8a6;
+  --chart-slice-6: #64748b;
+
+  /* ---------- Spacing ---------- */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+
+  /* ---------- Shadow ---------- */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.12);
+
+  /* ---------- Radius ---------- */
+  --radius: 8px;
+  --radius-lg: 12px;
+
+  /* ---------- Typography ---------- */
+  --font-body: 'Fira Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --font-num: 'Fira Code', 'SFMono-Regular', Consolas, monospace;
+
+  /* ---------- Motion ---------- */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration: 200ms;
+
+  /* ============================================================================
+     Element Plus 变量覆盖 —— 让组件库对齐上面的设计 token
+     ========================================================================== */
+  --el-color-primary: #0f172a;
+  --el-color-primary-light-3: #556072;
+  --el-color-primary-light-5: #7d8796;
+  --el-color-primary-light-7: #a6adb9;
+  --el-color-primary-light-8: #bcc1ca;
+  --el-color-primary-light-9: #e9ebee;
+  --el-color-primary-dark-2: #0b1220;
+
+  --el-color-success: #146c36;
+  --el-color-success-light-3: #5b8f71;
+  --el-color-success-light-5: #8ab09a;
+  --el-color-success-light-7: #b8d1c3;
+  --el-color-success-light-8: #d0e0d6;
+  --el-color-success-light-9: #e8f4ee;
+
+  --el-color-danger: #dc2626;
+  --el-color-danger-light-3: #e67979;
+  --el-color-danger-light-5: #eda1a1;
+  --el-color-danger-light-7: #f4c8c8;
+  --el-color-danger-light-8: #f8dcdc;
+  --el-color-danger-light-9: #fdf0f0;
+
+  --el-color-warning: #b45309;
+  --el-color-error: #dc2626;
+  --el-color-info: #5a6779;
+
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-font-family: var(--font-body);
+  /* 控件基础高度 40px（MASTER §8：触控目标 ≥40px）；EP 默认 32px */
+  --el-component-size: 40px;
+  --el-pagination-button-width: 40px;
+  --el-pagination-button-height: 40px;
+  --el-text-color-primary: #0f172a;
+  --el-text-color-regular: #334155;
+  --el-text-color-secondary: #5a6779;
+  /* 占位符默认 #a8abb2 对比度仅 2.29（WCAG 要求 4.5），统一压到 5.36:1 */
+  --el-text-color-placeholder: #5a6779;
+  --el-input-placeholder-color: #5a6779;
+  --el-fill-color-light: #eef2f7;
+  --el-border-color: #e2e8f0;
+  --el-border-color-light: #eef2f7;
+  --el-bg-color-page: #f5f7fb;
+}
+
+/* ============================================================================
+   Base
+   ========================================================================== */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 玻璃拟态背景光斑（与原型一致） */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(600px 400px at 12% -10%, rgba(34, 197, 94, 0.16), transparent 60%),
+    radial-gradient(700px 500px at 100% 0%, rgba(37, 99, 235, 0.14), transparent 60%),
+    radial-gradient(500px 400px at 60% 110%, rgba(139, 92, 246, 0.1), transparent 60%);
+}
+
+/* 键盘可达：焦点环全局可见 */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* 金额/日期等需要等宽数字 */
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 玻璃卡片 */
+.glass-card {
+  background: var(--color-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--duration) var(--ease);
+}
+
+.glass-card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* 金额方向：符号 + 颜色双重编码，不依赖颜色单独传达信息 */
+.amount-in {
+  color: var(--color-income);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.amount-out {
+  color: var(--color-expense);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 仅供读屏的文本 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Element Plus 微调 */
+.el-button {
+  font-weight: 600;
+  /* EP 按钮固定 height:32px（含 link / small / 弹窗按钮），min-height/min-width 提到 40px 触控下限 */
+  min-height: 40px;
+  min-width: 40px;
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：EP 下拉菜单项默认 32px，手指点不准 */
+.el-dropdown-menu__item {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：EP 单行输入 = 外框 40 − 1px×2 内边距 = 内层 38，补齐为 40 */
+.el-input__wrapper {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.el-input {
+  --el-input-inner-height: var(--el-input-height, var(--el-component-size));
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：select 外壳默认 32px（组件内未引用 --el-component-size） */
+.el-select__wrapper {
+  min-height: 40px;
+}
+
+/* 光标提示（MASTER.md §7/§8）：select 的搜索框是只读的，点按即展开下拉 */
+.el-select,
+.el-select__input {
+  cursor: pointer;
+}
+
+/* 日期区间：外壳空白处点按打开面板；框内可键入日期，保留 text 光标 */
+.el-date-editor--daterange {
+  cursor: pointer;
+}
+
+.el-date-editor--daterange .el-range-input {
+  cursor: text;
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：EP 把分页按钮尺寸声明在组件作用域，:root 覆盖会被遮蔽 */
+.el-pagination {
+  --el-pagination-button-width: 40px;
+  --el-pagination-button-height: 40px;
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：抽屉标题栏关闭按钮默认 22×32 */
+.el-drawer__close-btn {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：日期面板默认 箭头 24×16 / 日期格 30 高 / 时间项 32 高
+   （时间轮盘的选中定位按 li 实测高度计算，改 CSS 不会破坏其滚动数学） */
+.el-picker-panel__icon-btn {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.el-date-picker__header-label {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.el-date-table td {
+  padding-top: 0;
+  padding-bottom: 0;
+  height: 40px;
+}
+
+/* EP 原样式：td 30 高 + 格子 30 高 + 数字绝对定位不随格子居中，一起改齐 */
+.el-date-table td .el-date-table-cell {
+  height: 40px;
+  padding: 0;
+}
+
+.el-date-table td .el-date-table-cell .el-date-table-cell__text {
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.el-time-spinner__item {
+  height: 40px;
+  line-height: 40px;
+}
+
+/* 时间轮盘可视高度按 6 项 × 40px 撑齐（EP 默认 192=6×32） */
+.el-time-spinner__wrapper {
+  max-height: 240px;
+}
+
+/* 触控目标 ≥40px（MASTER.md §8）：选择框下拉项默认 34px */
+.el-select-dropdown__item {
+  min-height: 40px;
+  line-height: 40px;
+}
+
+/* MASTER §4 表格：表头底色与行 hover 走语义 token（EP 默认写死浅灰）。
+   tokens.css 在 element-plus/dist 之后加载，同选择器下这里的覆盖生效 */
+.el-table {
+  --el-table-header-bg-color: var(--color-muted);
+  --el-table-row-hover-bg-color: rgba(15, 23, 42, 0.04);
+}
+
+.el-dialog {
+  border-radius: 16px;
+}
+
+/* 尊重「减少动效」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

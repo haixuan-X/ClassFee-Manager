@@ -1,0 +1,83 @@
+# 班费收支系统 · Docker Compose 一键部署
+#   启动：docker compose up -d --build
+#   访问：http://<服务器IP>   （账号不在代码里：在 .env 声明 CLASSFEE_TEACHER_USERNAME/PASSWORD 即创建班主任账号，之后由班主任在「成员管理」中建学生号）
+#   更新：替换源码后再次 up -d --build；停止：docker compose down（-v 会删库与小票图片卷，慎用）
+
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-classfee-root-change-me}
+      MARIADB_DATABASE: classfee
+      MARIADB_USER: classfee
+      MARIADB_PASSWORD: classfee123
+      TZ: Asia/Shanghai
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      # 官方镜像自带 healthcheck.sh，就绪前不启动后端
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  backend:
+    build: ./server-py
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      # 数据库连接（SQLAlchemy 原生写法：驱动://主机:端口/库名?参数）
+      # 字符集用 charset（PyMySQL 认这个）；时区不在这里配 —— 那是 Java 驱动的参数，
+      # 应用时区由上面的 TZ=Asia/Shanghai 保证
+      CLASSFEE_DB_URL: mysql+pymysql://db:3306/classfee?charset=utf8mb4
+      CLASSFEE_DB_USERNAME: classfee
+      CLASSFEE_DB_PASSWORD: classfee123
+      # JWT 签名密钥（后端签发/校验登录令牌用），生产请在 .env 里设真实随机串：openssl rand -hex 32
+      CLASSFEE_JWT_SECRET: ${CLASSFEE_JWT_SECRET:-classfee-compose-dev-secret-please-change-me-0123456789}
+      # 班主任（运营）账号：在同目录 .env 里「声明即生效」，仅在库中不存在时创建
+      #   CLASSFEE_TEACHER_USERNAME=test
+      #   CLASSFEE_TEACHER_PASSWORD=换成强口令
+      #   CLASSFEE_TEACHER_NAME=测试班主任          # 可选，姓名（默认同用户名）
+      #   CLASSFEE_TEACHER_ROLE=TEACHER        # 可选，ADMIN | TEACHER，默认 TEACHER
+      # 两项都为空 → 不创建任何账号（代码里不写死默认口令），登录页将无账号可登；
+      # 其余学生/管理员账号由班主任登录后在「成员管理」中创建。
+      CLASSFEE_TEACHER_USERNAME: ${CLASSFEE_TEACHER_USERNAME:-}
+      CLASSFEE_TEACHER_PASSWORD: ${CLASSFEE_TEACHER_PASSWORD:-}
+      CLASSFEE_TEACHER_NAME: ${CLASSFEE_TEACHER_NAME:-}
+      CLASSFEE_TEACHER_ROLE: ${CLASSFEE_TEACHER_ROLE:-TEACHER}
+      # 小票图片目录（默认即 /app/uploads，.env 可覆盖；容器重建不丢靠下方 named volume）
+      CLASSFEE_UPLOAD_DIR: ${CLASSFEE_UPLOAD_DIR:-/app/uploads}
+    # 小票图片持久化：容器重建不丢，备份需连同 classfee_uploads 卷一起备
+    volumes:
+      - classfee_uploads:/app/uploads
+    healthcheck:
+      # 用 Python 发请求，不依赖容器里有没有 curl/wget（slim 镜像两者都没有）。
+      # 未带 token 打 /api/auth/me 返回 401 = 服务已就绪（urlopen 遇 4xx 会抛
+      # HTTPError，所以要 catch 住并按码判定）。写成**单行** —— YAML 折行会被
+      # 拼成非法 Python（`import x; try:` 是语法错误），健康检查会永远失败。
+      test: ["CMD", "python", "-c", "import urllib.request,urllib.error,sys;exec(\"try:\\n r=urllib.request.urlopen('http://127.0.0.1:8080/api/auth/me',timeout=3)\\nexcept urllib.error.HTTPError as e:\\n sys.exit(0 if e.code in (401,403) else 1)\\nexcept Exception:\\n sys.exit(1)\")"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # 前端已通过 nginx 反代 /api；如需直连调试后端，放开下面两行：
+    # ports:
+    #   - "8080:8080"
+
+  frontend:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        # 等后端健康检查通过再起 nginx：避免首次打开页面时 /api 还没就绪
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+
+volumes:
+  db-data:
+  classfee_uploads:
