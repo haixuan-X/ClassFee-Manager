@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, Integer, Numeric, String, Text, text
+from sqlalchemy import Date, DateTime, Float, Integer, Numeric, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -123,20 +123,109 @@ class FeePayment(Base):
     )
 
 
-class SysNotice(Base):
-    __tablename__ = "sys_notice"
+# 第二十四轮：班级公告已整体移除，SysNotice 模型与 sys_notice 表一并删除。
+# 存量库里那张表会留下但**没有任何代码引用**，确认不需要历史公告后可手工 DROP。
+
+
+# ==================== 第二十三轮：学生信息登记 ====================
+# 字段定义与字段值全部落库：加字段是**数据操作**，不是改代码/改表。
+
+
+class StudentField(Base):
+    """字段定义：一列 = 一行。`field_key` 机器名稳定，改 `field_label` 不影响历史数据。"""
+
+    __tablename__ = "student_field"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     class_id: Mapped[int] = mapped_column(Integer)
-    title: Mapped[str] = mapped_column(String(80))
-    content: Mapped[str] = mapped_column(Text)
-    pinned: Mapped[int] = mapped_column(Integer, default=0)
+    field_key: Mapped[str] = mapped_column(String(64))
+    field_label: Mapped[str] = mapped_column(String(64))
+    field_type: Mapped[str] = mapped_column(String(8), default="TEXT")
+    is_system: Mapped[int] = mapped_column(Integer, default=0)
+    # 列序。用浮点是为了「插在两列中间」能取中点而不必重排后续所有列
+    # （DDL 里是 INT，能装下；SQLAlchemy 侧要用 Float 匹配，否则回读会被截断成整数）
+    sort: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[int] = mapped_column(Integer, default=1)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
     )
-    # 第十九轮审计：编辑/置顶/下架/恢复都写这里 —— 「这条公告最后是谁改的、什么时候」
-    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class StudentRecord(Base):
+    """学生记录：一行一人，**学号是锚点**（Excel 导入的 upsert 键）。
+
+    学号/姓名刻意不放进字段值表：它们要承担「这是谁的行」的定位职责。
+    `user_id` 是**可选**关联——导入名单不等于创建可登录账号。
+    """
+
+    __tablename__ = "student_record"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    class_id: Mapped[int] = mapped_column(Integer)
+    student_no: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(32))
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class StudentRecordValue(Base):
+    """字段值（EAV）。值统一按文本存，读写时按 `field_type` 解析/格式化。
+
+    选 EAV 而不是 JSON 列的两个理由：
+    1. 字段集合会变（加字段是常态），JSON 改一次结构就要迁移全表；
+    2. EAV 能对单字段建索引，将来「按学号/身份证号去重」不必全表扫。
+    """
+
+    __tablename__ = "student_record_value"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    record_id: Mapped[int] = mapped_column(Integer)
+    field_id: Mapped[int] = mapped_column(Integer)
+    value_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class StudentAccessRequest(Base):
+    """访问申请（流水）：班长/同学默认只看得到自己那一行，要看全部/要改必须申请。"""
+
+    __tablename__ = "student_access_request"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    class_id: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[int] = mapped_column(Integer)
+    scope: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="PENDING")
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+    handled_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reply: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class StudentGrant(Base):
+    """已授权（当前状态）：审批通过的结果。与「申请」分表——申请是流水，授权是状态。
+
+    分表而不是在申请行上查 status：同一 scope 可能被批过又撤销过多次，
+    只看「最新的那条申请状态」在撤销场景下会算错。
+    """
+
+    __tablename__ = "student_grant"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    class_id: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[int] = mapped_column(Integer)
+    scope: Mapped[str] = mapped_column(String(16))
+    granted_by: Mapped[int] = mapped_column(Integer)
+    granted_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )

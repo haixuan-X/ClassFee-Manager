@@ -16,7 +16,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
-from ..models import FeeBatch, FeePayment, FeeRecord, SysNotice, SysUser
+from ..models import FeeBatch, FeePayment, FeeRecord, SysUser
 from ..schemas import ProfileUpdateRequest, UserCreateRequest, UserUpdateRequest
 from ..security import LoginUser, hash_password, require_role_higher, role_level
 from ..serializers import fmt_dt
@@ -96,6 +96,12 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             raise BizException.bad_request(
                 "权限不足：不能创建权限高于自己的账号"
             )
+        # 第二十四轮：访客**只由班主任创建**（用户原话「访客权限由班主任创建」）。
+        # 等级校验拦不住这条——GUEST 和 MEMBER 同为 0 级，班长等级高、反而"能建"。
+        # 但访客是给领导/校方开的只读账号，属于"对外"的口子，
+        # 不该由班长随手开一个。
+        if role == "GUEST" and user.role != "TEACHER":
+            raise BizException.forbidden("访客账号只能由班主任创建")
         password = req.password or DEFAULT_INITIAL_PASSWORD
         username = req.username or ""
         # 学号：老师显式填的优先；没填时 MEMBER 默认回填登录名（列 VARCHAR(20)，超长则留空）
@@ -263,9 +269,6 @@ def delete_user(db: Session, user: LoginUser, user_id: int) -> None:
         n_payment = _count(db, FeePayment, FeePayment.user_id == target.id)
         if n_payment:
             refs.append(f"{n_payment} 条缴费记录")
-        n_notice = _count(db, SysNotice, SysNotice.created_by == target.id)
-        if n_notice:
-            refs.append(f"{n_notice} 条公告")
         n_batch = _count(db, FeeBatch, FeeBatch.created_by == target.id)
         if n_batch:
             refs.append(f"{n_batch} 个收费批次")

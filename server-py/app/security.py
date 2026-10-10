@@ -28,7 +28,7 @@ BEARER_PREFIX = "Bearer "
 class LoginUser:
     id: int
     username: str
-    role: str  # MEMBER(普通成员) / ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)
+    role: str  # MEMBER(普通成员) / GUEST(访客·只读) / ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)
     class_id: int
 
 
@@ -93,8 +93,13 @@ STAFF_ROLES = frozenset({"ADMIN", "MONITOR", "TEACHER"})
 # 记账权限同权 ≠ 管理权限同权。**班主任 > 班长 > 生活委员 > 普通成员**：
 # 低等级角色不能改动/停用/删除高等级角色的账号，否则班长能把班主任踢下线。
 # 数字越大权限越高；MEMBER=0（只读，不参与账号管理）。
+#
+# GUEST（访客，第二十四轮）：给领导/校方看的**纯只读**账号。
+# 等级取 0，与 MEMBER 同级——两者都不参与账号管理（改别人账号的接口
+# 本身就要求 STAFF_ROLES）。它比 MEMBER 多的只是「能看全班学生信息、能勾选导出」。
 ROLE_LEVEL: dict[str, int] = {
     "MEMBER": 0,
+    "GUEST": 0,    # 访客（只读；等级同普通成员，都管不了账号）
     "ADMIN": 1,    # 生活委员
     "MONITOR": 2,  # 班长
     "TEACHER": 3,  # 班主任
@@ -153,9 +158,6 @@ _STAFF_ROUTES: list[tuple[str, str]] = [
     ("POST", r"^/api/batches/[^/]+/pay$"),
     ("POST", r"^/api/batches/[^/]+/close$"),
     ("DELETE", r"^/api/batches/[^/]+$"),
-    ("POST", r"^/api/notices$"),
-    ("PUT", r"^/api/notices/[^/]+$"),
-    ("DELETE", r"^/api/notices/[^/]+$"),
     ("PUT", r"^/api/class$"),
 ]
 

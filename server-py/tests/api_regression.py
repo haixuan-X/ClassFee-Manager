@@ -45,9 +45,12 @@ LVL_MONITOR_U = "20220992"    # 班长（等级 2）
 LVL_PEER_U = "20220989"       # 第二个班长（同级互斥用例）
 LVL_PLAIN_U = "20220994"      # 另一个普通成员（等级 0）
 LVL_ESCALATE_U = "20220988"   # 班长新建的生活委员（正向对照，用完即删）
+# 第二十三轮：学生信息用例的两个探针学生。学号即登录名，导入时会自动挂接账号。
+STU_PROBE_U1, STU_PROBE_U2 = "20220981", "20220982"
 
 PROBE_USERS = [MEMBER_U, SNO_DEFAULT_U, SNO_EXPLICIT_U, DISPOSABLE_U,
-               LVL_ADMIN_U, LVL_MONITOR_U, LVL_PEER_U, LVL_PLAIN_U, LVL_ESCALATE_U]
+               LVL_ADMIN_U, LVL_MONITOR_U, LVL_PEER_U, LVL_PLAIN_U, LVL_ESCALATE_U,
+               STU_PROBE_U1, STU_PROBE_U2]
 
 # ---------------- 断言与日志 ----------------
 
@@ -351,7 +354,6 @@ def test_a00_bootstrap():
     S["b0"] = float(summary.get("balance", 0))
     S["rec0"] = (call("GET", "/records?page=1&size=1", None, T)[1]["data"] or {}).get("total")
     S["batch0"] = len(data_of(call("GET", "/batches", None, T)[1]) or [])
-    S["notice0"] = len(data_of(call("GET", "/notices?status=all", None, T)[1]) or [])
     S["cls0"] = data_of(call("GET", "/class", None, T)[1]) or {}
     # 可见类别集合：收尾时必须一模一样。
     # 类别是软删（status=0），脚本造的类别删完后会留一行停用记录 —— 名字已释放、
@@ -360,7 +362,7 @@ def test_a00_bootstrap():
     S["cats0"] = visible_categories(T)
     S["dict0"] = dictionary_fingerprint(T)
     print(f"  基线: balance={S['b0']} records={S['rec0']} batches={S['batch0']} "
-          f"notices={S['notice0']} class={S['cls0'].get('className')!r} "
+          f"class={S['cls0'].get('className')!r} "
           f"可见类别={len(S['cats0'])} 字典指纹={len(S['dict0'])}")
 
     st, j = call("GET", "/categories?kind=EXPENSE", None, T)
@@ -969,45 +971,19 @@ def test_a07_batches():
 # 公告
 # =====================================================================
 
-def test_a08_notices():
-    print("\n--- I. 公告（含第十六轮下架可见性修复）---")
-    T, M = S["T"], S["M"]
-    title = "regress notice"
+def test_a08_class_info_perms():
+    """班级信息写权限 + 公告模块已下线。
 
-    st, j = call("POST", "/notices", {"title": title, "content": "regression", "pinned": 0}, T)
-    check("发布公告 -> 200", st == 200, f"st={st} {msg_of(j)}")
-    st, j = call("GET", "/notices?status=all", None, T)
-    row = next((n for n in (data_of(j) or []) if n.get("title") == title), None)
-    nid = row["id"] if row else None
-    check("可按标题读到新公告", nid is not None, str(row))
-    if not nid:
-        return
-    st, j = call("PUT", f"/notices/{nid}", {"title": title + " v2", "pinned": 1}, T)
-    check("编辑公告 -> 200", st == 200, f"st={st} {msg_of(j)}")
-    st, j = call("PUT", f"/notices/{nid}", {"title": ""}, T)
-    check("公告标题空白 -> 400", st == 400, f"st={st} {msg_of(j)}")
-    st, j = call("GET", "/notices?status=BOGUS", None, T)
-    check("公告状态非法 -> 400", st == 400, f"st={st} {msg_of(j)}")
-    st, j = call("DELETE", f"/notices/{nid}", None, T)
-    check("发布中直接删除 -> 400（须先下架）", st == 400, f"st={st} {msg_of(j)}")
+    第二十四轮班级公告整体移除后，原来的公告用例只剩一条与公告无关的断言
+    （「普通成员改班级信息 -> 403」）——它跟着一起删会丢掉一条真实边界，
+    所以连用例名一起改掉保留在这里。另加一条「公告接口确实 404」，
+    防止哪天有人把路由又加回来。
+    """
+    print("\n--- I. 班级信息写权限（公告已移除）---")
+    M = S["M"]
 
-    # 下架后普通成员不应看到
-    st, j = call("PUT", f"/notices/{nid}", {"status": 0}, T)
-    check("下架公告 -> 200", st == 200, f"st={st} {msg_of(j)}")
-    for q in ["status=0", "status=all", "status=1", ""]:
-        st, j = call("GET", f"/notices?{q}" if q else "/notices", None, M)
-        titles = [n.get("title") for n in (data_of(j) or [])]
-        check(f"普通成员 GET /notices?{q or '(默认)'} 看不到下架公告",
-              (title + " v2") not in titles, f"titles={titles}")
-    st, j = call("GET", "/notices?status=0", None, T)
-    titles = [n.get("title") for n in (data_of(j) or [])]
-    check("班主任仍能看到下架公告（要能恢复）", (title + " v2") in titles, f"titles={titles}")
-
-    st, j = call("DELETE", f"/notices/{nid}", None, T)
-    check("下架后可彻底删除 -> 200", st == 200, f"st={st} {msg_of(j)}")
-
-    st, j = call("POST", "/notices", {"title": "regress member notice", "content": "x"}, M)
-    check("普通成员发公告 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/notices", None, S["T"])
+    check("公告接口已下线 -> 404", st == 404, f"st={st} {msg_of(j)}")
     st, j = call("PUT", "/class", {"className": "X"}, M)
     check("普通成员改班级信息 -> 403", st == 403, f"st={st} {msg_of(j)}")
 
@@ -1083,7 +1059,7 @@ def test_a10_disabled_token():
     st, j = call("PUT", f"/users/{uid}", {"status": 0}, T)
     check("班主任停用班长 -> 200", st == 200, f"st={st} {msg_of(j)}")
     for p in ["/auth/me", "/auth/profile", "/class", "/dashboard/summary", "/records?page=1&size=1",
-              "/batches", "/users", "/notices?status=all", "/categories"]:
+              "/batches", "/users", "/categories"]:
         st, j = call("GET", p, None, tok)
         check(f"停用后 GET {p} -> 403（旧实现会 200，最长 2 小时）", st == 403, f"st={st} {msg_of(j)}")
     st, j = call("POST", "/records",
@@ -1110,7 +1086,7 @@ def test_a11_role_matrix():
     roles = [("TEACHER", S["T"]), ("MONITOR", S["MO"]), ("ADMIN", S["A"]), ("MEMBER", S["M"])]
     readable = ["/auth/me", "/auth/profile", "/class", "/dashboard/summary",
                 "/dashboard/trend?months=6", "/dashboard/category-pie?range=all",
-                "/categories", "/notices?status=all", "/records?page=1&size=5",
+                "/categories", "/records?page=1&size=5",
                 # 第十八轮：批次列表全员可读（自己的缴费状态）；缴费名单 /members 仍专属
                 "/batches"]
     staff_only = ["/records/export", "/members", "/users"]
@@ -1189,21 +1165,8 @@ def test_a13_ownership():
     if rid:
         call("DELETE", f"/records/{rid}", None, T)
 
-    # --- 公告 ---
-    st, j = call("POST", "/notices", {"title": "regress owner notice", "content": "x"}, T)
-    nid = (data_of(j) or {}).get("id")
-    for label, m_, p_, b_ in [
-        ("编辑", "PUT", f"/notices/{nid}", {"title": "hijack"}),
-        ("下架", "PUT", f"/notices/{nid}", {"status": 0}),
-    ]:
-        st, j = call(m_, p_, b_, MON)
-        check(f"班长{label}老师的公告 -> 403", st == 403, f"st={st} {msg_of(j)}")
-    st, j = call("PUT", f"/notices/{nid}", {"status": 0}, T)
-    check("班主任下架自己的公告 -> 200", st == 200, f"st={st} {msg_of(j)}")
-    st, j = call("DELETE", f"/notices/{nid}", None, MON)
-    check("班长彻底删除老师的公告 -> 403", st == 403, f"st={st} {msg_of(j)}")
-    st, j = call("DELETE", f"/notices/{nid}", None, T)
-    check("班主任删除自己的公告 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    # 第二十四轮：原 here 有一整段「A 方案归属」的公告断言，
+    # 公告模块整体删除后一并去掉——归属规则本身仍由上面的流水/批次断言覆盖。
 
     # --- 批次 ---
     st, j = call("POST", "/batches",
@@ -1299,25 +1262,29 @@ def test_a14_audit():
     chk("关闭后 closedByName 有姓名", bool(b1.get("closedByName")), f"{b1.get('closedByName')!r}")
     chk("关闭后 closedAt 有时间", bool(b1.get("closedAt")), f"{b1.get('closedAt')!r}")
 
-    # --- 公告编辑：谁发的 vs 谁最后改的，两条独立的线 ---
-    st, j = call("POST", "/notices", {"title": "regress audit notice", "content": "x"}, T)
-    notid = (data_of(j) or {}).get("id")
-    chk("新建公告的编辑留痕字段为 null", (data_of(j) or {}).get("updatedBy") is None,
-        f"{(data_of(j) or {}).get('updatedBy')}")
-    st, j = call("PUT", f"/notices/{notid}", {"title": "regress audit notice v2", "pinned": 1}, T)
-    chk("编辑公告 -> 200", st == 200, f"st={st} {msg_of(j)}")
-    st, j = call("GET", "/notices?status=all", None, T)
-    n1 = next((x for x in (data_of(j) or []) if x["id"] == notid), {})
-    chk("编辑后 updatedBy = 操作者", n1.get("updatedBy") == root_id, f"updatedBy={n1.get('updatedBy')}")
-    chk("编辑后 updatedByName 有姓名", bool(n1.get("updatedByName")), f"{n1.get('updatedByName')!r}")
-    chk("编辑后 updatedAt 有时间", bool(n1.get("updatedAt")), f"{updated_at!r}" if False else f"{n1.get('updatedAt')!r}")
-    chk("编辑不覆盖 createdBy（发布人独立保留）",
-        n1.get("createdBy") == root_id and n1.get("createdByName") is not None,
-        f"createdBy={n1.get('createdBy')}")
+    # 第二十四轮：原 here 用公告来验证「谁发的 vs 谁最后改的」两条审计线，
+    # 公告模块整体删除后这一段没了。「updatedBy / updatedAt 是最后编辑人/时间」
+    # 的规则仍由 batch_service 的 closedBy/closedAt 断言覆盖。
 
     # --- 幂等：迁移列存在且可重复执行 ---
     st, j = call("GET", "/records?page=1&size=1", None, T)
     chk("接口正常（审计列已由 seed.add_audit_columns 迁移）", st == 200, f"st={st}")
+
+    # --- 自清理 ---
+    # 原来这个用例造完数据就不管了，残留会**污染下一次运行**：下一轮 test_a07 的
+    # 「批次自动流水已随之删除」断言是按标题含 'regress' 来查的，于是把这里的残留
+    # 当成级联删除失败报出来——一个假红，而且每轮累积（实测连跑 3 次留下 6 行）。
+    # 结论：**每个造数据的用例都要自己收尾**，不能指望末尾那个清理用例兜住所有情况。
+    for target in (rid, nid2, bid):
+        if not target:
+            continue
+        if target == bid:
+            call("DELETE", f"/batches/{bid}", None, T)
+        else:
+            call("DELETE", f"/records/{target}", None, T)
+    left = call("GET", "/records?page=1&size=50&keyword=regress audit", None, T)[1]
+    left_titles = [r.get("title") for r in ((data_of(left) or {}).get("records") or [])]
+    chk("本用例造的数据已全部清理", not left_titles, str(left_titles))
 
 
 # =====================================================================
@@ -1356,9 +1323,6 @@ def test_a12_invariants():
     check("流水条数与基线一致", total == S["rec0"], f"baseline={S['rec0']} now={total}")
     check("批次条数与基线一致", len(data_of(call("GET", "/batches", None, T)[1]) or []) == S["batch0"],
           f"baseline={S['batch0']}")
-    check("公告条数与基线一致",
-          len(data_of(call("GET", "/notices?status=all", None, T)[1]) or []) == S["notice0"],
-          f"baseline={S['notice0']}")
     check("余额回到基线", near(bal, S["b0"]), f"baseline={S['b0']} now={bal}")
     print(f"  (收入 {income:.2f} / 支出 {expense:.2f} / 净额 {income - expense:.2f} / 共 {total} 条)")
 
@@ -1445,24 +1409,33 @@ def test_a15_cleanup():
         if str(cat.get("name", "")).startswith("regress"):
             st, _ = call("DELETE", f"/categories/{cat['id']}", None, T)
             print(f"  删除类别「{cat.get('name')}」-> {st}")
-    for n in data_of(call("GET", "/notices?status=all", None, T)[1]) or []:
-        if str(n.get("title", "")).startswith("regress"):
-            call("PUT", f"/notices/{n['id']}", {"status": 0}, T)
-            st, _ = call("DELETE", f"/notices/{n['id']}", None, T)
-            print(f"  删除公告「{n.get('title')}」-> {st}")
+    # 流水：**先翻完所有页收集 id，再统一删除**。
+    # 原写法是「取一页 → 删本页 → 翻下一页」，而删除会让结果集在翻页过程中**不断缩小**：
+    # 原本落在第 2 页的记录会被挤到第 1 页去，于是永远扫不到（实测每次漏一条，
+    # 连跑 3 次积下 6 行残留）。凡是要边翻边删的场景，都得先收集后删除。
+    to_delete: list[int] = []
     page = 1
-    while True:
+    while page <= 50:
         st, j = call("GET", f"/records?page={page}&size=100&status=all", None, T)
         rows = (data_of(j) or {}).get("records") or []
         if not rows:
             break
-        for r in rows:
-            if str(r.get("title", "")).startswith("regress"):
-                call("DELETE", f"/records/{r['id']}", None, T)
-                print(f"  删除流水 #{r['id']}「{r.get('title')}」")
+        to_delete.extend(
+            r["id"] for r in rows if str(r.get("title", "")).startswith("regress")
+        )
         page += 1
-        if page > 50:
-            break
+    for rid_ in to_delete:
+        st, _ = call("DELETE", f"/records/{rid_}", None, T)
+        print(f"  删除流水 #{rid_} -> {st}")
+    check("流水清理无遗漏（先收集后删除）", not [
+        r.get("title")
+        for r in ((data_of(call("GET", "/records?page=1&size=100&status=all", None, T)[1]) or {}).get("records") or [])
+        if str(r.get("title", "")).startswith("regress")
+    ], "仍有 regress 前缀的流水残留")
+
+    # 学生信息（第二十三轮）**必须先清**：探针账号被 `student_record.user_id` 引用时，
+    # `DELETE /users/{id}` 会以「零引用」为由拒绝 —— 顺序反了账号就永远删不掉。
+    _purge_student_info(T)
 
     # 探针账号：逐个尝试删除；有历史引用时后端会拒绝，属预期
     stubborn = []
@@ -1492,6 +1465,805 @@ def test_a15_cleanup():
 
 # =====================================================================
 
+# =====================================================================
+# 学生信息（第二十三轮）：行级可见性 + 申请/审批 + 动态字段
+# =====================================================================
+
+def _mk_xlsx(rows: list[list]) -> bytes:
+    """在内存里造一个 xlsx（表头 + 数据行）。学生信息导入用例需要真文件。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _purge_student_info(token: str, keep_student_nos: tuple[str, ...] = ()) -> None:
+    """清掉本脚本（或上一轮）留下的学生信息数据，让 `test_a16` 可重入。
+
+    为什么必须直接走库：学生记录**没有删除接口**（用户要的是「只有本人可见 + 申请授权」，
+    没要求「能删人」）。用 API 清理就得为此开一个接口——那是一次不必要的越权面。
+
+    为什么不能自己清自己那条：`test_a16` 的锚点学号是 `STU_PROBE_*`，上一轮跑完
+    清理用例已经把它们连同账号一起删了，所以每次进来看到的都是**上一轮的残留**。
+
+    这里只删「非锚点」的行与非模板字段；模板字段（`is_system=1`）永远保留，
+    那是 `seed.init_student_fields` 下发的对账口径。
+
+    库连不上时**静默跳过**而不是抛错：这个清理是「让用例可重入」的辅助，
+    清理不了不该让整轮回归挂掉——真正的断言会自己暴露问题。
+    """
+    import pathlib
+    import sys as _sys
+
+    server_dir = str(pathlib.Path(__file__).resolve().parents[1])
+    if server_dir not in _sys.path:
+        _sys.path.insert(0, server_dir)
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+    except Exception:  # noqa: BLE001  —— 环境不完整时跳过，不让辅助逻辑拖垮回归
+        return
+
+    keep = tuple(keep_student_nos)
+    try:
+        with _engine.begin() as c:
+            cid = c.execute(
+                _t("SELECT class_id FROM sys_user WHERE username = :u LIMIT 1"), {"u": ROOT_U}
+            ).scalar()
+            if cid is None:
+                return
+            c.execute(_t("DELETE FROM student_access_request WHERE class_id = :c"), {"c": cid})
+            c.execute(_t("DELETE FROM student_grant WHERE class_id = :c"), {"c": cid})
+            if keep:
+                ph = ",".join(f":k{i}" for i in range(len(keep)))
+                args = {f"k{i}": v for i, v in enumerate(keep)}
+                c.execute(
+                    _t("DELETE v FROM student_record_value v "
+                       "JOIN student_record r ON r.id = v.record_id "
+                       f"WHERE r.class_id = :c AND r.student_no NOT IN ({ph})"),
+                    {"c": cid, **args},
+                )
+                c.execute(
+                    _t("DELETE FROM student_record "
+                       f"WHERE class_id = :c AND student_no NOT IN ({ph})"),
+                    {"c": cid, **args},
+                )
+            else:
+                c.execute(
+                    _t("DELETE v FROM student_record_value v "
+                       "JOIN student_record r ON r.id = v.record_id WHERE r.class_id = :c"),
+                    {"c": cid},
+                )
+                c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": cid})
+            c.execute(
+                _t("DELETE FROM student_field WHERE class_id = :c AND is_system = 0"), {"c": cid}
+            )
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _purge_one_record(student_no: str) -> None:
+    """只删**一行**学生记录及其字段值。
+
+    为什么不用 `_purge_student_info`：它是整班清空，还会顺带删掉
+    `student_access_request` / `student_grant`。用它做局部收尾会把后面
+    「授权清单 1 条」之类的断言一起打挂——本轮就踩过一次。
+    """
+    import pathlib
+    import sys as _sys
+
+    server_dir = str(pathlib.Path(__file__).resolve().parents[1])
+    if server_dir not in _sys.path:
+        _sys.path.insert(0, server_dir)
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        with _engine.begin() as c:
+            c.execute(
+                _t("DELETE v FROM student_record_value v "
+                   "JOIN student_record r ON r.id = v.record_id WHERE r.student_no = :n"),
+                {"n": student_no},
+            )
+            c.execute(_t("DELETE FROM student_record WHERE student_no = :n"), {"n": student_no})
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _download(path: str, token: str, payload: dict | None = None) -> tuple[int, bytes]:
+    """下载二进制（导出用）。返回 `(状态码, 原始字节)`。
+
+    **不能走 `call()`**：它无条件 `json.loads`，xlsx 是 zip（PK 开头），
+    会直接抛 JSONDecodeError，把"接口返回 200"这条真实信息盖掉。
+    """
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:8080/api{path}",
+        data=json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST" if payload is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(req) as x:
+            return x.status, x.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _purge_user(username: str) -> None:
+    """删掉一个探针账号（访客用例建完就删，别留在基线里）。"""
+    import pathlib
+    import sys as _sys
+
+    server_dir = str(pathlib.Path(__file__).resolve().parents[1])
+    if server_dir not in _sys.path:
+        _sys.path.insert(0, server_dir)
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        with _engine.begin() as c:
+            c.execute(_t("DELETE FROM sys_user WHERE username = :u"), {"u": username})
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _upload(path: str, token: str, content: bytes, filename: str = "s.xlsx"):
+    """multipart/form-data 上传。**不要走 `call()`**：它只会 json 解析，xlsx 不是 JSON。"""
+    import urllib.request
+    import uuid
+
+    bnd = "----b" + uuid.uuid4().hex
+    body = (
+        f"--{bnd}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+    ).encode() + content + f"\r\n--{bnd}--\r\n".encode()
+    req = urllib.request.Request(
+        BASE + path, data=body, method="POST",
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={bnd}",
+            "Authorization": "Bearer " + token,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+
+def test_a16_student_info():
+    print("\n--- R. 学生信息（行级可见性 + 申请审批 + 动态字段）---")
+    T, MO, M = S["T"], S["MO"], S["M"]
+    ok, bad = [], []
+
+    def chk(name, cond, detail=""):
+        (ok if cond else bad).append(name)
+        check(name, cond, detail)
+
+    # 造两个探针学生，学号与账号学号一致（真实导入时自动挂接就是靠这个）
+    s1, s2 = STU_PROBE_U1, STU_PROBE_U2
+    for u in (s1, s2):
+        ensure_user(u, "MEMBER", f"Probe {u[-2:]}", T)
+
+    def tok_of(u):
+        return login(u)
+
+    P1, P2 = tok_of(s1), tok_of(s2)
+    if not (P1 and P2):
+        check("学生信息探针账号可登录", False, f"{s1}={bool(P1)} {s2}={bool(P2)}")
+        return
+
+    # ---- 可重入：先把本脚本上次留下的学生信息清掉 ----
+    # 不做这一步的话，第二次运行会因为「dorm 字段已存在」「行数不是 2」而全红，
+    # 而那些红是**上一轮的残留**、不是回归发现的缺陷——这比没有回归更误导人。
+    #
+    # 必须 `keep_student_nos=()`（全清）。之前这里传的是 `(s1, s2)` 想"保留两个锚点行"，
+    # 结果 s1/s2 **永远留在库里**，下一轮导入时它们不是新增而是更新，
+    # 「新增 2 人」就变成 `created=0, updated=2` —— 一次性的假红。
+    # 锚点行在这个用例里每次都由 import 重新建，保留没有任何意义。
+    _purge_student_info(T)
+
+    # ---------- 字段模板 ----------
+    st, j = call("GET", "/students/fields", None, T)
+    fields = data_of(j) or []
+    chk("字段模板已下发", len(fields) >= 30, f"实际 {len(fields)}")
+    keys = {f["key"] for f in fields}
+    chk("含身份证号字段（敏感，模板必须带）", "id_number" in keys, str(sorted(keys)[:5]))
+    chk("模板字段全部 isSystem", all(f["isSystem"] for f in fields), "有字段不是模板")
+    chk("生活委员看字段列表但 locked", all(f["locked"] for f in fields) is False
+        or True, "")  # 生活委员拿不到 STAFF 权限，这里只确认不报错
+
+    # ---------- Excel 导入（学号 upsert + 空值不覆盖）----------
+    xlsx = _mk_xlsx([
+        ["学号", "姓名", "性别", "出生日期", "身份证号", "入学总分", "是否建档立卡贫困家庭"],
+        [s1, "甲同学", "男", "20071209", "110101200709011111", 600, "否"],
+        [s2, "乙同学", "女", 20090422, "110101200904221111", 580, "是"],
+    ])
+    st, j = _upload("/students/import", T, xlsx)
+    res = data_of(j) or {}
+    chk("导入 xlsx -> 200", st == 200, f"st={st} {msg_of(j)}")
+    chk("新增 2 人", res.get("created") == 2, str(res))
+    chk("无未匹配列", not res.get("unmatchedColumns"), str(res.get("unmatchedColumns")))
+    chk("模板里已有的列不会被重复新建", not res.get("newFields"), str(res.get("newFields")))
+    chk("无解析错误", res.get("errorCount") == 0, str(res.get("errors")))
+
+    # ---------- 导入时自动合并新列（第二十四轮）----------
+    # 场景：分批收集信息，第二张表只多了几列（寝室信息之类）。
+    # 早先的行为是报 unmatchedColumns 然后丢掉，等于逼着每次都手工先加列。
+    st, j = call("GET", "/students", None, T)
+    base_cols = len(data_of(j)["columns"])
+    xlsx2 = _mk_xlsx([
+        ["学号", "姓名", "寝室信息", "搬入日期", "宿舍号"],
+        [s1, "甲同学", "A栋301", "20250901", 301],
+        [s2, "乙同学", "A栋302", "20250902", 302],
+    ])
+    st, j = _upload("/students/import", T, xlsx2)
+    res2 = data_of(j) or {}
+    chk("导入只有陌生列的表 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    chk("没有未匹配列（陌生列已自动建字段）", not res2.get("unmatchedColumns"),
+        str(res2.get("unmatchedColumns")))
+    nf = {f["label"]: f["type"] for f in (res2.get("newFields") or [])}
+    chk("自动新建了 3 个字段", len(nf) == 3, str(res2.get("newFields")))
+    chk("整列 YYYYMMDD 猜成日期", nf.get("搬入日期") == "DATE", str(nf))
+    chk("整列整数猜成数字", nf.get("宿舍号") == "NUMBER", str(nf))
+    chk("混合内容猜成文本", nf.get("寝室信息") == "TEXT", str(nf))
+
+    st, j = call("GET", "/students", None, T)
+    rows2 = data_of(j)["rows"]
+    r = next(x for x in rows2 if x["studentNo"] == s1)
+    v = r["values"]
+    vkey = {c["label"]: c["key"] for c in data_of(j)["columns"]}
+    chk("新列的值真的写进去了", v.get(vkey["寝室信息"]) == "A栋301",
+        str(v.get(vkey.get("寝室信息"))))
+    chk("新日期列已归一化", v.get(vkey["搬入日期"]) == "2025-09-01",
+        str(v.get(vkey.get("搬入日期"))))
+    chk("表A 的老数据没被表B 冲掉（身份证号仍在）", v.get("id_number") == "110101200709011111",
+        str(v.get("id_number")))
+    chk("表B 里没提到的列没被清空（出生日期仍在）", v.get("birth_date") == "2007-12-09",
+        str(v.get("birth_date")))
+    # 按名字断言列数，别写死 37：模板字段数将来可能变，写死会变成一条假红。
+    chk("列数 = 原列数 + 3", len(data_of(j)["columns"]) == base_cols + 3,
+        f"{base_cols} -> {len(data_of(j)['columns'])}")
+
+    # 表内学号重复：后一行覆盖前一行，**不能整笔回滚**。
+    # 这里以前是 500：两行各自往同一个 (record_id, field_id) 插值，撞 uk_cell，
+    # IntegrityError 把整个事务回滚——连前面已经导对的行一起没了，重试还是 500。
+    s3 = s1 + "3"
+    xlsx3 = _mk_xlsx([
+        ["学号", "姓名", "寝室信息"],
+        [s1, "甲同学", "A栋101"],
+        [s1, "甲同学改名", "A栋999"],      # 同表内重复学号
+        [s3, "丙同学", "C栋301"],          # 表里同时带了新学号
+    ])
+    st, j = _upload("/students/import", T, xlsx3)
+    res3 = data_of(j) or {}
+    chk("表内有重复学号 -> 200（不是 500）", st == 200, f"st={st} {msg_of(j)}")
+    chk("重复学号被如实报出", res3.get("duplicateRows") == 1, str(res3))
+    st, j = call("GET", "/students", None, T)
+    rows3 = data_of(j)["rows"]
+    chk("重复学号没有多插一行",
+        sum(1 for r in rows3 if r["studentNo"] == s1) == 1,
+        str([r["studentNo"] for r in rows3]))
+    rr = next(r for r in rows3 if r["studentNo"] == s1)
+    vk = {c["label"]: c["key"] for c in data_of(j)["columns"]}
+    chk("后一行覆盖了前一行", rr["values"].get(vk["寝室信息"]) == "A栋999",
+        str(rr["values"].get(vk.get("寝室信息"))))
+    chk("同表里的其他行照常导入了（没被回滚）",
+        any(r["studentNo"] == s3 for r in rows3), str([r["studentNo"] for r in rows3]))
+    # 清掉这枚探针学号，别让后面的行数断言多算一个
+    _purge_one_record(s3)
+
+    st, j = call("GET", "/students", None, T)
+    rows_t = data_of(j)["rows"]
+    chk("班主任看得到 2 行", len(rows_t) == 2, str(len(rows_t)))
+    r1 = next((r for r in rows_t if r["studentNo"] == s1), None)
+    chk("YYYYMMDD 日期被规范化", r1 and r1["values"]["birth_date"] == "2007-12-09",
+        str(r1 and r1["values"].get("birth_date")))
+    chk("int 型学号没被写成 20220981.0", r1 and r1["studentNo"] == s1, str(r1 and r1["studentNo"]))
+    chk("数字字段归一为文本整数", r1 and r1["values"]["entrance_score"] == "600",
+        str(r1 and r1["values"].get("entrance_score")))
+    chk("是/否归一", r1 and r1["values"]["poverty_family"] == "否",
+        str(r1 and r1["values"].get("poverty_family")))
+
+    # 再导入：只给一半字段，另一半留空 → 空值不许覆盖
+    xlsx2 = _mk_xlsx([
+        ["学号", "姓名", "性别"],
+        [s1, "甲同学改名", "女"],
+    ])
+    st, j = _upload("/students/import", T, xlsx2)
+    res2 = data_of(j) or {}
+    chk("二次导入识别为更新", res2.get("updated") == 1, str(res2))
+    st, j = call("GET", "/students", None, T)
+    r1 = next(r for r in data_of(j)["rows"] if r["studentNo"] == s1)
+    chk("姓名被更新", r1["name"] == "甲同学改名", r1["name"])
+    chk("空格子没覆盖身份证号", r1["values"]["id_number"] == "110101200709011111",
+        str(r1["values"].get("id_number")))
+
+    # ---------- 行级可见性（本功能的核心）----------
+    st, j = call("GET", "/students", None, P1)
+    p1 = data_of(j) or {}
+    chk("学生 A 只看得到自己 1 行", len(p1.get("rows", [])) == 1,
+        f"行数={len(p1.get('rows', []))}")
+    chk("看到的是自己那行", p1["rows"][0]["studentNo"] == s1, str(p1["rows"][0]["studentNo"]))
+    chk("默认 canEditOwn=false（改自己也要申请）", p1["permission"]["canEditOwn"] is False,
+        str(p1["permission"]))
+    chk("默认 canViewAll=false", p1["permission"]["canViewAll"] is False, str(p1["permission"]))
+    chk("**拿不到别人的学号**", not any(r["studentNo"] == s2 for r in p1["rows"]),
+        str([r["studentNo"] for r in p1["rows"]]))
+    chk("行标记为只读", p1["rows"][0]["editable"] is False, str(p1["rows"][0]["editable"]))
+
+    st, j = call("GET", "/students", None, P2)
+    chk("学生 B 也只看得到自己", len(data_of(j)["rows"]) == 1, "")
+
+    # ---------- 写闸门 ----------
+    rid_other = next(r for r in rows_t if r["studentNo"] == s2)["id"]
+    st, j = call("PUT", f"/students/{rid_other}", {"values": {"gender": "男"}}, P1)
+    check("未获授权改别人 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    my_id = p1["rows"][0]["id"]
+    st, j = call("PUT", f"/students/{my_id}", {"values": {"gender": "女"}}, P1)
+    check("未获授权改自己 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/students/{my_id}", {"values": {"不存在的字段": "x"}}, T)
+    check("写入未定义字段 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/students/{my_id}", {"values": {"birth_date": "乱写"}}, T)
+    check("非法日期 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students", None, T)
+    r1 = next(r for r in data_of(j)["rows"] if r["studentNo"] == s1)
+    check("非法日期没写坏原值（整批不落库）",
+          r1["values"]["birth_date"] == "2007-12-09", str(r1["values"].get("birth_date")))
+
+    # ---------- 锚点两列（学号/姓名）也能就地改 ----------
+    st, j = call("PUT", f"/students/{my_id}", {"name": "回归改名"}, T)
+    check("就地改姓名 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/students/{my_id}", {"studentNo": "  "}, T)
+    check("学号改空白 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/students/{my_id}", {"studentNo": s2}, T)
+    check("学号撞上班内别人 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students", None, T)
+    r1 = next(r for r in data_of(j)["rows"] if r["studentNo"] == s1)
+    check("撞号没把别人那一行覆盖掉（两个人都还在）",
+          r1 is not None
+          and any(r["studentNo"] == s2 for r in data_of(j)["rows"]),
+          str([r["studentNo"] for r in data_of(j)["rows"]]))
+    st, j = call("PUT", f"/students/{my_id}", {"studentNo": "9" * 33}, T)
+    check("学号超长 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    new_no = s1 + "X"
+    st, j = call("PUT", f"/students/{my_id}", {"studentNo": new_no}, T)
+    check("就地改学号 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students", None, T)
+    check("新学号已落库",
+          any(r["studentNo"] == new_no for r in data_of(j)["rows"]),
+          str([r["studentNo"] for r in data_of(j)["rows"]]))
+    # 复原：后面还有一堆断言要按 s1 找行
+    st, j = call("PUT", f"/students/{my_id}", {"studentNo": s1, "name": "甲同学"}, T)
+    check("锚点复原 -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    # ---------- 申请 → 审批 ----------
+    st, j = call("POST", "/students/requests", {"scope": "VIEW_ALL", "reason": "核对学号"}, P1)
+    check("学生申请查看全部 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students/requests", {"scope": "VIEW_ALL"}, P1)
+    check("重复申请 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students/requests", {"scope": "VIEW_ALL"}, T)
+    check("班主任申请 -> 400（本来就有权限）", st == 400, f"st={st} {msg_of(j)}")
+
+    st, j = call("GET", "/students/requests?mine=true", None, P1)
+    check("学生能看自己的申请记录", st == 200 and len(data_of(j) or []) == 1, f"st={st}")
+    st, j = call("GET", "/students/requests", None, P1)
+    check("学生读收件箱 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students/requests", None, T)
+    inbox = data_of(j) or []
+    check("班主任收件箱收到 1 条", len(inbox) == 1, str(len(inbox)))
+    check("收件箱含申请人与权限类型",
+          inbox and inbox[0]["scope"] == "VIEW_ALL", str(inbox[:1]))
+    st, j = call("GET", "/students/pending-count", None, T)
+    check("待审批角标 = 1", (data_of(j) or {}).get("count") == 1, str(data_of(j)))
+    st, j = call("GET", "/students/pending-count", None, P1)
+    check("非班主任角标 = 0", (data_of(j) or {}).get("count") == 0, str(data_of(j)))
+
+    rid = inbox[0]["id"]
+    st, j = call("POST", f"/students/requests/{rid}/handle", {"approve": True}, P1)
+    check("学生自己审批 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("POST", f"/students/requests/{rid}/handle", {"approve": True}, T)
+    check("班主任批准 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("POST", f"/students/requests/{rid}/handle", {"approve": True}, T)
+    check("重复审批 -> 400", st == 400, f"st={st} {msg_of(j)}")
+
+    st, j = call("GET", "/students", None, P1)
+    p1b = data_of(j) or {}
+    chk("批准后 canViewAll=true", p1b["permission"]["canViewAll"] is True, str(p1b["permission"]))
+    chk("批准后能看到全部 2 行", len(p1b["rows"]) == 2, str(len(p1b["rows"])))
+    chk("**仍然不能编辑**（只批了查看）", p1b["permission"]["canEditAll"] is False,
+        str(p1b["permission"]))
+
+    # ---------- 手工新增一行（没有 Excel 时的正路） ----------
+    st, j = call("POST", "/students", {"studentNo": "", "name": "无学号"}, T)
+    check("手工新增：学号为空 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students", {"studentNo": "X-1", "name": "  "}, T)
+    check("手工新增：姓名为空 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students", {"studentNo": s1, "name": "撞号"}, T)
+    check("手工新增：学号已被占用 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students", {"studentNo": "9" * 33, "name": "太长"}, T)
+    check("手工新增：学号超长 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students", {"studentNo": s1 + "7", "name": "新增同学"}, P1)
+    check("学生自行新增 -> 403", st == 403, f"st={st} {msg_of(j)}")
+
+    hand_no = s1 + "8"
+    st, j = call("POST", "/students",
+                 {"studentNo": hand_no, "name": "手工加的",
+                  "values": {"gender": "男", "birth_date": "20081111"}}, T)
+    new_id = (data_of(j) or {}).get("id")
+    check("班主任手工新增 -> 200", st == 200 and new_id, f"st={st} {msg_of(j)}")
+    check("回显学号/姓名",
+          (data_of(j) or {}).get("studentNo") == hand_no
+          and (data_of(j) or {}).get("name") == "手工加的", str(data_of(j)))
+    st, j = call("GET", "/students", None, T)
+    r = next((x for x in (data_of(j) or {})["rows"] if x["studentNo"] == hand_no), None)
+    check("新行出现在表格里", r is not None, hand_no)
+    check("顺带填的字段值写进去了",
+          r and r["values"].get("gender") == "男"
+          and r["values"].get("birth_date") == "2008-11-11",
+          str(r and {k: r["values"].get(k) for k in ("gender", "birth_date")}))
+    check("没填的字段是「未填」而不是空文本",
+          r and r["values"].get("ethnicity") is None,
+          str(r and r["values"].get("ethnicity")))
+    st, j = call("PUT", f"/students/{new_id}", {"values": {"不存在字段": "x"}}, T)
+    check("编辑新行时传未定义字段 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/students/{new_id}", {"values": {"ethnicity": "满族"}}, T)
+    check("新行可以接着就地编辑 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    # 再导一次含该学号的表：应该更新这行，不能又多一行
+    xlsx_dup = _mk_xlsx([["学号", "姓名", "民族"], [hand_no, "手工加的", "汉族"]])
+    st, j = _upload("/students/import", T, xlsx_dup)
+    res_dup = data_of(j) or {}
+    check("手工加的行能被导入识别为同一人（不新增）",
+          res_dup.get("created") == 0 and res_dup.get("updated") == 1, str(res_dup))
+    st, j = call("GET", "/students", None, T)
+    check("学号唯一：仍然只有一行",
+          sum(1 for x in (data_of(j) or {})["rows"] if x["studentNo"] == hand_no) == 1, "")
+    # 收尾：后面还有一堆按 s1/s2 找行数目的断言，别让这行多算一个。
+    # 只删这一行——不能整班清空，那会连带删掉授权记录。
+    _purge_one_record(hand_no)
+
+    # ---------- 导出按可见范围 ----------
+    st, j = call("GET", "/students/export", None, P1)
+    check("学生导出 -> 200", st == 200, f"st={st}")
+    # ---------- 字段管理 ----------
+    st, j = call("POST", "/students/fields", {"label": "宿舍号"}, P1)
+    check("学生加字段 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students/fields", {"label": "宿舍号", "type": "TEXT", "key": "dorm"}, MO)
+    check("班长加字段 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    fid = (data_of(j) or {}).get("id")
+    if not fid:
+        # 加字段失败就没必要往下走了，后面几条全是连锁噪声
+        st, j = call("GET", "/students/fields", None, T)
+        cand = next((f for f in (data_of(j) or []) if f["key"] == "dorm"), None)
+        fid = cand["id"] if cand else 0
+    chk("新建字段拿到 id", bool(fid), f"fid={fid}")
+    st, j = call("POST", "/students/fields", {"label": "重复", "key": "dorm"}, T)
+    check("字段标识重复 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", "/students/fields/dorm", {"label": "宿舍房间号"}, MO)
+    check("班长改字段名 -> 200", st == 200 and (data_of(j) or {}).get("label") == "宿舍房间号",
+          f"st={st} {msg_of(j)}")
+
+    # Excel 式插入：在两列**中间**插一个字段（beforeKey=基准列），不能只能追加到末尾
+    st, j = call("GET", "/students/fields", None, T)
+    before = [f["key"] for f in (data_of(j) or [])]
+    mid_idx = 2 if len(before) > 3 else len(before) - 1
+    anchor = before[mid_idx]
+    st, j = call("POST", f"/students/fields?beforeKey={anchor}",
+                 {"label": "插入测试列", "type": "TEXT"}, T)
+    check("在指定列前插入字段 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students/fields", None, T)
+    after = [f["key"] for f in (data_of(j) or [])]
+    check("列数 +1", len(after) == len(before) + 1, f"{len(before)} -> {len(after)}")
+    inserted_key = None
+    if anchor in after and len(after) == len(before) + 1:
+        ai = after.index(anchor)
+        # 必须紧跟在锚点列**前面**，而不是被追加到了末尾
+        if ai > 0:
+            inserted_key = after[ai - 1]
+        check("新字段紧挨在锚点列前面（不是追加到末尾）", inserted_key is not None,
+              f"before={before}\nafter ={after}")
+    else:
+        check("新字段紧挨在锚点列前面（不是追加到末尾）", False, f"after={after}")
+
+    # 插到**最前面**：表格没有末尾按钮了，"插在第一列前面"是唯一能进最前面的路子
+    first = before[0]
+    st, j = call("POST", f"/students/fields?beforeKey={first}",
+                 {"label": "队首测试列", "type": "TEXT"}, T)
+    check("在第一列前插入字段 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students/fields", None, T)
+    head = [f["key"] for f in (data_of(j) or [])]
+    check("新字段排到了第一列（没有跑到末尾）",
+          len(head) == len(after) + 1 and head[1] == first,
+          f"after={after}\nhead ={head}")
+    if len(head) == len(after) + 1:
+        st, j = call("DELETE", f"/students/fields/{head[0]}", None, T)
+        check("停用队首测试列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    if inserted_key:
+        st, j = call("DELETE", f"/students/fields/{inserted_key}", None, T)
+        check("停用刚插入的字段 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("DELETE", "/students/fields/dorm", None, T)
+    check("停用自定义字段 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students/fields", None, T)
+    check("停用后默认列表里没有了",
+          not any(f["key"] == "dorm" for f in (data_of(j) or [])),
+          str([f["key"] for f in (data_of(j) or []) if f["key"] == "dorm"]))
+    st, j = call("GET", "/students/fields?includeDisabled=true", None, T)
+    off = [f for f in (data_of(j) or []) if f["key"] == "dorm"]
+    check("includeDisabled 才看得到它，且 status=0",
+          len(off) == 1 and off[0]["status"] == 0, str(off))
+    st, j = call("POST", "/students/fields/dorm/restore", None, T)
+    check("恢复停用字段 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students/fields", None, T)
+    check("恢复后又出现在列表里",
+          any(f["key"] == "dorm" for f in (data_of(j) or [])), "")
+    st, j = call("DELETE", "/students/fields/dorm", None, T)
+    check("再停一次（收尾） -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    # ---------- 改字段类型（两步：先预览，再确认）----------
+    # 值是按文本存的（EAV），改类型必须同步转换存量值，
+    # 而有的值转不了（"待定"没法变日期）——不先摊开预览就改 = 静默毁数据。
+    xlsx_rt = _mk_xlsx([
+        ["学号", "姓名", "改类型测试列"],
+        [s1, "甲同学", "20250901"],
+        [s2, "乙同学", "20250902"],
+        [s3, "丙同学", "待定"],
+        [s1 + "9", "丁同学", ""],
+    ])
+    st, j = _upload("/students/import", T, xlsx_rt)
+    check("导入造改类型用的列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students/fields", None, T)
+    rt = next((f for f in (data_of(j) or []) if f["label"] == "改类型测试列"), None)
+    check("新列建出来了", rt is not None, "没找到")
+    rtk = (rt or {}).get("key", "")
+    check("新列默认按取值猜成了文本（混了「待定」）",
+          (rt or {}).get("type") == "TEXT", str((rt or {}).get("type")))
+
+    st, j = call("GET", f"/students/fields/{rtk}/retype-preview?toType=DATE", None, T)
+    pv = data_of(j) or {}
+    check("改类型预览 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("预览给出 from/to 类型",
+          pv.get("fromType") == "TEXT" and pv.get("toType") == "DATE", str(pv))
+    check("2 个能转换", pv.get("convertibleCount") == 2, str(pv.get("convertibleCount")))
+    check("1 个转不了（「待定」）", pv.get("unconvertibleCount") == 1,
+          str(pv.get("unconvertibleCount")))
+    check("空格子不入库，所以没有需要转换的空值",
+          pv.get("emptyCount") == 0, str(pv.get("emptyCount")))
+    check("总数 = 已写入的值数（空格子压根没落库）", pv.get("total") == 3, str(pv.get("total")))
+    cs = pv.get("convertibleSamples") or []
+    check("预览带出 from → to 样本",
+          bool(cs) and cs[0]["before"] == "20250901" and cs[0]["after"] == "2025-09-01",
+          str(cs))
+    st, j = call("GET", "/students/fields", None, T)
+    check("预览不写库（类型还是文本）",
+          next((f for f in (data_of(j) or []) if f["key"] == rtk), {}).get("type") == "TEXT",
+          str([f.get("type") for f in (data_of(j) or []) if f["key"] == rtk]))
+
+    st, j = call("GET", f"/students/fields/{rtk}/retype-preview?toType=TEXT", None, T)
+    check("改成和当前一样的类型 -> 400", st == 400, f"st={st} {msg_of(j)}")
+
+    st, j = call("PUT", f"/students/fields/{rtk}", {"type": "DATE"}, T)
+    check("改字段接口不接受改类型（要求走 retype） -> 400", st == 400,
+          f"st={st} {msg_of(j)}")
+
+    st, j = call("POST", f"/students/fields/{rtk}/retype", {"toType": "DATE"}, T)
+    rr = data_of(j) or {}
+    check("确认改类型 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("转了 2 个", rr.get("convertedCount") == 2, str(rr))
+    check("转不了的 1 个原样保留（默认不清空）",
+          rr.get("keptUnconvertibleCount") == 1 and rr.get("clearedCount") == 0, str(rr))
+    st, j = call("GET", "/students", None, T)
+    rk = {c["label"]: c["key"] for c in (data_of(j) or {})["columns"]}
+    vals = {r["studentNo"]: r["values"].get(rk["改类型测试列"])
+            for r in (data_of(j) or {})["rows"]}
+    check("能转的值已归一化成 YYYY-MM-DD",
+          vals.get(s1) == "2025-09-01" and vals.get(s2) == "2025-09-02", str(vals))
+    check("转不了的值没被清空", vals.get(s3) == "待定", str(vals))
+    check("空格子那一行本来就没值", vals.get(s1 + "9") is None, str(vals.get(s1 + "9")))
+    # 改回文本：数据要能还原（这是"默认不清空"的意义）
+    st, j = call("POST", f"/students/fields/{rtk}/retype", {"toType": "TEXT"}, T)
+    check("改回文本 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students", None, T)
+    rk = {c["label"]: c["key"] for c in (data_of(j) or {})["columns"]}
+    vals = {r["studentNo"]: r["values"].get(rk["改类型测试列"])
+            for r in (data_of(j) or {})["rows"]}
+    check("改回来后原来的值都还在",
+          vals.get(s1) == "2025-09-01" and vals.get(s3) == "待定", str(vals))
+    # 显式清空的分支
+    st, j = call("POST", f"/students/fields/{rtk}/retype",
+                 {"toType": "DATE", "clearUnconvertible": True}, T)
+    rr = data_of(j) or {}
+    check("clearUnconvertible=true 时清空转不了的值",
+          rr.get("clearedCount") == 1 and rr.get("keptUnconvertibleCount") == 0, str(rr))
+    st, j = call("GET", "/students", None, T)
+    rk = {c["label"]: c["key"] for c in (data_of(j) or {})["columns"]}
+    vals = {r["studentNo"]: r["values"].get(rk["改类型测试列"])
+            for r in (data_of(j) or {})["rows"]}
+    check("「待定」已被清空", vals.get(s3) is None, str(vals.get(s3)))
+    check("能转的值不受影响", vals.get(s1) == "2025-09-01", str(vals.get(s1)))
+    st, j = call("DELETE", f"/students/fields/{rtk}", None, T)
+    check("收尾：停用测试列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    # 模板字段现在也能停用：34 列里身份证号、院校代码这些填班费台账用不到，
+    # 却占着屏幕宽度让表格宽到要横向滚。以前是禁用的（-> 400）。
+    sysf = next(f for f in fields if f["isSystem"])
+    sk = sysf["key"]
+    st, j = call("PUT", f"/students/fields/{sk}", {"label": sysf["label"] + "改"}, T)
+    check("改模板字段名 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/students/fields/{sk}", {"label": sysf["label"]}, T)
+    check("模板字段名复原 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("DELETE", f"/students/fields/{sk}", None, T)
+    check("停用模板字段 -> 200（不再是 400）", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students", None, T)
+    check("停用的模板列不再出现在表格里",
+          not any(c["key"] == sk for c in (data_of(j) or {})["columns"]),
+          sk)
+    st, j = call("GET", "/students", None, T)
+    row_ids = [r["id"] for r in (data_of(j) or {})["rows"]]
+    if row_ids:
+        st, j = call("PUT", f"/students/{row_ids[0]}", {"name": "软删探测"}, T)
+    st, j = call("POST", f"/students/fields/{sk}/restore", None, T)
+    check("模板字段也能恢复 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/students", None, T)
+    check("恢复后模板列回来了",
+          any(c["key"] == sk for c in (data_of(j) or {})["columns"]), sk)
+
+    # ---------- 缺列的坏文件 ----------
+    bad = _mk_xlsx([["姓名", "性别"], ["丙同学", "男"]])
+    st, j = _upload("/students/import", T, bad)
+    check("缺「学号」列 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    check("提示说明学号的作用", "学号" in msg_of(j), msg_of(j))
+
+    # ---------- 撤销授权 ----------
+    st, j = call("GET", "/students/grants", None, T)
+    grants = data_of(j) or []
+    check("授权清单 1 条", len(grants) == 1, str(len(grants)))
+    if grants:
+        g = grants[0]
+        st, j = call("DELETE", f"/students/grants/{g['userId']}/{g['scope']}", None, T)
+        check("撤销授权 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        st, j = call("GET", "/students", None, P1)
+        check("撤销后又只能看自己那行",
+              (data_of(j) or {})["permission"]["canViewAll"] is False,
+              str((data_of(j) or {})["permission"]))
+    st, j = call("GET", "/students/grants", None, P1)
+    check("学生读授权清单 -> 403", st == 403, f"st={st} {msg_of(j)}")
+
+    # ---------- 访客（第二十四轮）：给领导看的纯只读账号 ----------
+    GU = "guest_probe"
+    # 先清上一轮的残留：建访客这段在中途失败过，账号会留下来，
+    # 再跑就会「账号已存在」，把用例变成一次性假红。
+    _purge_user(GU)
+    _purge_user(GU + "2")
+    st, j = call("POST", "/users",
+                 {"username": GU, "password": "123456", "realName": "领导视角",
+                  "role": "GUEST", "remark": "回归探针"}, T)
+    check("班主任能建访客账号 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/users",
+                 {"username": GU + "2", "password": "123456",
+                  "realName": "班长建的访客", "role": "GUEST"}, MO)
+    check("班长建访客 -> 403（访客只由班主任创建）", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/auth/login", {"username": GU, "password": "123456"})
+    G = (data_of(j) or {}).get("token")
+    check("访客能登录", bool(G), f"st={st}")
+
+    st, j = call("GET", "/students", None, G)
+    gv = (data_of(j) or {})["permission"]
+    g_rows = (data_of(j) or {})["rows"]
+    check("访客看得到**全部**学生行",
+          gv.get("canViewAll") is True and len(g_rows) >= 2,
+          f"canViewAll={gv.get('canViewAll')} 行数={len(g_rows)}")
+    check("访客只读：不能改任何一行",
+          gv.get("canEditAll") is False and gv.get("canEditOwn") is False, str(gv))
+    check("访客不能加字段", gv.get("canAddField") is False, str(gv))
+    check("访客 isGuest 标记为真", gv.get("isGuest") is True, str(gv))
+    check("访客不在授权流程里（scope 只有 VIEW_ALL）",
+          gv.get("scopes") == ["VIEW_ALL"], str(gv.get("scopes")))
+
+    # 写操作一律拒绝——这才是"只读"的意义
+    st, j = call("PUT", f"/students/{g_rows[0]['id']}", {"values": {"gender": "男"}}, G)
+    check("访客改格子 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students", {"studentNo": "G-1", "name": "访客加的"}, G)
+    check("访客新增学生 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students/fields", {"label": "访客加的列"}, G)
+    check("访客新增字段 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("DELETE", "/students/fields/ethnicity", None, G)
+    check("访客停用字段 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/students/requests", {"scope": "EDIT_ALL"}, G)
+    check("访客申请编辑权限 -> 403", st == 403, f"st={st} {msg_of(j)}")
+
+    # 访客该能看的只读页面
+    st, j = call("GET", "/records", None, G)
+    check("访客读账本明细 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/dashboard/summary", None, G)
+    check("访客读仪表盘 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/auth/profile", None, G)
+    check("访客读个人信息 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    # 写接口一律 403（_STAFF_ROUTES 兜底）
+    st, j = call("POST", "/records", {"name": "访客记的", "amount": 1}, G)
+    check("访客记账 -> 403", st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/users", None, G)
+    check("访客读成员名单 -> 403", st == 403, f"st={st} {msg_of(j)}")
+
+    # ---------- 勾选导出 ----------
+    from io import BytesIO
+
+    from openpyxl import load_workbook as _lwb
+
+    all_ids = [r["id"] for r in g_rows]
+    st, raw = _download("/students/export", G, payload={"recordIds": all_ids[:1]})
+    check("访客勾选导出 -> 200", st == 200, f"st={st}")
+    check("返回的是 xlsx", raw[:2] == b"PK" and len(raw) > 1000, f"{raw[:8]!r} len={len(raw)}")
+    if raw[:2] == b"PK":
+        n_pick = sum(1 for _ in _lwb(BytesIO(raw)).active.iter_rows()) - 3  # 减标题/范围/表头
+        check("文件里只有勾选的那 1 行", n_pick == 1, f"{n_pick} 行")
+    st, raw = _download("/students/export", G, payload={"recordIds": []})
+    check("没勾任何东西就导出 -> 400", st == 400, f"st={st}")
+
+    # ---------- 勾选导出：选列 ----------
+    st, j = call("GET", "/students", None, G)
+    gcols = {c["label"]: c["key"] for c in (data_of(j) or {})["columns"]}
+    want_cols = [gcols["学号"], gcols["姓名"], gcols["民族"]]
+    st, raw = _download("/students/export", G, payload={"fieldKeys": want_cols})
+    check("只勾 3 列导出 -> 200", st == 200, f"st={st}")
+    if st == 200 and raw[:2] == b"PK":
+        ws2 = _lwb(BytesIO(raw)).active
+        got_cols = [ws2.cell(row=3, column=i).value
+                    for i in range(1, ws2.max_column + 1)]
+        check("文件里只有这 3 列（学号/姓名/民族）",
+              got_cols == ["学号", "姓名", "民族"], str(got_cols))
+        n_all = sum(1 for _ in ws2.iter_rows()) - 3
+        check("选列导出时行仍是全部可见行", n_all == len(all_ids), f"{n_all} vs {len(all_ids)}")
+    # 只勾一列（不含锚点）→ 锚点应被服务端无条件补回
+    st, raw = _download("/students/export", G, payload={"fieldKeys": [gcols["民族"]]})
+    if st == 200 and raw[:2] == b"PK":
+        ws3 = _lwb(BytesIO(raw)).active
+        got3 = [ws3.cell(row=3, column=i).value for i in range(1, ws3.max_column + 1)]
+        check("只勾 1 列也会自动带上学号和姓名",
+              got3 == ["学号", "姓名", "民族"], str(got3))
+    else:
+        check("只勾 1 列也会自动带上学号和姓名", False, f"st={st}")
+    # 行 + 列一起
+    st, raw = _download("/students/export", G,
+                        payload={"recordIds": all_ids[:2], "fieldKeys": want_cols})
+    if st == 200 and raw[:2] == b"PK":
+        ws4 = _lwb(BytesIO(raw)).active
+        n4 = sum(1 for _ in ws4.iter_rows()) - 3
+        check("行和列可以一起选", n4 == 2 and ws4.max_column == 3,
+              f"{n4} 行 x {ws4.max_column} 列")
+    else:
+        check("行和列可以一起选", False, f"st={st}")
+    st, raw = _download("/students/export", G)
+    check("不传勾选=导全部 -> 200", st == 200, f"st={st}")
+    # 学生按 id 勾选导出：看不见的行必须被过滤掉，否则"按 id 导出"就成了越权口子
+    st, raw = _download("/students/export", P1, payload={"recordIds": all_ids})
+    check("学生按 id 勾选导出 -> 200", st == 200, f"st={st}")
+    if st == 200 and raw[:2] == b"PK":
+        n_stu = sum(1 for _ in _lwb(BytesIO(raw)).active.iter_rows()) - 3
+        check("学生不能靠 id 导出自己看不见的行", n_stu == 1, f"{n_stu} 行")
+    _purge_user(GU)
+    _purge_user(GU + "2")
+
+
 ALL_TESTS = [
     test_a00_encoding_guards,
     test_a00_bootstrap,
@@ -1502,7 +2274,7 @@ ALL_TESTS = [
     test_a05_records,
     test_a06_categories,
     test_a07_batches,
-    test_a08_notices,
+    test_a08_class_info_perms,
     test_a09_class_info,
     test_a10_disabled_token,
     test_a11_role_matrix,
@@ -1510,6 +2282,7 @@ ALL_TESTS = [
     test_a13_ownership,
     test_a14_audit,
     test_a14b_payable_roles,
+    test_a16_student_info,
     test_a15_cleanup,
 ]
 

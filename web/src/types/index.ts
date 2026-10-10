@@ -6,7 +6,7 @@ export interface ApiResponse<T = unknown> {
 }
 
 /** 角色 */
-export type Role = 'ADMIN' | 'MEMBER' | 'MONITOR' | 'TEACHER'
+export type Role = 'ADMIN' | 'MEMBER' | 'GUEST' | 'MONITOR' | 'TEACHER'
 
 /** 当前用户信息（后端 UserVO） */
 export interface UserInfo {
@@ -152,8 +152,6 @@ export interface DashboardSummary {
   /** 最新收费批次完成率 0-100；还没有批次时为 null */
   completionRate: number | null
   latestRecords: FeeRecord[]
-  /** 置顶公告（最多 3 条，仅已发布） */
-  pinnedNotices: Notice[]
 }
 
 /** 月度趋势点 */
@@ -169,54 +167,20 @@ export interface PieItem {
   value: number
 }
 
-/** 角色中文名：普通成员(只读) / 生活委员 / 班长 / 班主任（后三者同为运营角色） */
+/** 角色中文名：普通成员(只读) / 访客(只读·给领导看) / 生活委员 / 班长 / 班主任（后三者为运营角色） */
 export const ROLE_TEXT: Record<Role, string> = {
   ADMIN: '生活委员',
   MEMBER: '普通成员',
+  GUEST: '访客',
   MONITOR: '班长',
   TEACHER: '班主任',
 }
 
-/* ============================ M4 班级公告 / 班级信息 ============================ */
+/* ============================ M4 班级信息 ============================ */
 
-/** 班级公告（后端 NoticeVO + status/发布人） */
-export interface Notice {
-  id: number
-  title: string
-  content: string
-  /** 1 置顶（仪表盘只展示置顶公告） */
-  pinned: number
-  /** 1 已发布 0 已下架（成员看不到已下架） */
-  status: number
-  /** yyyy-MM-dd HH:mm:ss */
-  publishedAt: string | null
-  createdBy: number
-  createdByName: string | null
-  /** yyyy-MM-dd HH:mm:ss */
-  createdAt: string | null
-  /**
-   * 第十九轮审计：最后编辑留痕（谁、何时）。
-   * 与 `createdBy` 是**两条独立的线** —— 「谁发的」和「谁最后动的」都要能追。
-   */
-  updatedBy: number | null
-  updatedByName: string | null
-  updatedAt: string | null
-}
-
-/** 公告入参：发布需 title/content；编辑时全部可选（status=0 下架 / 1 恢复，pinned=1 置顶） */
-export interface NoticeRequest {
-  title?: string
-  content?: string
-  pinned?: number
-  status?: number
-}
-
-/** 公告查询条件 */
-export interface NoticeQuery {
-  /** 1=已发布（默认）｜0=已下架｜all=全部（仅运营角色生效） */
-  status?: '0' | '1' | 'all'
-  keyword?: string
-}
+/* 第二十四轮：班级公告已整体移除，`Notice` / `NoticeRequest` / `NoticeQuery`
+   三个类型连同页面、路由、侧栏入口、后端接口与 sys_notice 表一并删掉。
+   `DashboardSummary.pinnedNotices` 也已从摘要里去掉。 */
 
 /** 班级信息（balance 是流水事务同步的冗余列，只读） */
 export interface ClassInfo {
@@ -432,4 +396,184 @@ export interface UserUpdateRequest {
   phone?: string
   status?: 0 | 1
   password?: string
+}
+
+// ==================== 第二十三轮：学生信息 ====================
+
+/** 字段类型：决定录入控件与导出时的格式化方式 */
+export type StudentFieldType = 'TEXT' | 'NUMBER' | 'DATE' | 'BOOL'
+
+/**
+ * 申请/授权的三种范围。
+ *
+ * - `EDIT_OWN`：能改**自己那一行**（不含看别人）
+ * - `VIEW_ALL`：能看所有人的行（不含改）
+ * - `EDIT_ALL`：能改所有人的行，**蕴含** `VIEW_ALL`
+ */
+export type StudentScope = 'EDIT_OWN' | 'VIEW_ALL' | 'EDIT_ALL'
+
+/** 学生信息字段定义（一列 = 一条） */
+export interface StudentField {
+  id: number
+  /** 机器名，稳定不变；改显示名不影响历史数据 */
+  key: string
+  /** 表头显示名 */
+  label: string
+  type: StudentFieldType
+  typeText: string
+  /** 模板预置字段。**照样可以停用**（停用是软删，可恢复） */
+  isSystem: boolean
+  sort: number
+  /** 1=启用 0=已停用。只有 `includeDisabled=true` 的列表里才会出现 0 */
+  status?: number
+  /** 当前角色不能改这个字段（如生活委员没有字段管理权） */
+  locked: boolean
+}
+
+/**
+ * 改字段类型前的预览结果（后端算的，不写库）。
+ *
+ * 之所以要预览这一步：改类型要同步转换已填的值，而有的值转不了
+ * （"待定"没法变日期）。不先摊开这笔账就改，等于静默毁数据。
+ */
+export interface StudentRetypePreview {
+  key: string
+  label: string
+  fromType: StudentFieldType
+  fromTypeText: string
+  toType: StudentFieldType
+  toTypeText: string
+  /** 这一列一共多少个值（含空的） */
+  total: number
+  /** 能转换的个数（会被改写成新格式） */
+  convertibleCount: number
+  convertibleSamples: { before: string; after: string }[]
+  /** 样本之外的还有多少条 */
+  convertibleTruncated: number
+  /** 转不了的个数（「待定」这种） */
+  unconvertibleCount: number
+  unconvertibleSamples: { before: string }[]
+  unconvertibleTruncated: number
+  /** 空值（未填），不用管 */
+  emptyCount: number
+}
+
+/** 改类型的结果 */
+export interface StudentRetypeResult {
+  key: string
+  label: string
+  fromType: StudentFieldType
+  toType: StudentFieldType
+  convertedCount: number
+  /** 转不了但保留原样的个数（`clearUnconvertible=false` 时） */
+  keptUnconvertibleCount: number
+  /** 被清空的个数（`clearUnconvertible=true` 时） */
+  clearedCount: number
+}
+
+/** 表格一列的展示配置：前两列是锚点（学号/姓名），其余来自字段定义 */
+export interface StudentColumn {
+  key: string
+  label: string
+  type: StudentFieldType
+  system: boolean
+  writable: boolean
+}
+
+/** 一行学生数据 */
+export interface StudentRow {
+  id: number
+  studentNo: string
+  name: string
+  /** 是否是自己那一行 */
+  isMine: boolean
+  /** 当前角色能否编辑这一行 */
+  editable: boolean
+  linkedUserId: number | null
+  /** 字段标识 → 值 */
+  values: Record<string, string | null>
+}
+
+/**
+ * 权限快照。
+ *
+ * 后端已按可见范围裁剪过行，前端只是据此决定「锁图标 / 申请按钮」的显隐——
+ * **真正的闸门在后端**，这里拿到 false 也只是界面不给出入口。
+ */
+export interface StudentPermission {
+  scopes: StudentScope[]
+  isTeacher: boolean
+  /** 访客（领导）：能看全部、只能看，主用途是勾选导出 */
+  isGuest?: boolean
+  canViewAll: boolean
+  canEditAll: boolean
+  canEditOwn: boolean
+  /** 班主任 / 班长可加字段 */
+  canAddField: boolean
+  myRecordId: number | null
+  myStudentNo: string | null
+  /** 账号没填学号 → 匹配不到自己那行，提示去「个人信息」补 */
+  accountHasNoStudentNo: boolean
+  /** 班级一条记录都还没有 → 提示找班主任导入 */
+  classHasNoRecords: boolean
+}
+
+export interface StudentSheet {
+  columns: StudentColumn[]
+  rows: StudentRow[]
+  permission: StudentPermission
+}
+
+/** 新增/修改字段 */
+export interface StudentFieldRequest {
+  key?: string
+  label?: string
+  type?: StudentFieldType
+  sort?: number
+}
+
+export type StudentRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED'
+
+/** 一条访问申请（我提交的 / 收件箱里的，同一结构） */
+export interface StudentAccessRequest {
+  id: number
+  scope: StudentScope
+  scopeText: string
+  status: StudentRequestStatus
+  reason: string | null
+  reply: string | null
+  createdAt: string | null
+  handledAt: string | null
+  /** 收件箱专用：申请人 */
+  userId?: number
+  userName?: string
+  role?: Role
+}
+
+/** 一条已生效的授权 */
+export interface StudentGrant {
+  id: number
+  userId: number
+  userName: string
+  role: Role
+  scope: StudentScope
+  scopeText: string
+  grantedByName: string
+  grantedAt: string | null
+}
+
+/** 导入结果 */
+export interface StudentImportResult {
+  created: number
+  updated: number
+  rows: number
+  skippedEmptyCells: number
+  /** 本次导入**自动新建**的字段（表格里有、系统里还没有的列） */
+  newFields: { label: string; type: string; typeText: string }[]
+  /** 表内学号重复的行数（后一行覆盖前一行，不中止导入） */
+  duplicateRows: number
+  /** 有字段权限的人导入后这里恒为空；留着是为了无权限者导入时能看到"哪些列没进去" */
+  unmatchedColumns: string[]
+  errors: string[]
+  errorCount: number
 }

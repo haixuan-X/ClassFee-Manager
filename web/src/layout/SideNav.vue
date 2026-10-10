@@ -36,11 +36,37 @@ const userStore = useUserStore()
 const STAFF: Role[] = ['ADMIN', 'MONITOR', 'TEACHER']
 
 /**
- * 「我的缴费」可见角色 = 全部角色减去班主任。
+ * 访客能看到哪几个页面（用户口径：总览、账目、学生信息、我的，就这些）。
  *
- * 与后端 `batch_service._class_members` 同口径：缴费名单**只列 MEMBER**，运营角色
+ * 用**路径**而不是路由 name，和这里其余 items 的 `index` 同一口径。
+ * ⚠ 必须与 `router/index.ts` 的 `GUEST_ALLOWED` 保持一致，两处各写一份必然漂移。
+ */
+const GUEST_VISIBLE = new Set(['/dashboard', '/records', '/student-info', '/profile'])
+
+/**
+ * 访客（GUEST，第二十四轮）是**纯只读**，给领导/校方看情况用的。
+ *
+ * 用户口径：「能看见总览、账目、学生信息、还有我的，就这些」。
+ * 这里**不需要为它写任何配置**——下面每个受限入口的 `roles` 白名单里本来就没有
+ * GUEST，所以它天然只剩：仪表盘 / 账本明细 / 学生信息 / 个人信息。
+ *
+ * 刻意不给它的、以及为什么：
+ * - 收入登记 / 支出登记是**写表单**，给了就是个提交必报错的死页面
+ * - 我的缴费 / 成员缴费 / 收费批次 / 成员管理 里全是别人的姓名学号和账号
+ * - 班级公告 / 班级信息 用户没提，不给
+ *
+ * 后端同样兜底：访客不在 `STAFF_ROLES`，所有记账/账号管理接口一律 403。
+ * 路由守卫另有一张访客白名单（`router/index.ts` 的 `GUEST_ALLOWED`）。
+ */
+
+/**
+ * 「我的缴费」可见角色 = 全部角色减去班主任和访客。
+ *
+ * 与后端 `batch_service._class_members` 同口径：缴费名单只列 MEMBER，运营角色
  * 不会被生成缴费行，也就不存在「我交没交」。班主任是 .env 声明的老师账号、不是学生，
  * 给他一个永远显示「你不属于缴费对象」的死胡同页面毫无意义（第二十轮移除）。
+ *
+ * 访客同理，而且更明确：领导不是本班学生，压根不该出现在缴费名单里。
  */
 const PAYABLE: Role[] = ['ADMIN', 'MONITOR', 'MEMBER']
 
@@ -60,6 +86,10 @@ const groups: NavGroup[] = [
   {
     title: '班级',
     items: [
+      // 学生信息（第二十三轮）：**全员可见**——默认只显示自己那一行，要看/改别人的
+      // 走页面内的申请流程。路由不设 roles，拦在路由层会让同学连自己的信息都看不到。
+      // 访客例外：他能看**全部**（服务端 scope 决定的），但一行都改不了。
+      { index: '/student-info', label: '学生信息', icon: 'Postcard' },
       // 「我的缴费」：回答「有没有班费要交 / 我交了吗 / 什么时候截止」，这三问
       // **只有缴费对象问得出来** —— 后端 `_class_members` 只给 MEMBER 生成缴费行，
       // 运营角色进去只会看到一句「你不属于缴费对象」的死胡同页面。
@@ -69,8 +99,7 @@ const groups: NavGroup[] = [
       { index: '/members', label: '成员缴费', icon: 'UserFilled', roles: STAFF },
       { index: '/batches', label: '收费批次', icon: 'Collection', roles: STAFF },
       { index: '/member-manage', label: '成员管理', icon: 'User', roles: STAFF },
-      // 公告与班级信息：全员可读，发布/编辑由后端限定运营角色
-      { index: '/notices', label: '班级公告', icon: 'Bell' },
+      // 班级信息：全员可读，编辑由后端限定运营角色
       { index: '/class-info', label: '班级信息', icon: 'School' },
     ],
   },
@@ -81,10 +110,21 @@ const groups: NavGroup[] = [
   },
 ]
 
-/** 按角色过滤入口：用户信息未拉到时默认隐藏受限入口（角色不符 = 回仪表盘，服务端角色表兜底） */
+/**
+ * 按角色过滤入口：用户信息未拉到时默认隐藏受限入口（角色不符 = 回仪表盘，服务端角色表兜底）。
+ *
+ * 访客走的是**独立白名单**而不是 `item.roles`：班级公告、班级信息这类
+ * 「全员可读」的入口本来就没有 roles 限制，光靠 `roles` 拦不住它们，
+ * 而用户口径里访客并没有这两项。
+ *
+ * 白名单和 `router/index.ts` 的 `GUEST_ALLOWED` 必须一致——两处各写一份
+ * 必然会漂移，这里的注释就是拿来提醒改一处要同时改另一处。
+ */
 function canSee(item: NavItem): boolean {
-  if (item.disabled || !item.roles) return true
+  if (item.disabled) return true
   if (!userStore.user) return false
+  if (userStore.user.role === 'GUEST') return GUEST_VISIBLE.has(item.index)
+  if (!item.roles) return true
   return item.roles.includes(userStore.user.role)
 }
 

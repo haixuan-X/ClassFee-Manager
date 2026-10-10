@@ -12,7 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
 
 from .errors import BizException, FIELD_CONSTRAINT
@@ -20,7 +20,10 @@ from .errors import BizException, FIELD_CONSTRAINT
 _ENUM_KIND = re.compile(r"INCOME|EXPENSE")
 _ENUM_CHANNEL = re.compile(r"CASH|WECHAT|ALIPAY|BANK|OTHER")
 _ENUM_PAY_STATUS = re.compile(r"UNPAID|PAID|REFUNDED")
-_ENUM_ROLE = re.compile(r"ADMIN|MEMBER|MONITOR|TEACHER")
+# 角色白名单。GUEST（访客，第二十四轮）：给领导/校方看的纯只读账号——
+# 能看全班学生信息、能勾选导出，但改不了任何东西、不进成员管理。
+# 注意它**不在** STAFF_ROLES 里，所以访客调任何记账/账号管理接口都是 403。
+_ENUM_ROLE = re.compile(r"ADMIN|MEMBER|GUEST|MONITOR|TEACHER")
 # 小票相对路径（file_service.save_receipt 生成 receipts/<uuid>.<ext>，只认这一形态）
 _ENUM_RECEIPT = re.compile(r"receipts/[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -347,11 +350,155 @@ class BatchPayRequest(_BodyModel):
         return v
 
 
+# ==================== 第二十三轮：学生信息 ====================
+
+_ENUM_FIELD_TYPE = re.compile(r"^(TEXT|NUMBER|DATE|BOOL)$")
+_ENUM_SCOPE = re.compile(r"^(EDIT_OWN|VIEW_ALL|EDIT_ALL)$")
+
+
+class StudentFieldRequest(_BodyModel):
+    """新增/修改字段。`key`（机器名）只在新增时可给，缺失则自动生成。"""
+
+    key: str | None = None
+    label: str | None = None
+    type: str | None = None
+    sort: int | None = None
+
+    @field_validator("label")
+    @classmethod
+    def _v_label(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 64, "字段名称最多 64 字")
+        return v
+
+    @field_validator("key")
+    @classmethod
+    def _v_key(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 64, "字段标识最多 64 字")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def _v_type(cls, v: str | None) -> str | None:
+        if v is not None and not _ENUM_FIELD_TYPE.fullmatch(v):
+            _raise_constraint("字段类型只能是 TEXT/NUMBER/DATE/BOOL")
+        return v
+
+
+class StudentRecordCreate(_BodyModel):
+    """手工新增一行（不靠 Excel）。
+
+    只有 `studentNo` + `name` 是必填的——这两列是锚点，缺了就没法定位
+    "这是谁的行"。其余字段可以留空，建完在表格里逐格填（像 Excel 插一行）。
+    """
+
+    studentNo: str
+    name: str
+    values: dict[str, str | None] | None = None
+
+    @field_validator("studentNo")
+    @classmethod
+    def _v_no(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("学号不能为空")
+        _check_size(v, 32, "学号最多 32 字")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _v_name(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("姓名不能为空")
+        _check_size(v, 32, "姓名最多 32 字")
+        return v
+
+
+class StudentRecordUpdate(_BodyModel):
+    """就地编辑一格：`values` 是 `{字段标识: 值}`；`name` / `studentNo` 是锚点两列。"""
+
+    values: dict[str, str | None] | None = None
+    name: str | None = None
+    studentNo: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _v_name(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 32, "姓名最多 32 字")
+        return v
+
+    @field_validator("studentNo")
+    @classmethod
+    def _v_no(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 32, "学号最多 32 字")
+        return v
+
+
+class StudentExportRequest(_BodyModel):
+    """勾选导出的请求体。
+
+    行和列都可以只导一部分：
+    - `recordIds`：只导这些行。上限 500 是为了挡住"把所有 id 都塞进来"的用法——
+      真要全导应该用 `GET /export`，那个不受这个上限影响（可见范围本来就有限）。
+    - `fieldKeys`：只导这些列（字段标识）。学号/姓名是锚点，服务端无条件保留。
+
+    两者都为空 = 按当前可见范围全导（和 `GET /export` 等价）。
+    """
+
+    recordIds: list[int] = Field(default_factory=list)
+    fieldKeys: list[str] = Field(default_factory=list)
+
+
+class FieldRetypeRequest(_BodyModel):
+    """改字段类型。
+
+    `clearUnconvertible=False`（默认）——转不了的值保留原文本。
+    改错了还能改回来，比直接清空强。设 True 则置空（用户明确说"这些不要了"）。
+    """
+
+    toType: str
+    clearUnconvertible: bool = False
+
+
+class StudentAccessRequest(_BodyModel):
+    """申请（POST /requests）与审批（POST /requests/{id}/handle）共用。"""
+
+    scope: str | None = None
+    reason: str | None = None
+    approve: bool | None = None
+    reply: str | None = None
+
+    @field_validator("scope")
+    @classmethod
+    def _v_scope(cls, v: str | None) -> str | None:
+        if v is not None and not _ENUM_SCOPE.fullmatch(v):
+            _raise_constraint("权限类型只能是 EDIT_OWN/VIEW_ALL/EDIT_ALL")
+        return v
+
+    @field_validator("reason")
+    @classmethod
+    def _v_reason(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 255, "申请理由最多 255 字")
+        return v
+
+    @field_validator("reply")
+    @classmethod
+    def _v_reply(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 255, "回复最多 255 字")
+        return v
+
+
 class UserCreateRequest(_BodyModel):
     """新建账号（运营建班）：username=登录名；password 缺省 123456；role 缺省 MEMBER。
 
-    role 四选一：MEMBER(普通成员，只读) / ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)，
-    后三者同为运营角色（STAFF_ROLES）。
+    role 五选一：MEMBER(普通成员，只读) / GUEST(访客，只读·给领导看) /
+    ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)，后三者同为运营角色（STAFF_ROLES）。
     studentNo=学号（可与登录名不同）：留空时 MEMBER 默认回填登录名（超 20 字则留空）。
     """
 

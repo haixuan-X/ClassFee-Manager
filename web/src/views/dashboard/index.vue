@@ -6,7 +6,7 @@ import { fetchCategoryPie, fetchSummary, fetchTrend } from '@/api/dashboard'
 import { useUserStore } from '@/stores/user'
 import TrendChart from '@/components/TrendChart.vue'
 import CategoryPie from '@/components/CategoryPie.vue'
-import type { DashboardSummary, Notice, PieItem, TrendPoint } from '@/types'
+import type { DashboardSummary, PieItem, TrendPoint } from '@/types'
 import { CHANNEL_TEXT, ROLE_TEXT } from '@/types'
 
 const userStore = useUserStore()
@@ -77,9 +77,6 @@ const isReconciled = computed(() => {
   if (!s) return true
   return Math.abs(Number(s.balance) - Number(s.realBalance)) < 0.005
 })
-
-/** 置顶公告（后端只返回已发布且置顶的最多 3 条） */
-const pinnedNotices = computed<Notice[]>(() => summary.value?.pinnedNotices ?? [])
 
 function fmtTime(value: string | null | undefined) {
   return value ? dayjs(value).format('MM-DD HH:mm') : '—'
@@ -195,27 +192,6 @@ onMounted(async () => {
         <el-empty
           v-if="!loading && (summary?.latestRecords?.length ?? 0) === 0"
           description="还没有流水，去「收入登记 / 支出登记」记第一笔"
-          :image-size="72"
-        />
-      </article>
-
-      <article class="glass-card panel">
-        <div class="panel-head">
-          <h3>置顶公告</h3>
-          <router-link to="/notices" class="panel-link">查看全部</router-link>
-        </div>
-        <ul v-if="pinnedNotices.length > 0" class="notice-list">
-          <li v-for="n in pinnedNotices" :key="n.id" class="notice-item">
-            <div class="notice-title">{{ n.title }}</div>
-            <div class="notice-meta">
-              {{ n.createdByName ?? '—' }} · {{ fmtTime(n.publishedAt ?? n.createdAt) }}
-            </div>
-            <p class="notice-content">{{ n.content }}</p>
-          </li>
-        </ul>
-        <el-empty
-          v-else
-          description="暂无置顶公告，班级通知会显示在这里"
           :image-size="72"
         />
       </article>
@@ -373,51 +349,6 @@ onMounted(async () => {
 .panel-link:hover {
   text-decoration: underline;
   background: var(--color-muted);
-}
-
-/* 置顶公告 */
-.notice-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.notice-item {
-  padding: 10px 0;
-  border-bottom: 1px dashed var(--color-border);
-}
-
-.notice-item:last-child {
-  border-bottom: 0;
-}
-
-.notice-title {
-  font-size: 14px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.notice-meta {
-  font-size: 12px;
-  color: var(--color-muted-fg);
-  margin-top: 2px;
-}
-
-.notice-content {
-  margin: 6px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--color-foreground);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  /* 仪表盘只做速览：正文最多 2 行，完整内容去公告页看 */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 /* 最新流水 */

@@ -21,8 +21,8 @@ from .routers import (
     dashboard,
     files,
     members,
-    notices,
     records,
+    students,
     users,
 )
 from .security import install_auth_middleware
@@ -61,8 +61,8 @@ for _router in (
     batches,
     dashboard,
     files,
-    notices,
     class_info,
+    students,
 ):
     app.include_router(_router.router)
 

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import SessionLocal, engine
-from .models import ClsClass, FeeCategory, SysUser
+from .models import ClsClass, FeeCategory, StudentField, SysUser
 from .security import hash_password
 
 log = logging.getLogger("classfee")
@@ -90,6 +90,12 @@ def init_data() -> None:
             class_id = _init_class(db, cfg)
             _init_categories(db, class_id)
             _init_teacher_account(db, cfg, class_id)
+            # 第二十三轮：学生信息字段模板。**每次启动都调**（内部按 field_key 幂等），
+            # 这样「班主任在界面上删掉了某个模板字段」不会被下次启动悄悄加回来，
+            # 但「字段表是空的」能被自动补齐 —— 既有库升级、新库首启走同一条路径。
+            n = init_student_fields(db, class_id)
+    if n:
+        log.info("已下发学生信息字段模板：%d 个字段", n)
 
 
 def _init_class(db: Session, cfg: dict) -> int:
@@ -209,12 +215,20 @@ def _init_categories(db: Session, class_id: int) -> None:
 
 
 def migrate_role_enum() -> None:
-    """第十四轮：给 `sys_user.role` 的 ENUM 增加 'MONITOR'（班长）。
+    """给 `sys_user.role` 的 ENUM 补齐新增角色。
+
+    第十四轮加了 'MONITOR'（班长），第二十四轮加了 'GUEST'（访客·给领导看的只读账号）。
 
     为什么需要单独迁移：schema.sql 用 `CREATE TABLE IF NOT EXISTS`，
     **已建好的库不会因为改了 DDL 文本而变更列定义**（只有新库能拿到新枚举）。
-    这里查 INFORMATION_SCHEMA，缺 MONITOR 才 ALTER —— 幂等，升级过的库直接跳过。
+    不迁的话，老库上建访客账号会直接 500：
+    `DataError (1265): Data truncated for column 'role'`。
+
+    查 INFORMATION_SCHEMA，缺哪个补哪个 —— 幂等，升级过的库直接跳过。
+    每次都是**整列重写**成完整枚举，别改成"只加一个"的增量写法：
+    那样老库上会出现枚举值顺序不稳定的问题。
     """
+    wanted = ("ADMIN", "MEMBER", "GUEST", "MONITOR", "TEACHER")
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         column_type = conn.execute(
             text(
@@ -223,15 +237,17 @@ def migrate_role_enum() -> None:
                 "AND COLUMN_NAME = 'role'"
             )
         ).scalar()
-        if not column_type or "MONITOR" in column_type.upper():
+        if not column_type:
             return
+        upper = column_type.upper()
+        missing = [r for r in wanted if f"'{r}'" not in upper]
+        if not missing:
+            return
+        enum_sql = ",".join(f"'{r}'" for r in wanted)
         conn.execute(
-            text(
-                "ALTER TABLE sys_user MODIFY role "
-                "ENUM('ADMIN','MEMBER','MONITOR','TEACHER') NOT NULL DEFAULT 'MEMBER'"
-            )
+            text(f"ALTER TABLE sys_user MODIFY role ENUM({enum_sql}) NOT NULL DEFAULT 'MEMBER'")
         )
-        log.info("已升级 sys_user.role 枚举：新增 'MONITOR'（班长）")
+        log.info("已升级 sys_user.role 枚举：新增 %s", "、".join(missing))
 
 
 def add_audit_columns() -> None:
@@ -320,6 +336,100 @@ def backfill_payable_roster() -> None:
         log.info("已把 %d 条缴费行补进进行中的批次（生活委员 / 班长 纳入缴费对象）", inserted)
     else:
         log.info("进行中批次的缴费名单已覆盖全部缴费对象，跳过回填")
+
+
+# ------------------------------------------------------------------
+# 第二十三轮：学生信息字段模板
+# ------------------------------------------------------------------
+# 来自用户提供的真实导出生表。**学号 / 姓名不在这张表里**——它们是记录的锚点
+# （`student_record.student_no` / `.name`），承担「这是谁的行」的定位职责，
+# 放进字段值表会让「我那一行是哪一行」变成一次联表比对。
+#
+# field_type 的判定依据是**这一列的实际取值形态**，不是列名：
+# - DATE：出生日期 / 入校日期。源表里存的是 `20071209` 这样的数字（General 格式，
+#   不是 Excel 日期序列号），导入时按 YYYYMMDD 解析。
+# - BOOL：所有「是否…」列，取值域就是 是/否。
+# - 其余一律 TEXT。**学号/证件号/电话/代码类即使源表里是数字也存 TEXT**：
+#   前导 0 会丢、15 位以上会被 Excel 转成科学计数法。
+TEMPLATE_FIELDS: list[tuple[str, str, str]] = [
+    ("exam_no", "考生号", "TEXT"),
+    ("province_city_code", "生源省市代码", "TEXT"),
+    ("gender", "性别", "TEXT"),
+    ("birth_date", "出生日期", "DATE"),
+    ("id_type", "证件类型", "TEXT"),
+    ("id_number", "身份证号", "TEXT"),
+    ("political_status", "政治面貌", "TEXT"),
+    ("ethnicity", "民族", "TEXT"),
+    ("college_code", "院校代码", "TEXT"),
+    ("college_name", "院校名称", "TEXT"),
+    ("major_code", "专业代码", "TEXT"),
+    ("major_name", "专业名称", "TEXT"),
+    ("second_college", "二级学院", "TEXT"),
+    ("department", "所属系", "TEXT"),
+    ("class_no", "班号", "TEXT"),
+    ("level", "层次", "TEXT"),
+    ("duration", "学制", "TEXT"),
+    ("study_nature", "学习性质", "TEXT"),
+    ("enroll_date", "入校日期", "DATE"),
+    ("grade", "年级", "TEXT"),
+    ("reg_status", "注册状态", "TEXT"),
+    ("source_province", "生源地所在省（全称）", "TEXT"),
+    ("source_city", "生源地所在市（全称）", "TEXT"),
+    ("from_military", "是否来自军队", "BOOL"),
+    ("rural_hukou", "是否常驻户口在农村", "BOOL"),
+    ("grad_school", "毕业学校（全称）", "TEXT"),
+    ("entrance_score", "入学总分", "NUMBER"),
+    ("admission_type", "招生方式", "TEXT"),
+    ("source_type", "生源类型", "TEXT"),
+    ("home_address", "家庭详细住址", "TEXT"),
+    ("guardian_phone", "家长电话", "TEXT"),
+    ("own_phone", "本人电话", "TEXT"),
+    ("email", "电子邮箱", "TEXT"),
+    ("poverty_family", "是否建档立卡贫困家庭", "BOOL"),
+]
+
+
+def init_student_fields(db: Session, class_id: int) -> int:
+    """给**所有班级**下发学生信息字段模板。幂等：按 field_key 判存在，不覆盖已有定义。
+
+    为什么是「所有班级」而不是只给种子班级：`cls_class` 里可能有手工建出来的班级
+    （种子只认 `cfg["class_name"]` 那一个），只发给种子班级会让其它班在界面上
+    看到一张**空表**，分不清是「还没导入」还是「这个班没有字段」。
+
+    已有的字段一律不动——班主任/班长可能改过标签或停用过字段，
+    启动时被模板覆盖回去是不可接受的。
+    """
+    class_ids = [class_id]
+    for (cid,) in db.execute(select(ClsClass.id).where(ClsClass.id != class_id)):
+        class_ids.append(int(cid))
+
+    added = 0
+    for cid in class_ids:
+        existing = {
+            k
+            for (k,) in db.execute(
+                select(StudentField.field_key).where(
+                    StudentField.class_id == cid, StudentField.status == 1
+                )
+            )
+        }
+        todo = [f for f in TEMPLATE_FIELDS if f[0] not in existing]
+        for i, (key, label, ftype) in enumerate(todo):
+            db.add(
+                StudentField(
+                    class_id=cid,
+                    field_key=key,
+                    field_label=label,
+                    field_type=ftype,
+                    is_system=1,
+                    sort=(i + 1) * 10,
+                    status=1,
+                    created_by=0,  # 0 = 系统模板下发，非某个真人操作
+                )
+            )
+        added += len(todo)
+    db.flush()
+    return added
 
 
 def bootstrap() -> None:

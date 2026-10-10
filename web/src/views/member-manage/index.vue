@@ -306,9 +306,13 @@ const isSelf = (row: UserAccount) => row.id === userStore.user?.id
  * 账号管理权限等级（第十五轮）：班主任 > 班长 > 生活委员 > 普通成员。
  * 与后端 `security.ROLE_LEVEL` 同口径 —— 前端据此**隐藏越权按钮**，
  * 后端 `require_role_higher` 才是最终边界（前端隐藏不算安全边界）。
+ *
+ * GUEST（访客，第二十四轮）与 MEMBER 同级 0：两者都管不了账号，
+ * 区别在能看的范围（访客能看全班学生信息、能勾选导出）。
  */
 const ROLE_LEVEL: Record<Role, number> = {
   MEMBER: 0,
+  GUEST: 0, // 访客（只读，给领导看）
   ADMIN: 1, // 生活委员
   MONITOR: 2, // 班长
   TEACHER: 3, // 班主任

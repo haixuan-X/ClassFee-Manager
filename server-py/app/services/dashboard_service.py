@@ -15,7 +15,6 @@ from ..errors import BizException
 from ..models import ClsClass, FeeRecord
 from ..security import LoginUser
 from ..services.batch_service import completion_rate
-from ..services.notice_service import pinned_notices
 from ..services.record_service import to_vo_list
 
 EPOCH = datetime(1970, 1, 1)
@@ -120,7 +119,6 @@ def summary(db: Session, user: LoginUser) -> dict:
         "monthCount": month_count,
         "completionRate": completion_rate(db, class_id),
         "latestRecords": to_vo_list(db, latest),
-        "pinnedNotices": pinned_notices(db, class_id),
     }
 
 

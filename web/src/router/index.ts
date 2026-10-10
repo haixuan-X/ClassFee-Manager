@@ -9,6 +9,20 @@ import { useUserStore } from '@/stores/user'
  * 角色受限页（登记/成员/批次/成员管理）走 meta.roles；**全员可读但只有运营角色能写**
  * 的页面（公告、班级信息）不设 roles——写操作由后端 `_STAFF_ROUTES` 兜底，页面内按角色隐藏按钮。
  */
+
+/**
+ * 访客（GUEST，第二十四轮）能进的页面**白名单**。
+ *
+ * 用户口径：「能看见总览、账目、学生信息、还有我的，就这些」。
+ *
+ * 刻意用白名单而不是逐页 `roles` 排除：往反了写的话，以后新加一个页面
+ * 忘了加 `roles`，访客就能进——白名单的默认方向是「关」，漏掉的是新页面，
+ * 代价是访客少看一个页面（可发现、可补）；反向的漏是静默放行（不可发现）。
+ *
+ * 后端同样兜底：访客不在 `STAFF_ROLES`，所有记账/账号管理接口一律 403。
+ * 这里的意义是不让人手输 URL 进到一个**界面就报错**的空壳页。
+ */
+const GUEST_ALLOWED = new Set(['dashboard', 'records', 'student-info', 'profile'])
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
@@ -60,6 +74,16 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '我的缴费', roles: ['ADMIN', 'MONITOR', 'MEMBER'] },
       },
       {
+        // 学生信息（第二十三轮）：**全员可进**，因为每个人都要看自己的那一行。
+        // 行级可见范围由后端裁剪（默认只有自己那行，要看别人必须申请），
+        // 前端路由不设 roles——拦在路由层会导致「同学连自己的信息都看不到」。
+        // 侧栏放在「班级」分组内（用户口径：加在班级菜单里，不另开分组）。
+        path: 'student-info',
+        name: 'student-info',
+        component: () => import('@/views/student-info/index.vue'),
+        meta: { title: '学生信息' },
+      },
+      {
         // 成员缴费与收费批次都直接动钱，仅运营角色（后端另有 _STAFF_ROUTES 强制校验）
         path: 'members',
         name: 'members',
@@ -78,13 +102,6 @@ const routes: RouteRecordRaw[] = [
         name: 'member-manage',
         component: () => import('@/views/member-manage/index.vue'),
         meta: { title: '成员管理', roles: ['ADMIN', 'MONITOR', 'TEACHER'] },
-      },
-      {
-        // 班级公告：全员可读；发布/编辑/置顶/下架/删除仅运营角色（后端 _STAFF_ROUTES 强制校验）
-        path: 'notices',
-        name: 'notices',
-        component: () => import('@/views/notices/index.vue'),
-        meta: { title: '班级公告' },
       },
       {
         // 班级信息：全员可读；班级名/年级/班主任的编辑仅运营角色
@@ -150,6 +167,11 @@ router.beforeEach(async (to) => {
     }
   }
   if (roles && userStore.user && !roles.includes(userStore.user.role)) {
+    return { path: '/dashboard' }
+  }
+  // 访客白名单：meta.roles 拦不住「不设 roles 的全员可读页」（公告、班级信息），
+  // 所以对 GUEST 单独走一张白名单，缺省为拒绝。
+  if (userStore.user?.role === 'GUEST' && !GUEST_ALLOWED.has(String(to.name ?? ''))) {
     return { path: '/dashboard' }
   }
 

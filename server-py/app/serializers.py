@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from .models import ClsClass, FeeBatch, FeeCategory, FeePayment, FeeRecord, SysNotice, SysUser
+from .models import ClsClass, FeeBatch, FeeCategory, FeePayment, FeeRecord, SysUser
 
 # 读取对象字段的哨兵：用于区分「未传」与「显式 None（对齐 Java 刚插入未回填）」
 UNSET: Any = object()
@@ -161,33 +161,8 @@ def member_vo(u: SysUser, batch: FeeBatch | None, payment: FeePayment | None) ->
     return vo
 
 
-def notice_vo(
-    n: SysNotice,
-    created_by_name: str | None,
-    *,
-    created_at: Any = UNSET,
-    updated_by_name: str | None = None,
-) -> dict[str, Any]:
-    """班级公告出参：Java NoticeVO（id/title/content/pinned/publishedAt）+ status 与发布人。
-
-    createdAt 与 record_vo 同理：刚插入未回填时由调用方显式传 None。
-    """
-    ca = n.created_at if created_at is UNSET else created_at
-    return {
-        "id": n.id,
-        "title": n.title,
-        "content": n.content,
-        "pinned": n.pinned,
-        "status": n.status,
-        "publishedAt": fmt_dt(n.published_at),
-        "createdBy": n.created_by,
-        "createdByName": created_by_name,
-        "createdAt": fmt_dt(ca),
-        # 第十九轮审计：最后编辑人 / 时间（编辑、置顶、下架、恢复都会刷新）
-        "updatedBy": n.updated_by,
-        "updatedByName": updated_by_name,
-        "updatedAt": fmt_dt(n.updated_at),
-    }
+# 第二十四轮：班级公告已整体移除，`notice_vo` 连同 SysNotice 模型、页面、
+# 路由、接口、sys_notice 表一并删除。
 
 
 def class_vo(c: ClsClass) -> dict[str, Any]:
