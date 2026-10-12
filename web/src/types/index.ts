@@ -577,3 +577,124 @@ export interface StudentImportResult {
   errors: string[]
   errorCount: number
 }
+
+/* ==================== 第二十五轮：班级任务 ==================== */
+/**
+ * 任务和被删掉的班级公告的**唯一区别**：任务发出去之后还要有人回来填答案。
+ * 因此这一组类型里最要紧的是**可见性三态**——canSeeDetail（谁填了什么）、
+ * canAnswer（我能不能填）、summary（只有分布、没有具体是谁）。
+ */
+
+/** 四种题型。与后端 	ask_service.QTYPES 一一对应，改一处必须同时改另一处 */
+export type TaskQType = 'BOOLEAN' | 'SINGLE' | 'MULTI' | 'DATE'
+
+/** 汇总：**只给分布，不含具体是谁**——这是用户明确要的口径 */
+export interface TaskSummary {
+  /** 应答对象总数（全部启用账号减去发布人自己） */
+  total: number
+  answered: number
+  unanswered: number
+  /** BOOLEAN/SINGLE/MULTI 才有；DATE 为空数组 */
+  options: { label: string; count: number }[]
+}
+
+/** 我提交的那一条回答 */
+export interface TaskAnswer {
+  /** 存进库里时的原始值（BOOLEAN 是 true/false，MULTI 是 JSON 数组字符串） */
+  value: string
+  raw: string
+  note: string | null
+  submittedAt: string | null
+}
+
+/** 任务列表里的一条 */
+export interface Task {
+  id: number
+  title: string
+  question: string
+  qtype: TaskQType
+  qtypeText: string
+  /** SINGLE/MULTI 的候选项；BOOLEAN/DATE 为空数组 */
+  options: string[]
+  /** 答完能不能再补一段文字说明 */
+  allowText: boolean
+  deadline: string | null
+  /** 是否还在收答案（status 开关 + deadline 时间闸门，两个都过才算开） */
+  open: boolean
+  canAnswer: boolean
+  createdBy: number
+  /** 是不是我发的 */
+  isMine: boolean
+  /** 能不能看「谁填了什么」——只有发布人和班主任为 true */
+  canSeeDetail: boolean
+  /** 能不能改/关/删这条任务——只有发布人自己为 true */
+  canEdit: boolean
+  createdAt: string | null
+  myAnswer: TaskAnswer | null
+  summary: TaskSummary
+}
+
+export interface TaskListPayload {
+  rows: Task[]
+  /** 我能不能发任务（TEACHER / MONITOR） */
+  canPublish: boolean
+}
+
+/** 明细里的一行：一个人在这条任务上的回答状态 */
+export interface TaskDetailRow {
+  userId: number
+  name: string
+  username: string
+  role: Role
+  answered: boolean
+  value: string | null
+  raw: string | null
+  note: string | null
+  submittedAt: string | null
+}
+
+/** 明细。**非发布人 / 非班主任拿不到**（后端 403） */
+export interface TaskDetail {
+  taskId: number
+  title: string
+  question: string
+  qtype: TaskQType
+  qtypeText: string
+  allowText: boolean
+  deadline: string | null
+  open: boolean
+  /** 未填的人排在前面（后端已排序） */
+  rows: TaskDetailRow[]
+  answered: number
+  unanswered: number
+  noteCount: number
+  summary: TaskSummary
+}
+
+/**
+ * 发布任务的入参。
+ * qtype 决定 options 要不要给：BOOLEAN / DATE 忽略它，
+ * SINGLE / MULTI 必填且至少 2 项（后端校验）。
+ */
+export interface TaskCreatePayload {
+  title: string
+  question: string
+  qtype: TaskQType
+  options?: string[]
+  allowText?: boolean
+  /** YYYY-MM-DDTHH:mm:ss；不填=不限 */
+  deadline?: string | null
+}
+
+/**
+ * 改任务的入参。
+ * **刻意没有 qtype 和 options** —— 换题型会让已收回的答案对不上题，
+ * 要换只能删了重发（与后端 TaskUpdateRequest 保持一致）。
+ */
+export interface TaskUpdatePayload {
+  title: string
+  question: string
+  deadline?: string | null
+  status?: number
+  allowText?: boolean
+}

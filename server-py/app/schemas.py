@@ -464,6 +464,95 @@ class FieldRetypeRequest(_BodyModel):
     clearUnconvertible: bool = False
 
 
+# ---------------- 第二十五轮：班级任务 ----------------
+# 题型白名单。与 task_service.QTYPES 一一对应，改一处必须同时改另一处。
+
+_ENUM_QTYPE = re.compile("BOOLEAN|SINGLE|MULTI|DATE")
+
+
+class TaskCreateRequest(_BodyModel):
+    """发布任务。`qtype` 决定 `options` 要不要填：
+
+    - BOOLEAN 是/否 —— options 忽略
+    - SINGLE / MULTI —— options 必填，service 层校验至少 2 项
+    - DATE —— options 忽略
+    """
+
+    title: str | None = None
+    question: str | None = None
+    qtype: str | None = None
+    options: list[str] | None = None
+    allowText: bool | None = None
+    deadline: datetime | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _v_title(cls, v: str | None) -> str | None:
+        _not_blank(v, "请输入任务标题")
+        _check_size(v, 60, "任务标题最多 60 字")
+        return v
+
+    @field_validator("question")
+    @classmethod
+    def _v_question(cls, v: str | None) -> str | None:
+        _not_blank(v, "请输入题目")
+        _check_size(v, 255, "题目最多 255 字")
+        return v
+
+    @field_validator("qtype")
+    @classmethod
+    def _v_qtype(cls, v: str | None) -> str | None:
+        if v is None:
+            return "BOOLEAN"
+        if not _ENUM_QTYPE.fullmatch(v):
+            _raise_constraint("题目类型只能是 BOOLEAN/SINGLE/MULTI/DATE")
+        return v
+
+
+class TaskUpdateRequest(_BodyModel):
+    """改任务。**没有 qtype / options**：换题型会让已收回的答案对不上题，
+    要换只能删了重发（见 task_service.update_task 的注释）。"""
+
+    title: str | None = None
+    question: str | None = None
+    deadline: datetime | None = None
+    status: int | None = None
+    allowText: bool | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _v_title(cls, v: str | None) -> str | None:
+        _not_blank(v, "请输入任务标题")
+        _check_size(v, 60, "任务标题最多 60 字")
+        return v
+
+    @field_validator("question")
+    @classmethod
+    def _v_question(cls, v: str | None) -> str | None:
+        _not_blank(v, "请输入题目")
+        _check_size(v, 255, "题目最多 255 字")
+        return v
+
+
+class TaskAnswerRequest(_BodyModel):
+    """提交/修改**自己**的答案。
+
+    `value` 故意用 `Any`：四种题型的入参形状完全不同（布尔 / 一段文本 /
+    字符串数组 / 日期字符串），塞进一个联合类型只会让报错变得难懂。
+    具体形状由 task_service._dump_value 按 qtype 校验并给中文提示。
+    """
+
+    value: Any = None
+    note: str | None = None
+
+    @field_validator("note")
+    @classmethod
+    def _v_note(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 255, "补充说明最多 255 字")
+        return v
+
+
 class StudentAccessRequest(_BodyModel):
     """申请（POST /requests）与审批（POST /requests/{id}/handle）共用。"""
 

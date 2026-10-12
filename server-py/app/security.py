@@ -119,8 +119,21 @@ def require_role_higher(actor_role: str, target_role: str) -> None:
     - 低级不能动高级（班长/生活委员动不了班主任）
     - 同级不能互动（避免两个班长相向踢下线）
     - 「自己不动自己」不在这里判：停用/删除自己由各接口给出更贴切的提示语
+
+    ## 访客（GUEST）例外：只有班主任能管
+
+    访客的等级是 0（和普通成员同级，纯只读），但通用规则「等级高可以管等级低」
+    会让生活委员(1) **有资格**管访客——可访客代表的是外部人员（校方/领导），
+    一个生活委员不该能停用或删除校方的账号。
+
+    这里单独拦一道，而不是在各个接口里各写一遍：这道函数就是四个管理动作的
+    **唯一总入口**，规则写在这里才不会漏。（第二十四轮就漏过一次——
+    创建时拦了「只有班主任能建访客」，管理那四个动作却全放行。）
     """
     from .errors import BizException
+
+    if target_role == "GUEST" and actor_role != "TEACHER":
+        raise BizException.forbidden("访客账号只能由班主任管理")
 
     actor, target = role_level(actor_role), role_level(target_role)
     if target < actor:

@@ -11,7 +11,7 @@ import { ROLE_TEXT } from '@/types'
 /**
  * 成员管理（第七轮：老师建班）：新增账号 / 编辑资料与学号 / 重置密码 / 停用启用 / 删除。
  * 仅运营角色（生活委员 ADMIN / 班长 MONITOR / 班主任 TEACHER）可见，后端 /api/users 同口径强制校验；
- * 停用即禁止登录但保留历史；**删除仅限「零引用」账号**（无流水 / 缴费 / 公告 / 批次），
+ * 停用即禁止登录但保留历史；**删除仅限「零引用」账号**（无流水 / 缴费 / 批次 / 任务回答），
  * 有历史引用时后端 400 拒绝并引导改用停用。
  */
 const userStore = useUserStore()
@@ -270,7 +270,7 @@ async function toggleStatus(row: UserAccount) {
 
 /* ============================ 删除（第十二轮） ============================ */
 
-/** 删除账号：后端只放行「零引用」账号；有流水/缴费/公告/批次历史时 400，提示改用停用。 */
+/** 删除账号：后端只放行「零引用」账号；有流水/缴费/批次/任务回答历史时 400，提示改用停用。 */
 async function onDelete(row: UserAccount) {
   if (isSelf(row)) {
     ElMessage.warning('不能删除自己的账号')
@@ -279,7 +279,7 @@ async function onDelete(row: UserAccount) {
   try {
     await ElMessageBox.confirm(
       `确认删除「${row.realName}」（登录名 ${row.username}）？删除后该账号立即消失且不可恢复。` +
-        '若他已有流水、缴费或公告记录，系统会拒绝删除——那种情况请改用「停用」保留历史。',
+        '若他已有流水、缴费、批次或任务回答记录，系统会拒绝删除——那种情况请改用「停用」保留历史。',
       '删除账号',
       { type: 'error', confirmButtonText: '确认删除', cancelButtonText: '取消' },
     )
@@ -318,16 +318,30 @@ const ROLE_LEVEL: Record<Role, number> = {
   TEACHER: 3, // 班主任
 }
 const myLevel = computed(() => ROLE_LEVEL[userStore.user?.role ?? 'MEMBER'])
+const isTeacher = computed(() => userStore.user?.role === 'TEACHER')
 
-/** 我能否对这一行做「账号管理」动作（编辑/重置密码/停用/删除） */
+/**
+ * 访客只有班主任能管 —— 与后端 `security.require_role_higher` 的 GUEST 分支同规则。
+ *
+ * 单靠等级表拦不住：生活委员(1) > 访客(0)，通用规则算下来她**有资格**，
+ * 页面上就会冒出「编辑/重置密码/停用/删除」。访客代表的是校方，
+ * 一个生活委员不该能停用或删掉校方的账号，所以这条要单独写死。
+ * （前端隐藏只是少一次误操作，最终边界仍是后端那道闸门。）
+ */
 function canManage(row: UserAccount): boolean {
   if (isSelf(row)) return false // 自己那行本来就不显示这些按钮
+  if (row.role === 'GUEST') return isTeacher.value
   return myLevel.value > (ROLE_LEVEL[row.role] ?? 0)
 }
 
-/** 新建成员时可选的角色：**不高于自己**的那些（与后端 create_user 的等级校验同口径） */
+/**
+ * 新建成员时可选的角色：**不高于自己**的那些（与后端 create_user 的等级校验同口径），
+ * 外加「访客只有班主任能建」——等级表同样拦不住（班长 2 也 ≥ 0）。
+ */
 const assignableRoles = computed<Role[]>(() =>
-  (Object.keys(ROLE_LEVEL) as Role[]).filter((r) => ROLE_LEVEL[r] <= myLevel.value),
+  (Object.keys(ROLE_LEVEL) as Role[]).filter(
+    (r) => ROLE_LEVEL[r] <= myLevel.value && (r !== 'GUEST' || isTeacher.value),
+  ),
 )
 
 const roleTagType = (role: Role): 'success' | 'warning' | 'primary' | 'info' => {
@@ -431,42 +445,49 @@ onMounted(async () => {
         <el-table-column label="操作" width="248" align="right">
           <template #default="{ row }">
             <!-- 账号管理动作（编辑/重置密码/停用/删除）全部按权限等级收敛：
-                 班主任 > 班长 > 生活委员 > 普通成员，低等级看不到高等级行的任何按钮 -->
-            <el-button v-if="canManage(row)" size="small" link type="primary" @click="openEdit(row)">
-              编辑
-            </el-button>
-            <el-button v-if="canManage(row)" size="small" link type="primary" @click="openReset(row)">
-              重置密码
-            </el-button>
-            <el-button
-              v-if="row.status === 1 && canManage(row)"
-              size="small"
-              link
-              type="warning"
-              @click="toggleStatus(row)"
-            >
-              停用
-            </el-button>
-            <el-button
-              v-else-if="row.status === 0 && canManage(row)"
-              size="small"
-              link
-              type="success"
-              @click="toggleStatus(row)"
-            >
-              启用
-            </el-button>
-            <el-button
-              v-if="canManage(row)"
-              size="small"
-              link
-              type="danger"
-              :aria-label="`删除账号：${row.realName}`"
-              @click="onDelete(row)"
-            >
-              删除
-            </el-button>
-            <span v-else class="muted self-hint">当前账号</span>
+                 班主任 > 班长 > 生活委员 > 普通成员，低等级看不到高等级行的任何按钮。
+                 访客（GUEST）另有一条：只有班主任能管，见 canManage。 -->
+            <template v-if="canManage(row)">
+              <el-button size="small" link type="primary" @click="openEdit(row)">
+                编辑
+              </el-button>
+              <el-button size="small" link type="primary" @click="openReset(row)">
+                重置密码
+              </el-button>
+              <el-button
+                v-if="row.status === 1"
+                size="small"
+                link
+                type="warning"
+                @click="toggleStatus(row)"
+              >
+                停用
+              </el-button>
+              <el-button
+                v-else
+                size="small"
+                link
+                type="success"
+                @click="toggleStatus(row)"
+              >
+                启用
+              </el-button>
+              <el-button
+                size="small"
+                link
+                type="danger"
+                :aria-label="`删除账号：${row.realName}`"
+                @click="onDelete(row)"
+              >
+                删除
+              </el-button>
+            </template>
+            <!-- 下面两支必须分开：原先是「删除按钮」的 v-else，
+                 于是**任何**管不了的行（包括别人的）都写着「当前账号」，
+                 把自己那一行以外的人也标成「我」——访客行现在必然走这条分支，
+                 错字会天天摆在屏幕上。管不了别人的行就老实留空。 -->
+            <span v-else-if="isSelf(row)" class="muted self-hint">当前账号</span>
+            <span v-else class="muted">—</span>
           </template>
         </el-table-column>
       </el-table>
@@ -502,36 +523,38 @@ onMounted(async () => {
           <span class="muted">最近登录 {{ row.lastLoginAt ?? '—' }}</span>
         </div>
         <div class="card-actions">
-          <el-button v-if="canManage(row)" size="small" link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-button v-if="canManage(row)" size="small" link type="primary" @click="openReset(row)">重置密码</el-button>
-          <el-button
-            v-if="row.status === 1 && canManage(row)"
-            size="small"
-            link
-            type="warning"
-            @click="toggleStatus(row)"
-          >
-            停用
-          </el-button>
-          <el-button
-            v-else-if="row.status === 0 && canManage(row)"
-            size="small"
-            link
-            type="success"
-            @click="toggleStatus(row)"
-          >
-            启用
-          </el-button>
-          <el-button
-            v-if="canManage(row)"
-            size="small"
-            link
-            type="danger"
-            :aria-label="`删除账号：${row.realName}`"
-            @click="onDelete(row)"
-          >
-            删除
-          </el-button>
+          <template v-if="canManage(row)">
+            <el-button size="small" link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" link type="primary" @click="openReset(row)">重置密码</el-button>
+            <el-button
+              v-if="row.status === 1"
+              size="small"
+              link
+              type="warning"
+              @click="toggleStatus(row)"
+            >
+              停用
+            </el-button>
+            <el-button
+              v-else
+              size="small"
+              link
+              type="success"
+              @click="toggleStatus(row)"
+            >
+              启用
+            </el-button>
+            <el-button
+              size="small"
+              link
+              type="danger"
+              :aria-label="`删除账号：${row.realName}`"
+              @click="onDelete(row)"
+            >
+              删除
+            </el-button>
+          </template>
+          <span v-else-if="isSelf(row)" class="muted self-hint">当前账号</span>
         </div>
       </div>
 
@@ -608,7 +631,7 @@ onMounted(async () => {
             />
           </el-select>
           <div class="form-tip">
-            普通成员只看账本、不能记账；生活委员 / 班长 / 班主任都可记账、缴费、管成员与发公告。<br />
+            普通成员只看账本、不能记账；生活委员 / 班长 / 班主任都可记账、缴费、管成员；班主任和班长还能在「班级任务」里发题。<br />
             管理权限按 <strong>班主任 &gt; 班长 &gt; 生活委员 &gt; 普通成员</strong> 分级：
             只能管理比自己低级的账号，也不能创建比自己高级的角色。
           </div>

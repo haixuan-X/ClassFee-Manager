@@ -189,3 +189,48 @@ CREATE TABLE IF NOT EXISTS student_grant (
   PRIMARY KEY (id),
   UNIQUE KEY uk_grant (class_id, user_id, scope)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='学生信息访问授权（审批通过后的当前状态）';
+
+-- ============ 第二十五轮：班级任务（发出去 + 回收答案） ============
+-- 和第二十四轮删掉的班级公告的**唯一区别**就在第二张表：公告是只读的，
+-- 任务是发出去之后还要有人回来填。题型四种（BOOLEAN/SINGLE/MULTI/DATE），
+-- 一个任务一个问题，细则见 app/models.py 的 ClsTask 注释。
+
+-- 1) 任务：发布人拟题，可设截止时间和是否允许补充文字说明
+CREATE TABLE IF NOT EXISTS cls_task (
+  id            BIGINT       NOT NULL AUTO_INCREMENT,
+  class_id      BIGINT       NOT NULL,
+  title         VARCHAR(60)  NOT NULL COMMENT '任务标题，如「返校统计」',
+  question      VARCHAR(255) NOT NULL COMMENT '题目正文，如「你已经返校了吗？」',
+  qtype         ENUM('BOOLEAN','SINGLE','MULTI','DATE') NOT NULL DEFAULT 'BOOLEAN',
+  options_json  TEXT         NULL COMMENT 'SINGLE/MULTI 的候选项，JSON 数组；其余类型为空',
+  allow_text    TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '是否允许答完再补一段文字说明',
+  deadline      DATETIME     NULL COMMENT '截止时间，NULL=不限；过了就不再收答案',
+  status        TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1=开放 0=已关闭（发布人手动关）',
+    pinned        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '置顶：会出现在所有人仪表盘的「置顶任务」里',
+  created_by    BIGINT       NOT NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_task_class (class_id, status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='班级任务（第二十五轮）：向班级成员收集一个问题的回答';
+
+-- 2) 回答：一账号一任务一条（uk 保证重复提交是"改"而不是"多一行"）
+--    value_json 按题型存：BOOLEAN 存 "true"/"false"，SINGLE 存选项**原文**，
+--    MULTI 存 JSON 数组，DATE 存 YYYY-MM-DD。
+--    存原文不存下标：发布人可能事后加一个"其他"选项，按下标回读会把老答案指到别的项上。
+--
+--    ⚠ 本库**不建外键**（沿用 Java 版做法：只建索引，由 service 负责级联删除），
+--      所以这里没有 ON DELETE CASCADE。删任务必须由 `task_service.delete_task`
+--      显式先删回答，否则会攒下一批没人会发现、也没法清理的孤儿数据。
+CREATE TABLE IF NOT EXISTS cls_task_answer (
+  id           BIGINT       NOT NULL AUTO_INCREMENT,
+  task_id      BIGINT       NOT NULL,
+  user_id      BIGINT       NOT NULL,
+  value_json   TEXT         NULL,
+  note         VARCHAR(255) NULL COMMENT '补充说明（allow_text=1 时可填）',
+  submitted_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_task_user (task_id, user_id),
+  KEY idx_answer_task (task_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='班级任务回答';

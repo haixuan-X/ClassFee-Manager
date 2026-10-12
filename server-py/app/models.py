@@ -229,3 +229,74 @@ class StudentGrant(Base):
     granted_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
     )
+
+
+# ==================== 第二十五轮：班级任务 ====================
+# 公告是「发出去就看」，任务是「发出去还要回收答案」。所以任务多一张回答表，
+# 并且**谁能看到谁填了什么**成了这个模块的核心权限问题。
+
+
+class ClsTask(Base):
+    """一个任务 = 一个问题（第二十五轮刻意不做成多问题问卷）。
+
+    选题型时反复权衡过：多问题问卷更通用，但发布流程会从"填一下"变成
+    "填一张表"，而这个模块的全部用法都是点名/统计（返校了吗、住宿吗），
+    单问题够用且不该让人卡在表单里。要扩再说——加一张 `cls_task_question`
+    并不影响现有两列的结构。
+
+    `options_json` 存 SINGLE/MULTI 的候选项；BOOLEAN/DATE 用不到，为空。
+    `allow_text` 独立于题型：用户选了「是/否 + 文字说明」，即答完可以再补一句
+    （"没返校，家里有事"）。做成字段而不是 BOOLEAN 的内建行为，
+    是因为 SINGLE 也可能想收备注。
+    """
+
+    __tablename__ = "cls_task"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    class_id: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(60))
+    question: Mapped[str] = mapped_column(String(255))
+    qtype: Mapped[str] = mapped_column(String(8), default="BOOLEAN")
+    options_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allow_text: Mapped[int] = mapped_column(Integer, default=0)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 1=开放 0=已关闭（发布人手动关）。过 deadline 也会停止收答案，
+    # 那是 deadline 的语义，不另存一个「已截止」状态，省一处可能对不上的状态源。
+    status: Mapped[int] = mapped_column(Integer, default=1)
+    # 置顶：会出现在**每个人**的仪表盘上。用途是「催人填」——
+    # 任务发出去后同学未必会专门去班级任务页翻，置顶是唯一能自动冒出来的入口。
+    # 只有发布人能改（和改标题、关闭一样），因为置顶是把全班人的仪表盘占了。
+    pinned: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class ClsTaskAnswer(Base):
+    """一条回答 = 一个账号对一个任务的一个答案。
+
+    `value_json` 按题型存：BOOLEAN 存 "true"/"false"；SINGLE 存选项原文；
+    MULTI 存 JSON 数组；DATE 存 YYYY-MM-DD。**存原文不存选项下标**——
+    发布人可以改选项（加一项"其他"），按下标回读会把老答案指到别的选项上。
+
+    本库不建外键（与既有表一致），删任务的级联由 `task_service.delete_task`
+    显式做——那张表在 DDL 里也没有 ON DELETE CASCADE。
+    """
+
+    __tablename__ = "cls_task_answer"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[int] = mapped_column(Integer)
+    value_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )

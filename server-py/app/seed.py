@@ -251,7 +251,7 @@ def migrate_role_enum() -> None:
 
 
 def add_audit_columns() -> None:
-    """第十九轮：给三张表补「谁在什么时候动过」的审计列。
+    """第十九轮起：给几张表补列（后来名字就不叫「审计」了，见下）。
 
     和 `migrate_role_enum` 同一个理由：schema.sql 用 `CREATE TABLE IF NOT EXISTS`，
     **已建好的库不会因为改了 DDL 文本而多出列**。所以每个列都先查
@@ -261,10 +261,16 @@ def add_audit_columns() -> None:
     |----|----|--------------|
     | fee_record | voided_by / voided_at | 这笔账是谁作废的、什么时候 |
     | fee_batch  | closed_by / closed_at | 这个批次是谁关的、什么时候 |
-    | sys_notice | updated_by / updated_at | 这条公告最后是谁改的、什么时候 |
+    | cls_task   | pinned | 这条任务要不要出现在**每个人**的仪表盘上 |
+
+    第二十四轮移除了班级公告，`sys_notice` 的两列也一并删掉了。
+
+    函数名没跟着改：改名要动 `bootstrap()` 的调用点，而它的实际职责一直是
+    「补 DDL 里新增、但老库还没有的列」，`cls_task.pinned` 属于同一类。名字略窄，
+    注释和这张表才是准的 —— 留着比满仓库改字符串更安全。
 
     注意**删除仍然无痕**：`delete_record` / `delete_batch` 是硬删，行都没了自然留不下
-    记录。留痕路径是「作废 / 下架」，不是删除 —— 这是设计取舍，界面上一律引导
+    记录。留痕路径是「作废」，不是删除 —— 这是设计取舍，界面上一律引导
     「记错优先作废（可查是谁作废的）」。
     """
     columns = [
@@ -272,12 +278,27 @@ def add_audit_columns() -> None:
         ("fee_record", "voided_at", "DATETIME NULL COMMENT '作废时间'"),
         ("fee_batch", "closed_by", "BIGINT NULL COMMENT '关闭人'"),
         ("fee_batch", "closed_at", "DATETIME NULL COMMENT '关闭时间'"),
-        ("sys_notice", "updated_by", "BIGINT NULL COMMENT '最后编辑人'"),
-        ("sys_notice", "updated_at", "DATETIME NULL COMMENT '最后编辑时间'"),
+        # 第二十五轮补记：`cls_task` 建表时没有这一列（用户后来才提出「任务也能置顶」），
+        # 所以已经建好 `cls_task` 的库不会因为改了 DDL 文本而多出它。
+        # 和上面几列同理由：逐列查 INFORMATION_SCHEMA，缺了才 ALTER，幂等。
+        ("cls_task", "pinned", "TINYINT(1) NOT NULL DEFAULT 0 "
+                               "COMMENT '置顶：会出现在所有人仪表盘的「置顶任务」里'"),
     ]
     added: list[str] = []
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        live_tables = {
+            r[0] for r in conn.execute(
+                text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                     "WHERE TABLE_SCHEMA = DATABASE()")
+            )
+        }
         for table, column, ddl in columns:
+            # 表可能已经不存在（模块下线后旧库不会自动删表）。
+            # 这里必须跳过而不是让 ALTER 报 1146 —— 启动期的迁移崩溃会让**整个服务起不来**，
+            # 而缺的只是一张没人引用的表，代价完全不成比例。
+            # （第二十四轮删班级公告时就踩过一次：sys_notice 一删，本函数直接把启动打挂。）
+            if table not in live_tables:
+                continue
             exists = conn.execute(
                 text(
                     "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
@@ -290,9 +311,9 @@ def add_audit_columns() -> None:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
             added.append(f"{table}.{column}")
     if added:
-        log.info("已补审计列：%s", "、".join(added))
+        log.info("已补列：%s", "、".join(added))
     else:
-        log.info("审计列已齐全，跳过迁移")
+        log.info("列已齐全，跳过迁移")
 
 
 def backfill_payable_roster() -> None:

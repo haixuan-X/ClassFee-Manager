@@ -4,25 +4,36 @@ import { useUserStore } from '@/stores/user'
 
 /**
  * 路由表：M2 起接入记账页面（账本明细 / 收入登记 / 支出登记），
- * M3 接入成员/批次/账号管理，M4 接入班级公告与班级信息（见 docs/系统设计文档.md 第 8 节）。
+ * M3 接入成员/批次/账号管理，M4 接入班级信息（见 docs/系统设计文档.md 第 8 节）。
  *
- * 角色受限页（登记/成员/批次/成员管理）走 meta.roles；**全员可读但只有运营角色能写**
- * 的页面（公告、班级信息）不设 roles——写操作由后端 `_STAFF_ROUTES` 兜底，页面内按角色隐藏按钮。
+ * 第二十四轮删掉了班级公告，第二十五轮换成了班级任务（发出去还要回收答案）。
+ *
+ * 角色受限页（登记/成员/批次/成员管理）走 meta.roles；**全员可读但只有特定角色能写**
+ * 的页面（学生信息、班级任务、班级信息）不设 roles——写操作由后端 service 逐条判，
+ * 页面内再按角色隐藏按钮。拦在路由层会造成「同学连题都看不到」。
  */
 
 /**
  * 访客（GUEST，第二十四轮）能进的页面**白名单**。
  *
- * 用户口径：「能看见总览、账目、学生信息、还有我的，就这些」。
+ * 用户口径：「能看见总览、账目、学生信息、还有我的，就这些」，
+ * 第二十五轮加了班级任务（领导要看「返校率怎么样」，但看不到「谁没返校」）。
  *
  * 刻意用白名单而不是逐页 `roles` 排除：往反了写的话，以后新加一个页面
  * 忘了加 `roles`，访客就能进——白名单的默认方向是「关」，漏掉的是新页面，
  * 代价是访客少看一个页面（可发现、可补）；反向的漏是静默放行（不可发现）。
  *
- * 后端同样兜底：访客不在 `STAFF_ROLES`，所有记账/账号管理接口一律 403。
- * 这里的意义是不让人手输 URL 进到一个**界面就报错**的空壳页。
+ * 后端同样兜底：访客不在 `STAFF_ROLES`，所有记账/账号管理接口一律 403；
+ * 访客答题由 `task_service.can_answer` 拦掉。任务这里放行是**只读**的：
+ * 后端对非发布人一律只返回汇总，明细端点 403。
  */
-const GUEST_ALLOWED = new Set(['dashboard', 'records', 'student-info', 'profile'])
+const GUEST_ALLOWED = new Set([
+  'dashboard',
+  'records',
+  'student-info',
+  'tasks',
+  'profile',
+])
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
@@ -82,6 +93,15 @@ const routes: RouteRecordRaw[] = [
         name: 'student-info',
         component: () => import('@/views/student-info/index.vue'),
         meta: { title: '学生信息' },
+      },
+      {
+        // 班级任务（第二十五轮）：发出去还要回收答案，所以三个"看"分得很开——
+        // 任务列表全员可读（但只到汇总）、明细只有发布人和班主任、答题访客被拦。
+        // 路由不设 roles：同学要能答题，拦在路由层会连题都看不到。
+        path: 'tasks',
+        name: 'tasks',
+        component: () => import('@/views/tasks/index.vue'),
+        meta: { title: '班级任务' },
       },
       {
         // 成员缴费与收费批次都直接动钱，仅运营角色（后端另有 _STAFF_ROUTES 强制校验）
@@ -169,7 +189,7 @@ router.beforeEach(async (to) => {
   if (roles && userStore.user && !roles.includes(userStore.user.role)) {
     return { path: '/dashboard' }
   }
-  // 访客白名单：meta.roles 拦不住「不设 roles 的全员可读页」（公告、班级信息），
+  // 访客白名单：meta.roles 拦不住「不设 roles 的全员可读页」（学生信息、班级任务、班级信息），
   // 所以对 GUEST 单独走一张白名单，缺省为拒绝。
   if (userStore.user?.role === 'GUEST' && !GUEST_ALLOWED.has(String(to.name ?? ''))) {
     return { path: '/dashboard' }

@@ -23,6 +23,7 @@ from .routers import (
     members,
     records,
     students,
+    tasks,
     users,
 )
 from .security import install_auth_middleware
@@ -63,6 +64,7 @@ for _router in (
     files,
     class_info,
     students,
+    tasks,
 ):
     app.include_router(_router.router)
 
