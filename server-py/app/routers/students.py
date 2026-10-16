@@ -9,6 +9,8 @@
 | POST /api/students/import | 班主任 / 班长 |
 | GET  /api/students/export | 全员；导出内容 = 自己的可见范围 |
 | GET/POST/PUT/DELETE /api/students/fields | 新增/改字段：班主任 / 班长 |
+| GET  /api/students/accounts/preview | **仅班主任**。预演一键建账号，不写库 |
+| POST /api/students/accounts | **仅班主任**。按学生信息批量建登录账号 |
 | POST /api/students/requests | 全员（含申请） |
 | GET  /api/students/requests | 两种含义：`mine=true` 看自己的申请；否则看收件箱（仅班主任） |
 | POST /api/students/requests/{id}/handle | 仅班主任 |
@@ -39,6 +41,7 @@ from ..schemas import (
 )
 from ..security import LoginUser, get_current_user
 from ..services import student_excel, student_service as svc
+from ..services import user_service
 
 router = APIRouter(prefix="/api/students", tags=["students"])
 
@@ -54,6 +57,37 @@ def list_students(
     db: Session = Depends(get_db),
 ):
     return ok(svc.list_records(db, user, keyword=keyword))
+
+
+@router.get("/accounts/preview")
+def preview_accounts(
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """预演「按学生信息一键建账号」：将新建 / 将挂接 / 将跳过各多少、各为什么。
+
+    声明在 `/{record_id}` 之前：路径段数不同本来不会真撞，但把字面量路径排在
+    参数路径前面是这个仓库的一贯写法（见 /tasks/pinned），免得以后有人加一条
+    `GET /students/{record_id}` 就把它吃掉了。
+
+    **纯读**：一个字节都不写。建号是不可逆动作（建错了得一个个删），
+    所以先让人看清楚再点。
+    """
+    return ok(user_service.preview_accounts_from_students(db, user))
+
+
+@router.post("/accounts")
+def create_accounts(
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """按学生信息一键建账号（第二十五轮）。**仅班主任**。
+
+    学号即登录名，姓名即昵称，密码统一 123456，角色一律普通成员。
+    已经存在的账号不重建，而是把对应的学生行**挂接**上去——这一步能救回
+    「上学期建过账号、这次导入名单没认出来」的情况。
+    """
+    return ok(user_service.create_accounts_from_students(db, user))
 
 
 @router.post("")

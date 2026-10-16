@@ -283,6 +283,11 @@ def add_audit_columns() -> None:
         # 和上面几列同理由：逐列查 INFORMATION_SCHEMA，缺了才 ALTER，幂等。
         ("cls_task", "pinned", "TINYINT(1) NOT NULL DEFAULT 0 "
                                "COMMENT '置顶：会出现在所有人仪表盘的「置顶任务」里'"),
+        # 第二十六轮：`sys_user` 建于第一轮，当时没有「访客可见范围」这个概念
+        # （那是二十多轮之后才加的），所以老库的 sys_user 没这一列。
+        # NULL = 全部可见，正好等于这批账号升级前后的行为，不用改任何存量值。
+        ("sys_user", "guest_scopes", "TEXT NULL "
+                                     "COMMENT '仅访客用：可见范围 JSON 数组；NULL=全部'"),
     ]
     added: list[str] = []
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:

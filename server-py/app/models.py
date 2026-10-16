@@ -39,6 +39,13 @@ class SysUser(Base):
     real_name: Mapped[str] = mapped_column(String(32))
     student_no: Mapped[str | None] = mapped_column(String(20), nullable=True)
     role: Mapped[str] = mapped_column(String(16), default="MEMBER")
+    # 第二十六轮：**只有访客用得上**。可见范围，JSON 数组，如 ["STUDENTS","TASKS"]。
+    #
+    # NULL = 全部可见。这是刻意的：第二十四轮建的那批访客账号当时还没这个概念，
+    # 行为就是"全能看"。用 NULL（而不是空数组）表示全开，升级过来的老账号
+    # 不需要任何数据迁移就保持原样；而且"一项都没勾"在前端会被归一成全开，
+    # 所以库里永远不会出现空数组——空数组和"全开"就没法混为一谈了。
+    guest_scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[int] = mapped_column(Integer, default=1)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

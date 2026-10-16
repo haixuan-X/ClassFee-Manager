@@ -1935,6 +1935,64 @@ def test_a17_class_tasks():
           (grow[0]["summary"]["total"] if grow else -1) == want_total,
           str(grow[0]["summary"] if grow else None))
 
+    # ---------- 置顶：仪表盘面板（第二十五轮追加） ----------
+    # 置顶占用的是**每个人**的仪表盘，所以闸门和改标题同级：只有发布人自己。
+    p1 = (data_of(call("POST", "/tasks", {"title": "regress 置顶甲", "question": "甲",
+                                          "qtype": "BOOLEAN",
+                                          "deadline": "2026-12-20T10:00:00"}, T)[1]) or {}).get("id")
+    p2 = (data_of(call("POST", "/tasks", {"title": "regress 置顶乙", "question": "乙",
+                                          "qtype": "BOOLEAN",
+                                          "deadline": "2026-11-10T10:00:00"}, T)[1]) or {}).get("id")
+    p3 = (data_of(call("POST", "/tasks", {"title": "regress 置顶丙", "question": "丙",
+                                          "qtype": "BOOLEAN"}, T)[1]) or {}).get("id")
+    p4 = (data_of(call("POST", "/tasks", {"title": "regress 置顶已关", "question": "丁",
+                                          "qtype": "BOOLEAN"}, T)[1]) or {}).get("id")
+    made.extend([p1, p2, p3, p4])
+    for x in (p1, p2, p3, p4):
+        call("POST", f"/tasks/{x}/pin", None, T)
+    call("POST", f"/tasks/{p4}/close", None, T)
+
+    for who, tok in (("生活委员", A), ("普通成员", M), ("访客", G), ("班长", MO)):
+        st, j = call("POST", f"/tasks/{p1}/pin", None, tok)
+        check(f"{who}置顶别人发的任务 -> 403（占的是全班人的仪表盘）",
+              st == 403, f"st={st} {msg_of(j)}")
+
+    st, j = call("GET", "/tasks/pinned", None, T)
+    pr = (data_of(j) or {}).get("rows", [])
+    ids = [r["id"] for r in pr]
+    check("已关闭的置顶任务自动从仪表盘消失（置顶是为了催人填）",
+          st == 200 and p4 not in ids, f"ids={ids}")
+    # 面板是全班级共享的、只取前 3 条，库里**别人**的置顶任务会挤占名额
+    # （人工建的演示数据就会）。所以只断言本用例这三条的**相对**顺序。
+    mine_ids = [i for i in ids if i in (p1, p2, p3)]
+    check("置顶任务按「快到期的在前」排序，不限时的排最后",
+          mine_ids == [i for i in (p2, p1, p3) if i in mine_ids],
+          f"本用例的相对顺序={mine_ids}（全量={ids}）")
+    check("面板最多 3 条", len(pr) <= 3, f"条数={len(pr)}")
+    check("面板里的每条都带汇总和我的答案位（与列表页同形状）",
+          all("summary" in r and "myAnswer" in r for r in pr), str(pr[:1]))
+
+    st, j = call("GET", "/tasks/pinned", None, G)
+    gr = (data_of(j) or {}).get("rows", [])
+    check("访客也能看置顶任务（领导要看到「还差几道」）",
+          st == 200 and len(gr) > 0, f"st={st} n={len(gr)}")
+    check("访客在面板上拿不到「我的答案」、也不能填",
+          all(r["canAnswer"] is False and r["myAnswer"] is None for r in gr), str(gr[:1]))
+    st, j = call("GET", "/tasks/pinned", None, M)
+    mr = (data_of(j) or {}).get("rows", [])
+    check("同学在面板上 canAnswer=true（这样面板才催得动他）",
+          bool(mr) and all(r["canAnswer"] is True for r in mr), str(mr[:1]))
+    st, j = call("GET", "/tasks/pinned", None, T)
+    tr = (data_of(j) or {}).get("rows", [])
+    check("班主任在面板上 canAnswer=false（他不是被统计的同学）",
+          all(r["canAnswer"] is False for r in tr), str(tr[:1]))
+
+    st, j = call("POST", f"/tasks/{p1}/unpin", None, T)
+    check("取消置顶 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    ids = [r["id"] for r in
+           (data_of(call("GET", "/tasks/pinned", None, T)[1]) or {}).get("rows", [])]
+    check("取消置顶后立刻从面板消失", p1 not in ids, f"ids={ids}")
+
     # ---------- 收尾 ----------
     purge()
     _purge_user(GU)
@@ -1942,6 +2000,198 @@ def test_a17_class_tasks():
     left = [r["title"] for r in (data_of(j) or {}).get("rows", [])
             if r["title"].startswith("regress")]
     check("探针任务清理干净", not left, f"残留={left}")
+
+
+def _force_unlink(student_no: str) -> None:
+    """把某一行的 `user_id` 强行置空，模拟「老库里没挂上」的脏数据。
+
+    走 SQL 而不是 API：没有哪个接口能制造这种状态——它只在**账号建好之后、
+    名单才导入**的历史顺序下才会自然出现（`create_record` 会自动挂接），
+    造不出这个时序就测不了挂接逻辑。
+    """
+    import pathlib
+    import sys as _sys
+
+    server_dir = str(pathlib.Path(__file__).resolve().parents[1])
+    if server_dir not in _sys.path:
+        _sys.path.insert(0, server_dir)
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        with _engine.begin() as c:
+            c.execute(
+                _t("UPDATE student_record SET user_id=NULL WHERE student_no=:s"),
+                {"s": student_no},
+            )
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _purge_students(student_nos: list[str]) -> None:
+    """按学号删若干行学生记录及其字段值。"""
+    for sno in student_nos:
+        _purge_one_record(sno)
+
+
+def test_a18_accounts_from_students():
+    print("\n--- T. 按学生信息一键创建账号（第二十五轮）---")
+    T, MO, M = S["T"], S["MO"], S["M"]
+    A = S["A"]
+    GU = "guest_acc_probe"
+    _purge_user(GU)
+    st, j = call("POST", "/users", {"username": GU, "password": "123456",
+                                    "realName": "访客建号探针", "role": "GUEST"}, T)
+    G = login(GU)
+    check("建访客探针 -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    made_records: list[str] = []
+    made_users: list[str] = []
+
+    def add_record(sno: str, name: str) -> int | None:
+        st, j = call("POST", "/students", {"studentNo": sno, "name": name}, T)
+        made_records.append(sno)
+        return (data_of(j) or {}).get("id") if st == 200 else None
+
+    # ---------- 预演不写库 ----------
+    add_record("20229901", "预演甲")
+    st, j = call("GET", "/students/accounts/preview", None, T)
+    p = data_of(j) or {}
+    check("预演 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("预演标记 executed=false", p.get("executed") is False, str(p.get("executed")))
+    check("预演里没有「已新建」清单（还没建呢）",
+          p.get("created") == [], str(p.get("created")))
+
+    before = {u["username"] for u in (data_of(call("GET", "/users", None, T)[1]) or [])}
+    call("GET", "/students/accounts/preview", None, T)
+    after = {u["username"] for u in (data_of(call("GET", "/users", None, T)[1]) or [])}
+    check("预演真的一个字节都没写（账号集合不变）", before == after,
+          f"多了={after - before}")
+
+    # ---------- 权限：仅班主任 ----------
+    for who, tok in (("班长", MO), ("生活委员", A), ("普通成员", M), ("访客", G)):
+        st, j = call("GET", "/students/accounts/preview", None, tok)
+        check(f"{who}预演 -> 403（建账号只给班主任）", st == 403, f"st={st} {msg_of(j)}")
+        st, j = call("POST", "/students/accounts", None, tok)
+        check(f"{who}真建 -> 403", st == 403, f"st={st} {msg_of(j)}")
+
+    # ---------- 边界：建不出来的行要给出**原因** ----------
+    add_record("2" * 25, "学号超长")          # 25 位 > sys_user.student_no 的 20
+    add_record("20229902", "正常乙")
+
+    # 「登录名被占用」这条分支要求：该学号是某账号的**登录名**却不是它的学号。
+    # 如果学号和登录名相同，`create_record` 早就自动挂接了，走不到这条分支
+    # （第一版用例就是这么假通过的）。所以这里故意让两者不同。
+    st, j = call("POST", "/users", {"username": "regress_taken", "password": "123456",
+                                    "realName": "占位的", "studentNo": "20229888",
+                                    "role": "MEMBER"}, T)
+    made_users.append("regress_taken")
+    add_record("regress_taken", "学号等于别人的登录名")
+
+    st, j = call("GET", "/students/accounts/preview", None, T)
+    p = data_of(j) or {}
+    reasons = {s["studentNo"]: s["reason"] for s in p.get("skipped", [])}
+    check("学号超长的行被跳过并说明原因",
+          "2" * 25 in reasons and "20" in reasons["2" * 25], str(reasons))
+    check("登录名被占用的行被跳过，并说明是被谁占了",
+          "regress_taken" in reasons and "占位的" in reasons["regress_taken"], str(reasons))
+    check("正常的行进了待建清单",
+          {x["studentNo"] for x in p.get("toCreateList", [])}
+          >= {"20229901", "20229902"}, str(p.get("toCreateList")))
+    preview_create = {x["studentNo"] for x in p.get("toCreateList", [])}
+
+    # ---------- 真建 ----------
+    st, j = call("POST", "/students/accounts", None, T)
+    r = data_of(j) or {}
+    check("真建 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("真建标记 executed=true", r.get("executed") is True, str(r.get("executed")))
+    made_users.extend(c["username"] for c in r.get("created", []))
+    check("新建的账号返回了清单", len(r.get("created", [])) >= 2, str(r.get("created")))
+
+    # 预演说建哪些，执行就必须建哪些，一个不多一个不少。
+    # 原先只断言"建出来的都在某个集合里"，那证明不了预演和执行是同一套算法——
+    # 而这正是这个功能最容易出的错：两边各算各的，界面写 5 个、实际建了 4 个。
+    check("预演的待建清单与实际新建的**完全一致**",
+          {c["username"] for c in r.get("created", [])} == preview_create,
+          f"预演={sorted(preview_create)} 实际={[c['username'] for c in r.get('created', [])]}")
+
+    # ---------- 建出来的账号能用吗 ----------
+    for sno in ("20229901", "20229902"):
+        tok = login(sno)
+        check(f"新账号 {sno} 能用默认密码 123456 登录", bool(tok), "登录失败")
+        st, j = call("GET", "/students", None, tok or "")
+        rows = (data_of(j) or {}).get("rows", [])
+        check(f"{sno} 只看得到自己那一行（行级可见性没被建号破坏）",
+              len(rows) == 1 and rows[0]["studentNo"] == sno, str(rows))
+    st, j = call("GET", "/users", None, T)
+    us = {u["username"]: u for u in (data_of(j) or [])}
+    check("新账号角色是普通成员（不给班长/生活委员）",
+          us.get("20229901", {}).get("role") == "MEMBER", str(us.get("20229901")))
+    check("新账号的学号被正确写入",
+          us.get("20229901", {}).get("studentNo") == "20229901", str(us.get("20229901")))
+
+    # 学生行确实挂上了
+    st, j = call("GET", "/students", None, T)
+    rows = {r["studentNo"]: r for r in (data_of(j) or {}).get("rows", [])}
+    check("学生行挂到了新账号上",
+          rows.get("20229901", {}).get("linkedUserId") == us["20229901"]["id"],
+          str(rows.get("20229901")))
+
+    # ---------- 幂等：再点一次不该重复建 ----------
+    n_before = len(us)
+    st, j = call("POST", "/students/accounts", None, T)
+    r2 = data_of(j) or {}
+    check("再点一次：不再新建任何账号", r2.get("toCreate") == 0, str(r2.get("toCreate")))
+    st, j = call("GET", "/users", None, T)
+    check("再点一次：账号总数不变", len(data_of(j) or []) == n_before,
+          f"{n_before} -> {len(data_of(j) or [])}")
+    check("再点一次：已建过的行被标为「已经挂接账号了」",
+          any(s["reason"] == "已经挂接账号了" for s in r2.get("skipped", [])),
+          str(r2.get("skipped")))
+
+    # ---------- 挂接：账号先在、名单后进 ----------
+    # 场景：老师手工建过「20229903 / 老王」，但学生信息那行当时没挂上
+    st, j = call("POST", "/users", {"username": "old_wang", "password": "123456",
+                                    "realName": "老王", "studentNo": "20229903",
+                                    "role": "MEMBER"}, T)
+    old_uid = (data_of(j) or {}).get("id")
+    made_users.append("old_wang")
+    add_record("20229903", "老王")
+    # 模拟老库没挂上的脏数据
+    _force_unlink("20229903")
+
+    st, j = call("GET", "/students/accounts/preview", None, T)
+    p3 = data_of(j) or {}
+    check("认得出「学号已对应某个账号」并归为挂接而不是新建",
+          any(x["studentNo"] == "20229903" for x in p3.get("linked", [])), str(p3))
+    check("挂接项标明了不新建", p3.get("toCreate", 0) == 0, str(p3.get("toCreate")))
+
+    st, j = call("POST", "/students/accounts", None, T)
+    r3 = data_of(j) or {}
+    check("真建时完成了挂接",
+          any(x["studentNo"] == "20229903" and x["userId"] == old_uid
+              for x in r3.get("linked", [])), str(r3.get("linked")))
+    st, j = call("GET", "/users", None, T)
+    check("挂接没有重复建账号（没有出现用户名 20229903）",
+          not any(u["username"] == "20229903" for u in (data_of(j) or [])), "重复建了")
+    st, j = call("GET", "/students", None, T)
+    rows = {r["studentNo"]: r for r in (data_of(j) or {}).get("rows", [])}
+    check("挂接后学生行指向了那个已有账号",
+          rows.get("20229903", {}).get("linkedUserId") == old_uid, str(rows.get("20229903")))
+
+    # ---------- 收尾 ----------
+    _purge_students(made_records)
+    for u in made_users:
+        _purge_user(u)
+    _purge_user(GU)
+    st, j = call("GET", "/users", None, T)
+    left = [u["username"] for u in (data_of(j) or [])]
+    check("探针账号清理干净",
+          not any(x.startswith("202299") for x in left)
+          and "old_wang" not in left, f"残留={left}")
 
 
 def _upload(path: str, token: str, content: bytes, filename: str = "s.xlsx"):
@@ -2569,6 +2819,117 @@ def test_a16_student_info():
     st, j = call("POST", "/students/requests", {"scope": "EDIT_ALL"}, G)
     check("访客申请编辑权限 -> 403", st == 403, f"st={st} {msg_of(j)}")
 
+    # ⚠ 这个 403 **前端也必须知道**：访客的权限是角色内建的（GUEST_SCOPES，只读），
+    # 压根不走申请/授权那张表，所以前端根本不该给他申请入口。
+    # 第二十四轮漏了：页面给访客显示「申请编辑全部」，点下去必然 403——
+    # 纯靠点一次才发现的，回归和 tsc 都抓不到。
+    # 前端已改成 `needApply` 对 isGuest 直接返回空，这里把契约钉住。
+    st, j = call("GET", "/students", None, G)
+    gperm = (data_of(j) or {}).get("permission", {})
+    check("访客的权限快照带 isGuest 标记（前端据此关掉申请入口）",
+          gperm.get("isGuest") is True, str(gperm))
+    check("访客只有内建的 VIEW_ALL，没有可申请的缺口",
+          gperm.get("scopes") == ["VIEW_ALL"], str(gperm.get("scopes")))
+    for _scope in ("EDIT_OWN", "VIEW_ALL", "EDIT_ALL"):
+        st, j = call("POST", "/students/requests", {"scope": _scope}, G)
+        check(f"访客申请 {_scope} -> 403（任何 scope 都不行）",
+              st == 403, f"st={st} {msg_of(j)}")
+
+    # ---------- 第二十六轮：访客的「可见范围」由班主任逐个指定 ----------
+    # 用户口径：四类页面可勾；不勾 = 全开（兼容老账号）；建号和编辑时都能改。
+    made_guests: list[str] = []
+
+    def new_guest(name: str, scopes: list[str] | None) -> str:
+        body = {"username": name, "password": "123456",
+                "realName": f"访客 {name}", "role": "GUEST"}
+        if scopes is not None:
+            body["guestScopes"] = scopes
+        st, j = call("POST", "/users", body, T)
+        made_guests.append(name)
+        check(f"建访客 {name}（范围={scopes if scopes is not None else '不传'}）-> 200",
+              st == 200, f"st={st} {msg_of(j)}")
+        return login(name) or ""
+
+    def reach(token: str) -> dict[str, int]:
+        """这个访客实际能打到哪些接口。这是**后端边界**，不是界面过滤。"""
+        return {
+            "DASHBOARD": call("GET", "/dashboard/summary", None, token)[0],
+            "RECORDS": call("GET", "/records?page=1&size=1", None, token)[0],
+            "STUDENTS": call("GET", "/students", None, token)[0],
+            "TASKS": call("GET", "/tasks", None, token)[0],
+        }
+
+    g_stu = new_guest("regress_g_stu", ["STUDENTS"])
+    r1 = reach(g_stu)
+    check("只给「学生信息」：学生信息 200，其余三项 403",
+          r1 == {"DASHBOARD": 403, "RECORDS": 403, "STUDENTS": 200, "TASKS": 403},
+          str(r1))
+    st, j = call("GET", "/auth/me", None, g_stu)
+    check("登录响应里带着范围（前端据此过滤侧栏）",
+          (data_of(j) or {}).get("guestScopes") == ["STUDENTS"], str(data_of(j)))
+
+    g_all = new_guest("regress_g_all", None)
+    check("不传 guestScopes = 全部可见（兼容第二十四轮那批访客）",
+          all(v == 200 for v in reach(g_all).values()), str(reach(g_all)))
+    g_full = new_guest("regress_g_full", ["DASHBOARD", "RECORDS", "STUDENTS", "TASKS"])
+    check("四项全勾 = 全部可见（与「不传」等价）",
+          all(v == 200 for v in reach(g_full).values()), str(reach(g_full)))
+
+    # ⚠ 空数组 = **真的什么都看不到**。
+    # 这里翻过一次车：原来把 `[]` 也当成全开，于是勾选框里「什么都没勾」，
+    # 实际权限却是「全都能看」——界面在撒谎，老师想收最紧却收不住。
+    g_empty = new_guest("regress_g_empty", [])
+    check("传空数组 = 四个页面全部 403（勾选框的状态就是真实权限）",
+          all(v == 403 for v in reach(g_empty).values()), str(reach(g_empty)))
+    st, j = call("GET", "/auth/profile", None, g_empty)
+    check("空范围的访客仍能进自己的个人信息（不至于完全登不进来）",
+          st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/auth/me", None, g_empty)
+    check("空范围原样回显为 []（前端据此显示成四个都不勾）",
+          (data_of(j) or {}).get("guestScopes") == [], str(data_of(j)))
+
+    # 编辑时改范围，且**不用重新登录**立刻生效（中间件每个请求重读这一列）
+    gid = next(u["id"] for u in (data_of(call("GET", "/users", None, T)[1]) or [])
+               if u["username"] == "regress_g_stu")
+    st, j = call("PUT", f"/users/{gid}", {"guestScopes": ["STUDENTS", "TASKS"]}, T)
+    check("编辑访客范围 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("改完**不用重新登录**立刻生效（复用同一个旧令牌）",
+          reach(g_stu) == {"DASHBOARD": 403, "RECORDS": 403, "STUDENTS": 200, "TASKS": 200},
+          str(reach(g_stu)))
+    st, j = call("PUT", f"/users/{gid}", {"guestScopes": []}, T)
+    check("编辑传空数组 = 收成什么都看不到",
+          all(v == 403 for v in reach(g_stu).values()), str(reach(g_stu)))
+    st, j = call("PUT", f"/users/{gid}",
+                 {"guestScopes": ["DASHBOARD", "RECORDS", "STUDENTS", "TASKS"]}, T)
+    check("编辑成四项全勾 = 恢复全部可见",
+          all(v == 200 for v in reach(g_stu).values()), str(reach(g_stu)))
+    st, j = call("PUT", f"/users/{gid}", {"realName": "改了名但没动范围"}, T)
+    check("编辑其他字段时**不传** guestScopes = 不动范围（不能被顺手清空）",
+          all(v == 200 for v in reach(g_stu).values()), str(reach(g_stu)))
+
+    # ⚠ 范围只管那几类页面，但**别只在前端管**。实测踩过「前端藏着、后端放着」：
+    # `/api/batches` 第二十轮为了让普通同学看到「有没有班费要交」被移出了
+    # `_STAFF_ROUTES`，访客跟着就能读到金额和截止时间。现在它归 RECORDS 管。
+    g_norec = new_guest("regress_g_norec", ["STUDENTS"])
+    st, j = call("GET", "/batches", None, g_norec)
+    check("没勾「账本明细」的访客读不到收费批次（金额属于账目信息）",
+          st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/batches", None, g_stu)
+    check("全开的访客仍能读收费批次", st == 200, f"st={st} {msg_of(j)}")
+
+    # 班级信息不属于任何范围 -> 一律不给（默认方向是「关」）
+    st, j = call("GET", "/class", None, g_stu)
+    check("班级信息不在任何范围内，全开也读不到", st == 403, f"st={st} {msg_of(j)}")
+
+    st, j = call("GET", "/users", None, g_stu)
+    check("成员管理仍然是 403（访客本来就读不了）",
+          st == 403, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/auth/profile", None, g_stu)
+    check("个人信息不受范围限制（访客自己的账号）", st == 200, f"st={st} {msg_of(j)}")
+
+    for _u in made_guests:
+        _purge_user(_u)
+
     # 访客该能看的只读页面
     st, j = call("GET", "/records", None, G)
     check("访客读账本明细 -> 200", st == 200, f"st={st} {msg_of(j)}")
@@ -2662,6 +3023,7 @@ ALL_TESTS = [
     test_a14b_payable_roles,
     test_a16_student_info,
     test_a17_class_tasks,
+    test_a18_accounts_from_students,
     test_a15_cleanup,
 ]
 

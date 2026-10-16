@@ -5,6 +5,7 @@ import type {
   TaskCreatePayload,
   TaskDetail,
   TaskListPayload,
+  TaskPinnedPayload,
   TaskQType,
   TaskUpdatePayload,
 } from '@/types'
@@ -28,6 +29,19 @@ import type {
 /** 任务列表（含发布权限标记）。每条自带我的答案和汇总。 */
 export function fetchTasks() {
   return request<TaskListPayload>({ url: '/tasks', method: 'get' })
+}
+
+/**
+ * 仪表盘「置顶任务」面板的数据源。
+ *
+ * 形状与可见性口径都和 `fetchTasks` **完全一致**（后端两个端点共用同一个
+ * `_build_rows`），所以这里不要在前端再做一遍过滤。
+ *
+ * 只含**置顶且还在开放**的，最多 3 条，快到期的排前面；关闭掉的任务会
+ * 自动从面板消失——置顶是为了催人填，填完了就不该继续占着仪表盘。
+ */
+export function fetchPinnedTasks() {
+  return request<TaskPinnedPayload>({ url: '/tasks/pinned', method: 'get' })
 }
 
 /** 谁能发这个任务：`TEACHER` / `MONITOR`。非发布人调 `createTask` 会被后端 403。 */
@@ -55,6 +69,19 @@ export function updateTask(id: number, payload: TaskUpdatePayload) {
 export function setTaskOpen(id: number, open: boolean) {
   return request<{ id: number; open: boolean }>({
     url: `/tasks/${id}/${open ? 'reopen' : 'close'}`,
+    method: 'post',
+  })
+}
+
+/**
+ * 置顶 / 取消置顶：出现在**所有人**仪表盘的「置顶任务」里。**仅发布人自己**。
+ *
+ * 占用的是全班人的仪表盘，所以权限跟改标题、关闭是同一档，不能只按
+ * 「能不能发布任务」放行。
+ */
+export function setTaskPinned(id: number, pinned: boolean) {
+  return request<{ id: number; pinned: boolean }>({
+    url: `/tasks/${id}/${pinned ? 'pin' : 'unpin'}`,
     method: 'post',
   })
 }

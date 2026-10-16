@@ -2,7 +2,11 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import type { Role } from '@/types'
+import type { GuestScope, Role } from '@/types'
+import { GUEST_SCOPE_OPTIONS } from '@/types'
+
+/** 四项全开。后端把库里的 NULL 展开成这个，前端拿不到 scope 时也用它兜底。 */
+const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
 
 interface NavItem {
   index: string
@@ -45,13 +49,26 @@ const STAFF: Role[] = ['ADMIN', 'MONITOR', 'TEACHER']
  * 这张表漏一项的后果：访客**侧栏里看不到入口但手输 URL 能进去**（路由守卫放行）
  * —— 是个半通不通的页面。所以改任何一边必须同时改另一边。
  */
-const GUEST_VISIBLE = new Set([
-  '/dashboard',
-  '/records',
-  '/student-info',
-  '/tasks',
-  '/profile',
-])
+/**
+ * 访客能看到哪几个页面 —— **第二十六轮起按账号逐个定**，不再是写死的一张表。
+ *
+ * 用**路径**而不是路由 name，和这里其余 items 的 `index` 同一口径。
+ * ⚠ 这张 scope→路径 映射必须与 `router/index.ts` 的 `GUEST_PAGE_SCOPE` 保持一致，
+ * 两处各写一份必然漂移——漏掉的后果是「侧栏有入口但路由守卫拦掉」或反过来。
+ *
+ * 「个人信息」不在表里：访客自己的账号，没什么可限制的，永远可进。
+ *
+ * 收费批次（`/batches`）也不在表里——**即使访客勾了「账本明细」也不给入口**，
+ * 因为那是记账的人用的页面。侧栏不给，后端却仍然放行（批次信息归 RECORDS 管，
+ * 见 `security.required_guest_scope`），两边口径不同是有意的：批次那套接口本来
+ * 就该跟着账目权限走，界面却不给它入口。真要收紧应该改后端，不是往这张表里加。
+ */
+const GUEST_SCOPE_OF_PATH: Record<string, GuestScope> = {
+  '/dashboard': 'DASHBOARD',
+  '/records': 'RECORDS',
+  '/student-info': 'STUDENTS',
+  '/tasks': 'TASKS',
+}
 
 /**
  * 访客（GUEST，第二十四轮）是**纯只读**，给领导/校方看情况用的。
@@ -127,17 +144,27 @@ const groups: NavGroup[] = [
 /**
  * 按角色过滤入口：用户信息未拉到时默认隐藏受限入口（角色不符 = 回仪表盘，服务端角色表兜底）。
  *
- * 访客走的是**独立白名单**而不是 `item.roles`：学生信息、班级任务、班级信息这类
- * 「全员可读」的入口本来就没有 roles 限制，光靠 `roles` 拦不住它们，
- * 而访客能看哪几项是用户单独定的口径。
+ * 访客走的是**独立判断**而不是 `item.roles`：学生信息、班级任务、班级信息这类
+ * 「全员可读」的入口本来就没有 roles 限制，光靠 `roles` 拦不住它们；
+ * 访客能看哪几项是**班主任给这个账号单独勾的**（第二十六轮）。
  *
- * 白名单和 `router/index.ts` 的 `GUEST_ALLOWED` 必须一致——两处各写一份
- * 必然会漂移，这里的注释就是拿来提醒改一处要同时改另一处。
+ * 这里是**入口层面**的过滤，不是安全边界——真正的边界在后端中间件
+ * （`security.required_guest_scope`），手输 URL 也绕不过去。
  */
 function canSee(item: NavItem): boolean {
   if (item.disabled) return true
   if (!userStore.user) return false
-  if (userStore.user.role === 'GUEST') return GUEST_VISIBLE.has(item.index)
+  if (userStore.user.role === 'GUEST') {
+    const need = GUEST_SCOPE_OF_PATH[item.index]
+    // ⚠ **默认必须是不给**。这张表是「受限页面 → 范围」的映射，
+    // 没命中的页面（收入登记、成员管理、班级信息…）一律对访客隐藏，
+    // 只有「个人信息」显式放行——那是访客自己的账号，没什么可限制的。
+    //
+    // 这里翻过一次车：写成「没命中 = 不受限 = 放行」之后，访客侧栏立刻冒出
+    // 收入登记、成员管理，而他真正该看的仪表盘反被限掉了。**方向反了就全错。**
+    if (need === undefined) return item.index === '/profile'
+    return (userStore.user.guestScopes ?? ALL_GUEST_SCOPES).includes(need)
+  }
   if (!item.roles) return true
   return item.roles.includes(userStore.user.role)
 }

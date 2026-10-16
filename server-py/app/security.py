@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -106,6 +107,149 @@ ROLE_LEVEL: dict[str, int] = {
 }
 
 
+# =====================================================================
+# 第二十六轮：访客的「可见范围」由班主任逐个指定
+# =====================================================================
+# 以前访客是写死的全能看（前端 `GUEST_VISIBLE` 一个常量）。现在每个访客账号
+# 自己带一份范围（`sys_user.guest_scopes`），老师在建号/编辑时勾。
+#
+# **为什么必须后端拦、不能只藏侧栏**：前端隐藏的是「入口」，不是「数据」。
+# 只要访客手输 URL 或者直接调接口，前端那套白名单就形同虚设。
+# 第二十四轮就有过教训——访客侧栏漏了「班级公告」这类问题只靠人眼发现。
+#
+# 这里只映射**表外拦不住**的那些路径；绝大多数接口要么被 `_STAFF_ROUTES` 拦掉，
+# 要么对所有登录角色开放，再判一遍只会让两套规则漂移。写进 `required_guest_scope`
+# 之前先确认一遍：这条路径真的没被别处拦住吗？
+
+#: 范围项 = 访客能进的四类页面。顺序即界面上多选框的顺序。
+GUEST_SCOPE_KEYS: tuple[str, ...] = ("DASHBOARD", "RECORDS", "STUDENTS", "TASKS")
+
+#: 访客角色名。刻意提成常量：这个字面量现在同时出现在中间件守卫、scope 解析
+#: 和 user_service 三处，写错一个字母就会变成「访客绕过范围检查」而没有任何报错。
+GUEST_ROLE = "GUEST"
+
+#: `required_guest_scope` 的哨兵值：**访客一律看不到**，不管勾了什么。
+#:
+#: 用常量而不是空串：``""`` 和 ``None`` 在判据里是两个完全不同的意思
+#: （「访客不能碰」vs「这条路径不归范围管」，前者拒绝、后者放行），
+#: 写成空串一旦哪个分支写成 `if need:` 就会被静默当成后者放行——方向反了。
+NO_GUEST_SCOPE = "\x00none"
+
+#: 给界面用的中文名与说明。`security` 放这里而不是 schemas：这份文案
+#: 同时被账号编辑框和权限说明引用，放一处才不会漂。
+GUEST_SCOPE_LABELS: dict[str, tuple[str, str]] = {
+    "DASHBOARD": ("仪表盘", "班级余额、收支趋势和最新流水"),
+    "RECORDS": ("账本明细", "全部记账流水、缴费记录，以及收费批次（金额和截止时间）"),
+    "STUDENTS": ("学生信息", "全班学生的登记信息，可勾选导出"),
+    "TASKS": ("班级任务", "任务题目和填写情况（只有汇总，不含谁填了什么）"),
+}
+
+
+def parse_guest_scopes(raw: str | None) -> list[str]:
+    """把 `sys_user.guest_scopes` 解析成范围列表。
+
+    - `None`（库里的 NULL）= 全部可见。**只给老账号**：第二十四轮那批访客建号时
+      根本没有这个概念，行为就是全能看，用 NULL 让它们零迁移保持原样。
+    - `'[]'` = 真的什么都看不到（老师一项都没勾）。
+    - `'["STUDENTS"]'` = 只看学生信息。
+
+    ⚠ 这三种必须各自表达各自的含义，不能互相塌缩。曾经把「空数组」也当成「全开」
+    （`[] or 全开`），于是勾选框里显示「什么都没勾」，实际权限却是「全都有」——
+    老师想给一个「什么都看不到」的访客，界面上根本表达不出来，而界面在撒谎。
+    空就是空。
+    """
+    if raw is None:
+        return list(GUEST_SCOPE_KEYS)
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        # 库里的值坏了：宁可放宽成全开，也不要让一个访客莫名什么都看不到
+        return list(GUEST_SCOPE_KEYS)
+    if not isinstance(items, list):
+        return list(GUEST_SCOPE_KEYS)
+    return [s for s in GUEST_SCOPE_KEYS if s in items]
+
+
+def dump_guest_scopes(scopes: list[str] | None) -> str | None:
+    """入参 -> 落库值。
+
+    ⚠ `None`（没传这个字段）和 `[]`（传了空数组）**必须分开**，它们是两件事：
+
+    - `None` = 老师没表态 = 全部可见 -> NULL（建号表单的老行为、老账号的表示）
+    - `[]`  = 老师明确一项都没勾 = 什么都看不到 -> `'[]'`
+
+    写成 `picked = [s for s in KEYS if s in (scopes or [])]` 会把两者塌成同一个，
+    结果「不传范围」的访客被存成 `'[]'`——看着什么都没勾，实际什么都看不到。
+    这个错很安静：不传范围本来是最常见的用法，只有 `guest_probe` 那类用例会炸。
+    """
+    if scopes is None:
+        return None  # 没表态 = 全开
+    picked = [s for s in GUEST_SCOPE_KEYS if s in scopes]
+    if len(picked) == len(GUEST_SCOPE_KEYS):
+        return None  # 全勾 = 全开，和老账号共用一个表示，少一种要解释的状态
+    return json.dumps(picked, ensure_ascii=False)  # 含 [] = 什么都看不到
+
+
+def guest_can_see(user: LoginUser, scopes: list[str] | None, path: str) -> bool:
+    """访客能不能访问这条路径。给中间件和测试共用同一套判据。"""
+    if user.role != GUEST_ROLE:
+        return True
+    need = required_guest_scope(path)
+    if need is None:
+        return True  # 个人信息、改密这类不归范围管
+    if need == NO_GUEST_SCOPE:
+        return False  # 明确标记为「访客一律看不到」
+    return need in (scopes if scopes is not None else list(GUEST_SCOPE_KEYS))
+
+
+def _scope_display(scope: str) -> str:
+    """403 提示里的中文名。取不到就退回一个能看懂的说法，别只回个 key。"""
+    if scope == NO_GUEST_SCOPE:
+        return "该页面"
+    return GUEST_SCOPE_LABELS.get(scope, (scope, ""))[0]
+
+
+def required_guest_scope(path: str) -> str | None:
+    """这条路径属于哪个可见范围。
+
+    三种返回值，**方向默认朝着「关」**：
+
+    - 范围 key（``"RECORDS"`` 等）——访客勾了这一项才放行
+    - `NO_GUEST_SCOPE`——访客一律看不到，勾什么都不行
+    - `None`——这条路径不归范围管（`/api/auth/*` 个人信息、改密），
+      由各自端点的角色校验负责
+
+    绝大多数接口压根不用写进这张表：要么已被 `_STAFF_ROUTES` 拦掉
+    （成员管理、记账写入…），要么对所有登录角色开放（`/api/auth/*`），
+    再判一遍只会让两套规则漂移。**写进表里的，都是「表外拦不住」的。**
+
+    ⚠ 后两条是实测补上的，都是「前端藏着、后端放着」的洞：
+
+    - `/api/batches`（收费批次）第二十轮为了回答普通同学的「有没有班费要交 /
+      我交了吗」被**移出** `_STAFF_ROUTES`，访客跟着就能读了——里面是金额和
+      截止时间，属于账目信息，所以归到 RECORDS 范围一起管。
+      （访客侧栏本来就不给这个入口，所以界面上看不出差别，纯粹是接口层的漏。）
+    - `/api/class`（班级信息）不属于四个范围中的任何一个。默认方向是「不给」，
+      所以返回 `NO_GUEST_SCOPE`：就算四项全勾也读不到。老师想让访客知道班级
+      名称的话，`/api/auth/me` 里已经带了 `className`，走 `/api/auth/*` 不经过这里。
+    """
+    if path.startswith("/api/dashboard"):
+        return "DASHBOARD"
+    # `/api/records/export` 本来就在 _STAFF_ROUTES 里（访客 403），
+    # 这里一并映射成 RECORDS 只是为了让规则读起来是完整的。
+    if path == "/api/records" or path.startswith("/api/records/"):
+        return "RECORDS"
+    if path == "/api/students" or path.startswith("/api/students/"):
+        return "STUDENTS"
+    if path == "/api/tasks" or path.startswith("/api/tasks/"):
+        return "TASKS"
+    if path == "/api/batches" or path.startswith("/api/batches/"):
+        return "RECORDS"
+    if path == "/api/class":
+        return NO_GUEST_SCOPE  # 不属于任何范围 = 一律拒绝
+    return None
+
+
 def role_level(role: str | None) -> int:
     """角色等级；未知角色按 0（最弱）处理，缺省安全。"""
     return ROLE_LEVEL.get(role or "", 0)
@@ -132,7 +276,7 @@ def require_role_higher(actor_role: str, target_role: str) -> None:
     """
     from .errors import BizException
 
-    if target_role == "GUEST" and actor_role != "TEACHER":
+    if target_role == GUEST_ROLE and actor_role != "TEACHER":
         raise BizException.forbidden("访客账号只能由班主任管理")
 
     actor, target = role_level(actor_role), role_level(target_role)
@@ -177,16 +321,22 @@ _STAFF_ROUTES: list[tuple[str, str]] = [
 _STAFF_COMPILED = [(m, re.compile(p)) for m, p in _STAFF_ROUTES]
 
 
-def _account_active(user_id: int) -> bool:
-    """账号是否仍可登录（status=1 且行还在）。
+def _account_active(user_id: int) -> tuple[bool, str | None]:
+    """(账号是否仍可登录, 访客可见范围原文)。
 
     JWT 是无状态的，只带 id/role/username/class_id，不含 status，也不含 token 版本号，
     所以「停用账号」「删账号」都无法让已签发的令牌立刻失效。这里在鉴权中间件里
     按主键查一次 `sys_user`，把这两件事变成即时生效。
 
+    第二十六轮顺路把 `guest_scopes` 一起读出来：老师改完访客的范围之后
+    **不用等对方重新登录**就生效——这正是「创建时选、编辑时也能改」的前提。
+    塞进 JWT 做不到这一点（令牌一签发就固定，除非再引入 token 版本号，
+    那会让「改密码」也连带把别处踢下线，代价反而更大）。
+
     代价是每个 /api 请求多一次主键查询（走聚簇索引，量级微秒级）；换来的是
     「停用」这个管理动作真的有意义。查库失败时**放行**（fail-open）：
-    数据库抖动不应该把所有在线用户一起踢下线，那是可用性事故而不是安全事件。
+    数据库抖动不该把所有在线用户一起踢下线，那是可用性事故而不是安全事件。
+    访客范围同理——宁可这一次放行，也不要因为查询失败让访客突然什么都看不到。
     """
     from sqlalchemy import text
 
@@ -194,15 +344,18 @@ def _account_active(user_id: int) -> bool:
 
     try:
         with engine.connect() as conn:
-            status = conn.execute(
-                text("SELECT status FROM sys_user WHERE id = :i"), {"i": user_id}
-            ).scalar()
+            row = conn.execute(
+                text("SELECT status, guest_scopes FROM sys_user WHERE id = :i"),
+                {"i": user_id},
+            ).first()
     except Exception:  # noqa: BLE001
-        return True
-    return status == 1
+        return True, None
+    if row is None:
+        return False, None
+    return row[0] == 1, row[1]
 
 
-async def _account_active_async(user_id: int) -> bool:
+async def _account_active_async(user_id: int) -> tuple[bool, str | None]:
     """`_account_active` 的线程池包装。
 
     鉴权中间件是 **async** 的，直接在里面跑同步的 pymysql 查询会阻塞整个事件循环
@@ -276,8 +429,22 @@ def install_auth_middleware(app: FastAPI) -> None:
                 # 第十六轮：JWT 里没有 status，账号被停用后旧令牌本来还能继续用满 2 小时——
                 # 「停用」形同虚设（实测停用后所有接口仍 200，甚至能改个人信息）。
                 # 这里补一次主键查询（线程池执行，不阻塞事件循环），停用/删除即刻生效。
-                if not await _account_active_async(user.id):
+                # 第二十六轮：同一次查询把访客的可见范围也带出来（见 `_account_active`），
+                # 不额外加查询——老师改完范围访客立刻生效，不用等重新登录。
+                active, guest_scopes_raw = await _account_active_async(user.id)
+                if not active:
                     return fail(403, "账号已被停用，请联系班主任", None, status=403)
+                # 访客范围：后端硬拦。前端隐藏的只是**入口**，手输 URL 或直接调接口
+                # 都能绕过去——权限必须在服务端收口。
+                if user.role == GUEST_ROLE:
+                    need = required_guest_scope(path)
+                    if need is not None and need not in parse_guest_scopes(guest_scopes_raw):
+                        return fail(
+                            403,
+                            f"该访客账号未被授权查看{_scope_display(need)}",
+                            None,
+                            status=403,
+                        )
                 request.state.user = user
                 for method, pattern in _STAFF_COMPILED:
                     if request.method == method and pattern.match(path):

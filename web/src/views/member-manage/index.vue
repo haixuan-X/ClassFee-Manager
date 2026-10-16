@@ -5,8 +5,11 @@ import { getErrorMessage } from '@/api/request'
 import { createUser, deleteUser, fetchUsers, updateUser } from '@/api/users'
 import { useModal } from '@/composables/useModal'
 import { useUserStore } from '@/stores/user'
-import type { Role, UserAccount } from '@/types'
-import { ROLE_TEXT } from '@/types'
+import type { GuestScope, Role, UserAccount } from '@/types'
+import { GUEST_SCOPE_OPTIONS, ROLE_TEXT } from '@/types'
+
+/** 全部四项。后端 NULL 会被解析成这个，所以「全开」只有一个表示法。 */
+const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
 
 /**
  * 成员管理（第七轮：老师建班）：新增账号 / 编辑资料与学号 / 重置密码 / 停用启用 / 删除。
@@ -70,7 +73,17 @@ const createForm = reactive({
   password: '',
   phone: '',
   role: 'MEMBER' as Role,
+  /** 访客的可见范围（第二十六轮）。默认全选——和第二十四轮那批访客行为一致 */
+  guestScopes: [...ALL_GUEST_SCOPES] as GuestScope[],
 })
+
+/**
+ * 角色选了「访客」才出现范围勾选框。
+ *
+ * 只有这一种角色需要它：其他四个角色传了也会被后端忽略并把库里存成 NULL，
+ * 所以界面上根本不给出现——摆一个对当前选择无效的控件同样是噪音。
+ */
+const createIsGuest = computed(() => createForm.role === 'GUEST')
 
 const createRules: FormRules = {
   username: [
@@ -104,6 +117,8 @@ function openCreate() {
   createForm.password = ''
   createForm.phone = ''
   createForm.role = 'MEMBER'
+  // 每次打开都恢复全选：上次留下的勾选不该悄悄带到下一个新账号上
+  createForm.guestScopes = [...ALL_GUEST_SCOPES]
   alertMessage.value = ''
   createVisible.value = true
 }
@@ -126,6 +141,8 @@ async function submitCreate() {
       password: createForm.password.trim() || undefined,
       phone: createForm.phone.trim() || undefined,
       role: createForm.role,
+      // 第二十六轮：只给访客传。一项都没勾 = 全开（后端归一成 NULL）
+      guestScopes: createIsGuest.value ? createForm.guestScopes : undefined,
     })
     ElMessage.success(
       `已创建「${created.realName}」，登录名 ${created.username}，初始密码 ${createForm.password.trim() || '123456'}，请转告本人登录后修改`,
@@ -147,7 +164,16 @@ const editLoading = ref(false)
 const editFormRef = ref<FormInstance>()
 const { restoreFocus: restoreEditFocus } = useModal(editVisible)
 const editTarget = ref<UserAccount | null>(null)
-const editForm = reactive({ realName: '', studentNo: '', phone: '' })
+const editForm = reactive({
+  realName: '',
+  studentNo: '',
+  phone: '',
+  /** 访客可见范围（第二十六轮）。只有访客账号用得上 */
+  guestScopes: [...ALL_GUEST_SCOPES] as GuestScope[],
+})
+
+/** 编辑的这条是不是访客。范围勾选框只在这种情况下出现 */
+const editIsGuest = computed(() => editTarget.value?.role === 'GUEST')
 
 const editRules: FormRules = {
   realName: [
@@ -163,6 +189,11 @@ function openEdit(row: UserAccount) {
   editForm.realName = row.realName
   editForm.studentNo = row.studentNo ?? ''
   editForm.phone = row.phone ?? ''
+  // 后端对访客总是返回解析后的列表：库里 NULL -> 四项全开（老账号），
+  // `'[]'` -> 空数组（那个访客什么都看不到）。原样回填即可，
+  // 勾选框显示的就是真实权限，不在这里做「空 = 全开」的翻译——那会让界面撒谎。
+  editForm.guestScopes =
+    row.role === 'GUEST' ? [...(row.guestScopes ?? ALL_GUEST_SCOPES)] : [...ALL_GUEST_SCOPES]
   alertMessage.value = ''
   editVisible.value = true
 }
@@ -183,6 +214,8 @@ async function submitEdit() {
       // 学号/手机号沿用「空串=清空」语义（后端 None=不改）
       studentNo: editForm.studentNo.trim(),
       phone: editForm.phone.trim(),
+      // 第二十六轮：范围改动**立刻生效**，访客不用重新登录
+      guestScopes: editIsGuest.value ? editForm.guestScopes : undefined,
     })
     ElMessage.success(`已保存「${editForm.realName.trim()}」的资料`)
     editVisible.value = false
@@ -344,6 +377,17 @@ const assignableRoles = computed<Role[]>(() =>
   ),
 )
 
+/**
+ * 列表里某个访客的范围标签。
+ *
+ * 后端对访客**总是**返回解析后的列表（库里 NULL 展开成四项全开），所以正常
+ * 情况下这里不会拿到 undefined。`?? ALL_GUEST_SCOPES` 只是防一手：万一字段缺失，
+ * 显示四项全开好过一行空白——空白会被读成「这个访客没有范围」，而那是两回事。
+ * ⚠ `[]`（真的什么都看不到）不受影响：`??` 只在 null/undefined 时兜底。
+ */
+const scopeOptionsOf = (row: UserAccount) =>
+  GUEST_SCOPE_OPTIONS.filter((o) => (row.guestScopes ?? ALL_GUEST_SCOPES).includes(o.value))
+
 const roleTagType = (role: Role): 'success' | 'warning' | 'primary' | 'info' => {
   if (role === 'ADMIN') return 'success'
   if (role === 'TEACHER') return 'primary'
@@ -415,6 +459,29 @@ onMounted(async () => {
             <el-tag :type="roleTagType(row.role)" size="small" effect="light">
               {{ ROLE_TEXT[row.role as Role] }}
             </el-tag>
+            <!--
+              访客那行顺带把范围列出来。只在这一行渲染：老师管的是「谁能看到什么」，
+              不看角色标签是看不出区别的（访客和普通成员都不可管理，靠别处区分容易漏）。
+            -->
+            <div v-if="row.role === 'GUEST'" class="scope-cell">
+              <el-tag
+                v-for="o in scopeOptionsOf(row)"
+                :key="o.value"
+                size="small"
+                type="info"
+                effect="plain"
+              >
+                {{ o.label }}
+              </el-tag>
+              <!--
+                一项都没勾 = 一个页面都进不去。这时**必须显式写出来**：
+                空标签行会被读成「范围没加载出来」，而真实权限恰恰是最紧的，
+                老师会因此做出错误判断。
+              -->
+              <el-tag v-if="!scopeOptionsOf(row).length" size="small" type="danger" effect="plain">
+                只能看个人信息
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
 
@@ -636,6 +703,28 @@ onMounted(async () => {
             只能管理比自己低级的账号，也不能创建比自己高级的角色。
           </div>
         </el-form-item>
+
+        <!--
+          访客的可见范围。选了「访客」才出现——它是唯一有这个概念的角色。
+
+          ⚠ 勾选框的状态必须**就是**真实权限：全勾 = 全开，都不勾 = 一个页面都进不去。
+          曾经写成「都不勾 = 全部可见」，界面显示「什么都没勾」而实际是「全都能看」，
+          老师想收得最紧却收不住。现在空选就真的是「什么都看不到」。
+        -->
+        <el-form-item v-if="createIsGuest" label="查看范围">
+          <el-checkbox-group v-model="createForm.guestScopes" class="scope-group">
+            <el-checkbox v-for="o in GUEST_SCOPE_OPTIONS" :key="o.value" :value="o.value">
+              {{ o.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+          <div class="form-tip">
+            访客只能进勾选的页面，侧栏和直接输网址都会被挡。<br />
+            {{ GUEST_SCOPE_OPTIONS.map((o) => `${o.label}：${o.hint}`).join('；') }}。
+          </div>
+          <div class="form-tip">
+            四项全勾 = 全部可见；<strong>都不勾 = 只能进自己的「个人信息」</strong>。
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -683,6 +772,17 @@ onMounted(async () => {
         </el-form-item>
         <el-form-item label="手机号" prop="phone">
           <el-input v-model="editForm.phone" placeholder="留空则清空" maxlength="20" />
+        </el-form-item>
+        <!-- 同新增：只有访客有「查看范围」这一说 -->
+        <el-form-item v-if="editIsGuest" label="查看范围">
+          <el-checkbox-group v-model="editForm.guestScopes" class="scope-group">
+            <el-checkbox v-for="o in GUEST_SCOPE_OPTIONS" :key="o.value" :value="o.value">
+              {{ o.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+          <div class="form-tip">
+            <strong>改完立刻生效</strong>，对方不用重新登录。全勾 = 全部可见，都不勾 = 只能进自己的「个人信息」。
+          </div>
         </el-form-item>
         <div class="form-tip">登录名创建后不可修改；学号可随时更正（同班不可重复）</div>
       </el-form>
@@ -862,6 +962,22 @@ onMounted(async () => {
   color: var(--color-muted-fg);
   line-height: 1.5;
   margin-top: 2px;
+}
+
+/* 访客的「查看范围」勾选框：四个挤在一行会换行，所以给足宽度 */
+.scope-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 18px;
+  width: 100%;
+}
+
+/* 列表里访客那行的范围摘要 */
+.scope-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
 }
 
 /* 弹窗错误摘要（与 BatchPayDialog 等同款样式） */

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS sys_user (
   real_name     VARCHAR(32) NOT NULL,
   student_no    VARCHAR(20) NULL,
   role          ENUM('ADMIN','MEMBER','GUEST','MONITOR','TEACHER') NOT NULL DEFAULT 'MEMBER',
+  guest_scopes  TEXT NULL COMMENT '第二十六轮·仅访客用：可见范围 JSON 数组（DASHBOARD/RECORDS/STUDENTS/TASKS）；NULL=全部可见',
   phone         VARCHAR(20) NULL,
   status        TINYINT     NOT NULL DEFAULT 1      COMMENT '1启用 0停用',
   last_login_at DATETIME    NULL,

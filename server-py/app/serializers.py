@@ -26,11 +26,19 @@ def fmt_d(v: date | None) -> str | None:
 
 
 def user_vo(u: SysUser, class_name: str | None) -> dict[str, Any]:
+    # 函数内导入：`security` 在模块顶层导入过 `responses`，这里再顶层导入
+    # serializers 就绕回去了。放函数内是因为它只在访客那条分支才用得上。
+    from .security import GUEST_ROLE, parse_guest_scopes
+
     return {
         "id": u.id,
         "username": u.username,
         "realName": u.real_name,
         "role": u.role if u.role is not None else "MEMBER",
+        # 第二十六轮：访客的可见范围。登录响应和 /auth/me 共用这一个序列化器，
+        # 所以前端登录完立刻就能按它过滤侧栏和路由，不必再发一次请求。
+        # 非访客一律 null——「他看不见什么」这个问题对其他角色不存在。
+        "guestScopes": parse_guest_scopes(u.guest_scopes) if u.role == GUEST_ROLE else None,
         "classId": u.class_id,
         "className": class_name,
     }

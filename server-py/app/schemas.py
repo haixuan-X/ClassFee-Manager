@@ -589,6 +589,14 @@ class UserCreateRequest(_BodyModel):
     role 五选一：MEMBER(普通成员，只读) / GUEST(访客，只读·给领导看) /
     ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)，后三者同为运营角色（STAFF_ROLES）。
     studentNo=学号（可与登录名不同）：留空时 MEMBER 默认回填登录名（超 20 字则留空）。
+
+    guestScopes（第二十六轮，**仅 role=GUEST 时有意义**）：访客能看的页面范围，
+    取值 DASHBOARD / RECORDS / STUDENTS / TASKS。
+
+    **不传 = 全部可见**（和第二十四轮那批访客账号的既有行为一致，升级不用迁移数据）；
+    四项全传同样归一成「全部可见」落库；**传空数组 = 一个页面都进不去**，
+    只剩自己的「个人信息」。勾选框的状态就是真实权限，不存在「都没勾但其实全开」。
+    非访客传了会被忽略并在库里存 NULL，不留死数据。
     """
 
     username: str | None = None
@@ -597,6 +605,7 @@ class UserCreateRequest(_BodyModel):
     password: str | None = None
     phone: str | None = None
     role: str | None = None
+    guestScopes: list[str] | None = None
 
     @field_validator("username")
     @classmethod
@@ -650,6 +659,10 @@ class UserUpdateRequest(_BodyModel):
     """编辑账号：字段均可选（None=不修改）；password=重置密码；status=0/1 停用启用。
 
     studentNo 语义同 phone：**空串=清空、不传=None=不改**。
+
+    guestScopes（第二十六轮，**仅访客有效**）：传了就改、不传=None=不改。
+    传空数组 = 什么都看不到（只剩自己的「个人信息」）；四项全传 = 全部可见
+    （`dump_guest_scopes` 归一成 NULL，和老账号同一个表示）。
     """
 
     realName: str | None = None
@@ -657,6 +670,7 @@ class UserUpdateRequest(_BodyModel):
     phone: str | None = None
     status: int | None = None
     password: str | None = None
+    guestScopes: list[str] | None = None
 
     @field_validator("realName")
     @classmethod

@@ -24,9 +24,11 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, Delete, Stamp } from '@element-plus/icons-vue'
 import {
   applyStudentFieldRetype,
   createStudent,
+  createStudentAccounts,
   createStudentField,
   deleteStudentField,
   exportSelectedStudents,
@@ -35,6 +37,7 @@ import {
   fetchStudentFields,
   fetchStudents,
   importStudents,
+  previewStudentAccounts,
   previewStudentFieldRetype,
   restoreStudentField,
   updateStudent,
@@ -44,6 +47,7 @@ import { getErrorMessage } from '@/api/request'
 import StudentApprovalDrawer from '@/components/StudentApprovalDrawer.vue'
 import type {
   StudentAccessRequest,
+  StudentAccountPlan,
   StudentColumn,
   StudentField,
   StudentFieldType,
@@ -124,6 +128,15 @@ const myPending = computed(() => myRequests.value.find((r) => r.status === 'PEND
 const myRejected = computed(() => myRequests.value.find((r) => r.status === 'REJECTED'))
 const canEdit = computed(() => perm.value?.canEditAll || perm.value?.canEditOwn)
 const canAddField = computed(() => !!perm.value?.canAddField)
+
+/**
+ * 「一键创建账号」比「加字段」权限更高，**不能用 canAddField**。
+ *
+ * 加字段是班主任 + 班长（给个名字列不危险），建账号是"给人开一扇门"，
+ * 一次能开几十个。用户口径明确「仅班主任」。这里读 `isTeacher` 而不是
+ * 复用 canAddField，就是为了不让这两条权限以后被绑在一起。
+ */
+const canCreateAccounts = computed(() => !!perm.value?.isTeacher)
 
 /**
  * 班主任的审批入口。
@@ -501,6 +514,18 @@ function toggleExportField(key: string) {
   else exportFields.value.push(key)
 }
 
+/**
+ * 「更多」下拉的命令分发。
+ *
+ * 用 `@command` 而不是逐项绑 `@click`：下拉项绑 click 时菜单会先收起、
+ * 对话框再弹出，中间那一帧看起来像没点上；走 command 由 Element Plus
+ * 统一处理关闭顺序。`openTrash` 是异步的（要先拉停用字段列表），这点尤其明显。
+ */
+function onMore(cmd: string) {
+  if (cmd === 'approval') approvalOpen.value = true
+  else if (cmd === 'trash') void openTrash()
+}
+
 function selectAllFields() {
   exportFields.value = selectableColumns.value.map((c) => c.key)
 }
@@ -739,6 +764,11 @@ const NEEDED: { scope: StudentScope; label: string; hint: string }[] = [
 
 const needApply = computed(() => {
   if (!perm.value) return []
+  // 访客直接返回空：他不是班上的人，「申请修改自己的信息 / 申请编辑全班」
+  // 对他不成立。而且访客的权限是**角色内建**的（GUEST_SCOPES，只读），
+  // 压根不走申请/授权那张表——后端 `create_request` 对他是 403，
+  // 页面摆这个按钮等于「放一个点下去必然报错的东西」。
+  if (perm.value.isGuest) return []
   const have = new Set(perm.value.scopes)
   return NEEDED.filter((n) => !have.has(n.scope))
 })
@@ -814,6 +844,53 @@ function onFileChange(e: Event) {
   if (f) void onImport(f)
   input.value = ''
 }
+
+// ---------------- 一键创建账号（第二十五轮） ----------------
+
+const accOpen = ref(false)
+const accLoading = ref(false)
+const accDoing = ref(false)
+const accPlan = ref<StudentAccountPlan | null>(null)
+
+/** 打开对话框时先拉预演：建号不可逆，得先看清楚会动多少人 */
+async function openAccounts() {
+  accOpen.value = true
+  accLoading.value = true
+  accPlan.value = null
+  try {
+    accPlan.value = await previewStudentAccounts()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '读不出来'))
+    accOpen.value = false
+  } finally {
+    accLoading.value = false
+  }
+}
+
+async function submitAccounts() {
+  accDoing.value = true
+  try {
+    const r = await createStudentAccounts()
+    accPlan.value = r
+    ElMessage.success(
+      `已创建 ${r.created.length} 个账号` +
+        (r.linked.length ? `，挂接 ${r.linked.length} 个已有账号` : '') +
+        (r.skipped.length ? `，跳过 ${r.skipped.length} 行` : ''),
+    )
+    // 表格里那列「是否已建账号」会变，所以要重载
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '创建失败'))
+  } finally {
+    accDoing.value = false
+  }
+}
+
+/** 没东西可建时禁用主按钮，而不是点了之后弹一句「没有可创建的」 */
+const accNothingToDo = computed(() => {
+  const p = accPlan.value
+  return !!p && p.executed === false && p.toCreate === 0 && p.toLink === 0
+})
 </script>
 
 <template>
@@ -842,27 +919,54 @@ function onFileChange(e: Event) {
         </p>
       </div>
       <div class="actions">
-        <el-badge
-          v-if="isTeacher"
-          :value="pendingCount"
-          :hidden="pendingCount === 0"
-          type="danger"
-          class="inbox-badge"
-        >
-          <el-button @click="approvalOpen = true">访问授权</el-button>
-        </el-badge>
-        <!-- 没有 Excel 时也能加人；只要学号+姓名，其余在表格里逐格填 -->
-        <el-button v-if="canAddField" type="primary" @click="openAdd">新增学生</el-button>
-        <!-- 停用是软删，误删要能找回来：这个入口是"已停用字段"的唯一去处 -->
-        <el-button v-if="canAddField" @click="openTrash">已停用字段</el-button>
-        <!-- 导出：行范围和列都在这个对话框里定 -->
-        <el-button type="primary" @click="openExport">
-          导出<span v-if="selectedIds.length">选中（{{ selectedIds.length }}）</span>
-        </el-button>
+        <!--
+          页头按**工作流**排，不按功能分类排：
+            导入 Excel    → 把名单放进来（这个页面的起点，唯一的主按钮）
+            新增学生      → 没有 Excel 时也能加人
+            一键创建账号  → 导入完的下一步
+            导出          → 拿出去
+          低频的两个（访问授权 / 已停用字段）收进「更多」。
+
+          之前「新增学生」和「导出」**都是 primary**，两个主操作互相抢视线；
+          primary 的含义是"这个页面的主行动是它"。老师第一次打开这一页
+          要干的是导入名单，所以导入才是唯一的主按钮。
+        -->
         <label v-if="canAddField" class="file-btn">
           <input type="file" accept=".xlsx,.xlsm" hidden @change="onFileChange" />
-          <el-button :loading="importing" tag="span">导入 Excel</el-button>
+          <el-button :loading="importing" type="primary" tag="span">导入 Excel</el-button>
         </label>
+        <!-- 没有 Excel 时也能加人；只要学号+姓名，其余在表格里逐格填 -->
+        <el-button v-if="canAddField" @click="openAdd">新增学生</el-button>
+        <!-- 一键建账号：导入完名单的**下一步**。权限比「加字段」高，仅班主任 -->
+        <el-button v-if="canCreateAccounts" @click="openAccounts">一键创建账号</el-button>
+        <!-- 导出：行范围和列都在这个对话框里定 -->
+        <el-button @click="openExport">
+          导出<span v-if="selectedIds.length">选中（{{ selectedIds.length }}）</span>
+        </el-button>
+
+        <!--
+          「更多」里装的两个入口都是班主任/班长专属。两者都没有时**整个下拉不渲染**——
+          给普通同学留一个空菜单、点开是张白纸，比不给还糟。
+        -->
+        <el-dropdown v-if="isTeacher || canAddField" trigger="click" @command="onMore">
+          <el-button :class="{ 'has-pending': pendingCount > 0 }" aria-label="更多操作">
+            更多<el-icon class="more-caret"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <!-- 待审批数量是这个入口最重要的信息，收进菜单也必须还看得见：
+                   按钮上的红点 + 菜单项里的数字，两处都标 -->
+              <el-dropdown-item v-if="isTeacher" command="approval">
+                <el-icon><Stamp /></el-icon>访问授权
+                <span v-if="pendingCount > 0" class="pending-count">{{ pendingCount }}</span>
+              </el-dropdown-item>
+              <!-- 停用是软删，误删要能找回来：这个入口是"已停用字段"的唯一去处 -->
+              <el-dropdown-item v-if="canAddField" command="trash">
+                <el-icon><Delete /></el-icon>已停用字段
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </header>
 
@@ -1070,6 +1174,11 @@ function onFileChange(e: Event) {
       <template v-if="canAddField" class="foot-tip">
         · 点列名可改名，点类型小标签可改类型；鼠标移到列名上会出现 ＋ 和 ✕，
         ＋ 在这一列前面插入新字段（想在末尾加就点最后一列的），✕ 停用该字段
+      </template>
+      <template v-else-if="perm?.isGuest">
+        <!-- 访客只看不改，也没有申请渠道（他的只读权限是角色内建的），
+             说「找班主任申请」是骗他 -->
+        访客只可查看，不可修改
       </template>
       <template v-else>当前为只读，如需修改请向班主任申请</template>
     </p>
@@ -1352,6 +1461,110 @@ function onFileChange(e: Event) {
         <el-button @click="trashOpen = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 一键创建账号：先把「会动到谁」摊开给老师看，确认了再动手 -->
+    <el-dialog v-model="accOpen" title="按学生信息创建账号" width="640px" append-to-body>
+      <div v-loading="accLoading">
+        <template v-if="accPlan && !accPlan.executed">
+          <p class="acc-lead">
+            本班共 <strong>{{ accPlan.total }}</strong> 行学生信息，将
+            <strong>{{ accPlan.toCreate }}</strong> 个新建账号、<strong>{{ accPlan.toLink }}</strong> 个
+            挂到已有账号上、<strong>{{ accPlan.toSkip }}</strong> 行跳过。
+          </p>
+          <p class="acc-lead">
+            登录名用<strong>学号</strong>，昵称用<strong>姓名</strong>，角色一律
+            <strong>普通成员</strong>，初始密码统一
+            <strong class="acc-pw">{{ accPlan.initialPassword }}</strong>
+            —— 请告诉学生首次登录后去「个人信息」改成自己的密码。
+          </p>
+
+          <el-alert
+            v-if="accPlan.toLink > 0"
+            type="info"
+            show-icon
+            :closable="false"
+            title="这些行已经有账号了，不会重复创建"
+            description="会直接把学生信息行挂到那个账号上，学生登录后就能看到自己那一行。"
+          />
+
+          <div v-if="accPlan.toCreateList.length" class="acc-skip">
+            <p class="acc-skip-title">将要新建（{{ accPlan.toCreateList.length }}）</p>
+            <ul>
+              <li v-for="c in accPlan.toCreateList" :key="c.studentNo">
+                <span class="acc-sno">{{ c.studentNo }}</span>
+                <span class="acc-name">{{ c.name }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="accPlan.linked.length" class="acc-skip">
+            <p class="acc-skip-title">挂接到已有账号（{{ accPlan.linked.length }}）</p>
+            <ul>
+              <li v-for="l in accPlan.linked" :key="l.userId">
+                <span class="acc-sno">{{ l.studentNo }}</span>
+                <span class="acc-name">{{ l.name }}</span>
+                <span class="acc-why">
+                  挂到账号「{{ l.username }}」上{{ l.backfilled ? '，并补上它空着的学号' : '' }}
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="accPlan.skipped.length" class="acc-skip">
+            <p class="acc-skip-title">跳过的行（{{ accPlan.skipped.length }}）</p>
+            <ul>
+              <li v-for="(s, i) in accPlan.skipped" :key="i">
+                <span class="acc-sno">{{ s.studentNo }}</span>
+                <span class="acc-name">{{ s.name }}</span>
+                <span class="acc-why">{{ s.reason }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <p v-if="accNothingToDo" class="acc-lead">
+            没有需要新建或挂接的行——名单上的账号都已经建好了。
+          </p>
+        </template>
+
+        <template v-else-if="accPlan && accPlan.executed">
+          <p class="acc-lead">
+            完成：新建 <strong>{{ accPlan.created.length }}</strong> 个账号<template v-if="accPlan.linked.length">、挂接 {{ accPlan.linked.length }} 个</template
+            ><template v-if="accPlan.skipped.length">、跳过 {{ accPlan.skipped.length }} 行</template>。
+          </p>
+          <div v-if="accPlan.created.length" class="acc-skip">
+            <p class="acc-skip-title">新建的账号</p>
+            <ul>
+              <li v-for="c in accPlan.created" :key="c.id">
+                <span class="acc-sno">{{ c.username }}</span>
+                <span class="acc-name">{{ c.realName }}</span>
+              </li>
+            </ul>
+          </div>
+          <div v-if="accPlan.linked.length" class="acc-skip">
+            <p class="acc-skip-title">挂接到已有账号</p>
+            <ul>
+              <li v-for="l in accPlan.linked" :key="l.userId">
+                <span class="acc-sno">{{ l.studentNo }}</span>
+                <span class="acc-name">{{ l.name }}</span>
+                <span class="acc-why">{{ l.backfilled ? '已挂接，并补上了这个账号空着的学号' : '已挂接' }}</span>
+              </li>
+            </ul>
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="accOpen = false">关闭</el-button>
+        <el-button
+          v-if="accPlan && !accPlan.executed"
+          type="primary"
+          :loading="accDoing"
+          :disabled="accNothingToDo || accPlan.toCreate + accPlan.toLink === 0"
+          @click="submitAccounts"
+        >
+          创建 {{ accPlan.toCreate + accPlan.toLink }} 个
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1391,9 +1604,37 @@ h2 {
   display: inline-flex;
 }
 
-/* 角标别把按钮顶偏，给一点右边距 */
-.inbox-badge {
-  margin-right: 4px;
+/* 「更多」按钮上的红点：有待审批时提示「⋯ 里有事要办」。
+   不用 el-badge 是因为角标要占位、会把这个按钮顶偏，这里只需要一个点 */
+.actions .has-pending {
+  position: relative;
+}
+
+.actions .has-pending::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-expense);
+  box-shadow: 0 0 0 2px var(--color-bg);
+}
+
+.more-caret {
+  margin-left: 2px;
+}
+
+/* 菜单项右侧的待审批数 */
+.pending-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--color-expense);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 /* ---------- 改类型对话框 ---------- */
@@ -1542,6 +1783,64 @@ h2 {
   margin: 0 0 12px;
   font-size: 13px;
   line-height: 1.6;
+  color: var(--color-muted-fg);
+}
+
+/* 一键建账号对话框 */
+.acc-lead {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* 初始密码要比周围字重一点：老师要照着它告诉学生，不能淹没在段落里 */
+.acc-pw {
+  font-family: var(--font-mono, monospace);
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+
+.acc-skip {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.acc-skip-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--color-muted-fg);
+}
+
+.acc-skip ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acc-skip li {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.acc-sno {
+  flex: none;
+  width: 130px;
+  font-family: var(--font-mono, monospace);
+}
+
+.acc-name {
+  flex: none;
+  width: 88px;
+}
+
+.acc-why {
+  flex: 1;
   color: var(--color-muted-fg);
 }
 

@@ -9,6 +9,7 @@ import {
   fetchTasks,
   publishTask,
   setTaskOpen,
+  setTaskPinned,
   submitTaskAnswer,
   TASK_QTYPES,
   updateTask,
@@ -275,6 +276,16 @@ async function onToggleOpen(row: Task) {
   }
 }
 
+async function onTogglePin(row: Task) {
+  try {
+    await setTaskPinned(row.id, !row.pinned)
+    ElMessage.success(row.pinned ? '已取消置顶' : '已置顶，全班仪表盘都会显示')
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '操作失败'))
+  }
+}
+
 async function onDelete(row: Task) {
   try {
     await ElMessageBox.confirm(
@@ -345,6 +356,7 @@ onMounted(async () => {
           <div class="head-left">
             <h3>
               {{ row.title }}
+              <el-tag v-if="row.pinned" size="small" type="danger" effect="plain">置顶</el-tag>
               <el-tag v-if="row.isMine" size="small" type="warning" effect="plain">我发布的</el-tag>
               <el-tag v-if="!row.open" size="small" type="info" effect="plain">已关闭</el-tag>
               <el-tag v-else-if="row.deadline" size="small" type="info" effect="plain">
@@ -424,6 +436,15 @@ onMounted(async () => {
               导出
             </el-button>
             <el-button v-if="row.canEdit" size="small" link @click="openEdit(row)">修改</el-button>
+            <el-button
+              v-if="row.canEdit"
+              size="small"
+              link
+              :type="row.pinned ? 'danger' : 'warning'"
+              @click="onTogglePin(row)"
+            >
+              {{ row.pinned ? '取消置顶' : '置顶' }}
+            </el-button>
             <el-button v-if="row.canEdit" size="small" link @click="onToggleOpen(row)">
               {{ row.open ? '关闭' : '重新开放' }}
             </el-button>

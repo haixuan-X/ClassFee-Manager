@@ -13,6 +13,7 @@ import type {
   StudentScope,
   StudentSheet,
   StudentFieldType,
+  StudentAccountPlan,
 } from '@/types'
 
 /**
@@ -52,6 +53,30 @@ export function createStudent(
     method: 'post',
     data: { studentNo, name, values: values ?? {} },
   })
+}
+
+/**
+ * 预演「按学生信息一键建账号」——**纯读，一个字节都不写**。
+ *
+ * 存在的理由：建号不可逆（建错了得一个个去成员管理删）。先看清楚
+ * 「将新建 3 个 / 将挂接 1 个 / 将跳过 2 个，各是什么原因」，再决定要不要点。
+ *
+ * 和 `createStudentAccounts` 共用后端同一份分类逻辑
+ * （`user_service._plan_from_students`），所以**预览说建几个就是真建几个**，
+ * 不存在「预览和执行各算各的」这种坑。
+ */
+export function previewStudentAccounts() {
+  return request<StudentAccountPlan>({ url: '/students/accounts/preview', method: 'get' })
+}
+
+/**
+ * 按学生信息一键创建登录账号（第二十五轮）。**仅班主任**。
+ *
+ * 学号即登录名，姓名即昵称，密码统一 123456，角色一律普通成员。
+ * 已经有账号的不重建，而是把对应的学生行**挂接**上去。
+ */
+export function createStudentAccounts() {
+  return request<StudentAccountPlan>({ url: '/students/accounts', method: 'post' })
 }
 
 /**
