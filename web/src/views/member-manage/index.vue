@@ -336,12 +336,16 @@ async function onDelete(row: UserAccount) {
 const isSelf = (row: UserAccount) => row.id === userStore.user?.id
 
 /**
- * 账号管理权限等级（第十五轮）：班主任 > 班长 > 生活委员 > 普通成员。
+ * 账号管理权限等级（第十五轮）：院长 > 班主任 > 班长 > 生活委员 > 普通成员。
  * 与后端 `security.ROLE_LEVEL` 同口径 —— 前端据此**隐藏越权按钮**，
  * 后端 `require_role_higher` 才是最终边界（前端隐藏不算安全边界）。
  *
  * GUEST（访客，第二十四轮）与 MEMBER 同级 0：两者都管不了账号，
  * 区别在能看的范围（访客能看全班学生信息、能勾选导出）。
+ *
+ * ⚠ 这张表和后端 `ROLE_LEVEL` 是**两份手写**的数值表，天然会漂。
+ * 回归里有断言盯住两边的键和等级完全一致（`test_a20_dean_role`），
+ * 改了任何一边必须同时改另一边，否则那条会红。
  */
 const ROLE_LEVEL: Record<Role, number> = {
   MEMBER: 0,
@@ -349,12 +353,15 @@ const ROLE_LEVEL: Record<Role, number> = {
   ADMIN: 1, // 生活委员
   MONITOR: 2, // 班长
   TEACHER: 3, // 班主任
+  DEAN: 4, // 院长（系统管理员，等级最高）
 }
 const myLevel = computed(() => ROLE_LEVEL[userStore.user?.role ?? 'MEMBER'])
-const isTeacher = computed(() => userStore.user?.role === 'TEACHER')
+/** 「班主任及以上」= 够格管理访客 / 建访客 / 按学生建号的最低档。院长当然也在内。 */
+const TEACHER_MIN_LEVEL = ROLE_LEVEL.TEACHER
+const isTeacher = computed(() => myLevel.value >= TEACHER_MIN_LEVEL)
 
 /**
- * 访客只有班主任能管 —— 与后端 `security.require_role_higher` 的 GUEST 分支同规则。
+ * 访客只有班主任及以上能管 —— 与后端 `security.require_role_higher` 的 GUEST 分支同规则。
  *
  * 单靠等级表拦不住：生活委员(1) > 访客(0)，通用规则算下来她**有资格**，
  * 页面上就会冒出「编辑/重置密码/停用/删除」。访客代表的是校方，
@@ -369,7 +376,7 @@ function canManage(row: UserAccount): boolean {
 
 /**
  * 新建成员时可选的角色：**不高于自己**的那些（与后端 create_user 的等级校验同口径），
- * 外加「访客只有班主任能建」——等级表同样拦不住（班长 2 也 ≥ 0）。
+ * 外加「访客只有班主任及以上能建」——等级表同样拦不住（班长 2 也 ≥ 0）。
  */
 const assignableRoles = computed<Role[]>(() =>
   (Object.keys(ROLE_LEVEL) as Role[]).filter(
@@ -388,7 +395,12 @@ const assignableRoles = computed<Role[]>(() =>
 const scopeOptionsOf = (row: UserAccount) =>
   GUEST_SCOPE_OPTIONS.filter((o) => (row.guestScopes ?? ALL_GUEST_SCOPES).includes(o.value))
 
-const roleTagType = (role: Role): 'success' | 'warning' | 'primary' | 'info' => {
+const roleTagType = (
+  role: Role,
+): 'success' | 'warning' | 'primary' | 'danger' | 'info' => {
+  // 院长用 danger（红）：它是系统管理员，必须一眼和班主任(primary 蓝) 分开。
+  // 界面符号的自明要求——两个运营角色长得一样，老师分不清谁管谁。
+  if (role === 'DEAN') return 'danger'
   if (role === 'ADMIN') return 'success'
   if (role === 'TEACHER') return 'primary'
   if (role === 'MONITOR') return 'warning'

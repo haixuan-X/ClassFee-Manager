@@ -1,4 +1,4 @@
-"""收支流水服务：记账、查询、作废（红冲）、删除（对应 Java RecordService）。"""
+"""收支流水服务：记账、查询、作废（红冲）、删除。"""
 from __future__ import annotations
 
 import logging

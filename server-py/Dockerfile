@@ -1,4 +1,4 @@
-# ---- 班费收支系统 · Python 后端（FastAPI，对应原 Java 服务，契约一致）----
+# ---- 学生信息管理系统 · Python 后端（FastAPI）----
 FROM python:3.13-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \

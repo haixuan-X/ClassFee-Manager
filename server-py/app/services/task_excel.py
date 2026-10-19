@@ -27,6 +27,7 @@ _HEAD_FILL = PatternFill("solid", fgColor="4A7EBB")
 _MUTED_FONT = Font(size=10, color="666666")
 
 ROLE_TEXT = {
+    "DEAN": "院长",
     "TEACHER": "班主任",
     "MONITOR": "班长",
     "ADMIN": "生活委员",

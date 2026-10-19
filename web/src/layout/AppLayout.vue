@@ -15,7 +15,7 @@ const drawerOpen = ref(false)
 const passwordVisible = ref(false)
 
 /** 顶栏标题取自路由 meta */
-const pageTitle = computed(() => (route.meta.title as string) || '班费收支系统')
+const pageTitle = computed(() => (route.meta.title as string) || '学生信息管理系统')
 
 const roleText = computed(() =>
   userStore.user ? ROLE_TEXT[userStore.user.role] : '未登录',

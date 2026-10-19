@@ -1,4 +1,4 @@
-﻿# 班费收支系统 · Linux 部署指南
+﻿# 学生信息管理系统 · Linux 部署指南
 
 > 目标形态（单机即可跑通）：
 >
@@ -101,7 +101,7 @@ sudo -u www-data .venv/bin/pip install -r requirements.txt
 
 ```ini
 [Unit]
-Description=ClassFee Manager (FastAPI)
+Description=Student Info Manager (FastAPI)
 After=network.target mysql.service mariadb.service
 Wants=mysql.service
 
@@ -113,7 +113,7 @@ Environment=TZ=Asia/Shanghai
 Environment=CLASSFEE_DB_URL=mysql+pymysql://localhost:3306/classfee?charset=utf8mb4
 Environment=CLASSFEE_DB_USERNAME=classfee
 Environment=CLASSFEE_DB_PASSWORD=classfee123
-# 旧变量名 SPRING_DATASOURCE_* 仍兼容（沿用 Java 版命名），但不再推荐
+# 旧变量名 SPRING_DATASOURCE_* 仍兼容，但不再推荐
 # 生产必须换掉开发密钥（见 §7）：Python 后端 config.py 读取，用于签发/校验登录令牌
 # 生成：openssl rand -hex 32
 Environment=CLASSFEE_JWT_SECRET=换成随机64位十六进制串
@@ -228,10 +228,10 @@ grep client_max_body_size /etc/nginx/sites-available/classfee
 
 | 项 | 说明 |
 |----|------|
-| **JWT 密钥** | `config.py` 里是开发占位串，生产用 `CLASSFEE_JWT_SECRET` 环境变量注入随机串（`openssl rand -hex 32`）。这个变量是**当前 Python 后端**在用（config.py 读取 → security.py 签发/校验登录令牌），不是 Java 版遗留；改它会让所有已登录会话立即失效，需重新登录。systemd 单元已预留位置，改完 `sudo systemctl restart classfee` 生效 |
+| **JWT 密钥** | `config.py` 里是开发占位串，生产用 `CLASSFEE_JWT_SECRET` 环境变量注入随机串（`openssl rand -hex 32`）。这个变量是**当前后端**在用（config.py 读取 → security.py 签发/校验登录令牌），不是历史遗留；改它会让所有已登录会话立即失效，需重新登录。systemd 单元已预留位置，改完 `sudo systemctl restart classfee` 生效 |
 | **班主任账号** | **账号不写死在代码里，也没有注册页**。在 compose 的 `.env`（或 systemd 环境变量）声明 `CLASSFEE_TEACHER_USERNAME` + `CLASSFEE_TEACHER_PASSWORD`（可选 `CLASSFEE_TEACHER_NAME`、`CLASSFEE_TEACHER_ROLE=ADMIN\|TEACHER`）即生效：启动时库中无此用户名则创建，**已存在则跳过且不覆盖**（自助改密不会被改回）。两项都为空则不创建任何账号，启动日志会提示；其余成员账号由运营角色登录后在「成员管理」中创建并授权（角色四选一：普通成员/生活委员/班长/班主任） |
 | **从旧版升级** | 旧版的 `CLASSFEE_INIT_ENABLED/USERNAME/PASSWORD/ROLE` 已废弃（不再读取）。若此前已用旧引导建好账号，把**同名用户名**写进 `CLASSFEE_TEACHER_USERNAME` 即可（存在即跳过，密码/角色不受影响）；若从未建过账号，升级后必须补齐 `CLASSFEE_TEACHER_USERNAME`/`PASSWORD` 并重启，否则无人可登录。`sys_user.role` 枚举新增 `'MONITOR'`（班长）由启动时的 `migrate_role_enum()` **幂等自动升级**（查 `INFORMATION_SCHEMA`，缺了才 `ALTER`），无需手工改表 |
-| **MySQL 8 替代 MariaDB** | 连接串**不用改**——用的是 SQLAlchemy 原生写法 `mysql+pymysql://`，PyMySQL 同时支持 MariaDB 与 MySQL 8。想换库名/端口就改 URL 里的主机与库名部分。旧 Java 版留下的 `jdbc:mariadb://` / `jdbc:mysql://` 写法**仍兼容**（`config.py` 会自动归一化，但那些 `useUnicode`/`serverTimezone` 是 Java 驱动专有参数，会被丢弃）；旧变量名 `SPRING_DATASOURCE_URL` 也仍兼容 |
+| **MySQL 8 替代 MariaDB** | 连接串**不用改**——用的是 SQLAlchemy 原生写法 `mysql+pymysql://`，PyMySQL 同时支持 MariaDB 与 MySQL 8。想换库名/端口就改 URL 里的主机与库名部分。旧写法留下的 `jdbc:mariadb://` / `jdbc:mysql://` **仍兼容**（`config.py` 会自动归一化，但那些 `useUnicode`/`serverTimezone` 是 JDBC 驱动专有参数，会被丢弃）；旧变量名 `SPRING_DATASOURCE_URL` 也仍兼容 |
 | **HTTPS** | `sudo certbot --nginx -d your-domain.com` 一键加证书并改写 80→443 |
 | **时区** | 应用内已固定 `Asia/Shanghai`（systemd/compose 均已设 `TZ`），服务器系统时区不必改 |
 | **数据库备份** | `mysqldump -u classfee -p classfee > backup_$(date +%F).sql`，建议 cron 每日执行 |

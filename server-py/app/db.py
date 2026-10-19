@@ -16,7 +16,7 @@ engine = create_engine(
         "user": _cfg["db_username"],
         "password": _cfg["db_password"],
         "charset": "utf8mb4",
-        # 墙钟 datetime（对齐 Java 侧 serverTimezone=Asia/Shanghai 的朴素值）
+        # 墙钟 datetime（与 serverTimezone=Asia/Shanghai 一致的朴素值）
         "local_infile": False,
     },
     pool_pre_ping=True,

@@ -1,4 +1,4 @@
-"""JWT 签发/解析、BCrypt 密码、认证鉴权中间件（对应 Java JwtUtil + AuthInterceptor）。
+"""JWT 签发/解析、BCrypt 密码、认证鉴权中间件。
 
 顺序与 Spring 拦截器一致：先解析令牌（401）→ 再校验角色（403）→ 之后才轮到参数/请求体校验。
 """
@@ -29,7 +29,7 @@ BEARER_PREFIX = "Bearer "
 class LoginUser:
     id: int
     username: str
-    role: str  # MEMBER(普通成员) / GUEST(访客·只读) / ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)
+    role: str  # MEMBER(普通成员) / GUEST(访客·只读) / ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任) / DEAN(院长·系统管理员)
     class_id: int
 
 
@@ -49,11 +49,11 @@ def verify_password(raw: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(_pw_bytes(raw), hashed.encode("ascii"))
     except ValueError:
-        # 密文格式非法（非 BCrypt）：Java encoder.matches 抛异常 → 这里等价视为不匹配
+        # 密文格式非法（非 BCrypt）：等价视为不匹配
         return False
 
 
-# ---------------- JWT（HS256，claims 与 Java JwtUtil 相同） ----------------
+# ---------------- JWT（HS256） ----------------
 
 def create_token(user: LoginUser) -> str:
     now = int(time.time())
@@ -84,27 +84,49 @@ def parse_token(token: str) -> LoginUser:
 
 # ---------------- 路由角色表（对应各控制器 @RequireRole） ----------------
 
-PUBLIC_ROUTES = {("POST", "/api/auth/login")}
+# 免鉴权端点。`/api/version` 在列：登录页要在**还没登录时**就显示版本号
+# （出问题时第一眼看到的就是「我跑的是哪一版」）。它只回常量，无业务数据。
+PUBLIC_ROUTES = {
+    ("POST", "/api/auth/login"),
+    ("GET", "/api/version"),
+}
 
-# 运营角色：ADMIN（生活委员）/ MONITOR（班长）/ TEACHER（班主任）三者**记账权限**同权
-# （第七轮起 TEACHER=全权运营：财务 + 成员管理；第十四轮新增 MONITOR 承载「班长」称谓）
-STAFF_ROLES = frozenset({"ADMIN", "MONITOR", "TEACHER"})
+# 运营角色：ADMIN（生活委员）/ MONITOR（班长）/ TEACHER（班主任）/ DEAN（院长）
+# **记账权限**同权（第七轮起 TEACHER=全权运营：财务 + 成员管理；
+# 第十四轮新增 MONITOR 承载「班长」称谓；第二十八轮新增 DEAN 作为系统管理员）。
+#
+# DEAN 进 STAFF_ROLES 的理由：它是**最高级运营角色**，「记账/成员管理」这套权限
+# 对它是「全都要」，不是「另开一套」。真要给它单独一套权限，就得在 `_STAFF_ROUTES`
+# 里另起分支——而那会让「院长能记账、班主任不能」这种话说不通。
+STAFF_ROLES = frozenset({"ADMIN", "MONITOR", "TEACHER", "DEAN"})
 
 # ---------------- 账号管理权限等级（第十五轮） ----------------
-# 记账权限同权 ≠ 管理权限同权。**班主任 > 班长 > 生活委员 > 普通成员**：
+# 记账权限同权 ≠ 管理权限同权。**院长 > 班主任 > 班长 > 生活委员 > 普通成员**：
 # 低等级角色不能改动/停用/删除高等级角色的账号，否则班长能把班主任踢下线。
 # 数字越大权限越高；MEMBER=0（只读，不参与账号管理）。
 #
 # GUEST（访客，第二十四轮）：给领导/校方看的**纯只读**账号。
 # 等级取 0，与 MEMBER 同级——两者都不参与账号管理（改别人账号的接口
 # 本身就要求 STAFF_ROLES）。它比 MEMBER 多的只是「能看全班学生信息、能勾选导出」。
+#
+# DEAN（院长，第二十八轮）：**系统管理员**，等级压在班主任之上（4 > 3）。
+# 「默认院长是管理员」这句落在这里——院长是等级最高的那一档，能管理所有低档角色，
+# 包括班主任自己。等级差一档就够表达「系统管理员」了，不需要另起一套并行体系。
 ROLE_LEVEL: dict[str, int] = {
     "MEMBER": 0,
     "GUEST": 0,    # 访客（只读；等级同普通成员，都管不了账号）
     "ADMIN": 1,    # 生活委员
     "MONITOR": 2,  # 班长
     "TEACHER": 3,  # 班主任
+    "DEAN": 4,     # 院长（系统管理员，等级最高）
 }
+
+#: 够格管理访客账号的最低等级。等于「班主任及以上」——院长(4)自然包含在内。
+#:
+#: ⚠ 这里**必须**跟着 `ROLE_LEVEL` 走，不能写成 `actor_role != "TEACHER"`：
+#: 那样会出现「等级更高的院长管不了访客、等级更低的班主任却能管」的倒挂。
+#: 角色是身份、等级才是权限——判定一律看等级。
+GUEST_MANAGER_MIN_LEVEL = ROLE_LEVEL["TEACHER"]
 
 
 # =====================================================================
@@ -255,6 +277,24 @@ def role_level(role: str | None) -> int:
     return ROLE_LEVEL.get(role or "", 0)
 
 
+def require_min_level(user: LoginUser, need_role: str, what: str) -> None:
+    """等级不足就 403。用于「按角色分档」的**管理级能力**（如管理看板）。
+
+    和 `require_role_higher` 的区别：那个管的是「你能不能改**某人**」，
+    这个管的是「你能不能用**某项能力**」。两者都是按等级判，但语义不同，
+    混用会写出「能管班主任的人却看不了管理看板」这种自相矛盾的东西。
+
+    用等级而不是 `user.role == "DEAN"`：等级是一贯的权威来源，
+    将来在院长之上再加一档，这里自动生效，不用回来补。
+
+    ⚠ **前端也要拦**：这个函数只保证接口不给数据。界面侧同样要**不渲染入口**
+    —— 让班主任看到一个点进去就报 403 的入口，比看不到更糟。
+    """
+    floor = role_level(need_role)
+    if role_level(user.role) < floor:
+        raise BizException.forbidden(f"{what}仅限院长及以上查看")
+
+
 def require_role_higher(actor_role: str, target_role: str) -> None:
     """账号管理护栏：操作者的等级必须**严格高于**目标账号。
 
@@ -264,7 +304,7 @@ def require_role_higher(actor_role: str, target_role: str) -> None:
     - 同级不能互动（避免两个班长相向踢下线）
     - 「自己不动自己」不在这里判：停用/删除自己由各接口给出更贴切的提示语
 
-    ## 访客（GUEST）例外：只有班主任能管
+    ## 访客（GUEST）例外：班主任及以上才能管
 
     访客的等级是 0（和普通成员同级，纯只读），但通用规则「等级高可以管等级低」
     会让生活委员(1) **有资格**管访客——可访客代表的是外部人员（校方/领导），
@@ -273,11 +313,15 @@ def require_role_higher(actor_role: str, target_role: str) -> None:
     这里单独拦一道，而不是在各个接口里各写一遍：这道函数就是四个管理动作的
     **唯一总入口**，规则写在这里才不会漏。（第二十四轮就漏过一次——
     创建时拦了「只有班主任能建访客」，管理那四个动作却全放行。）
+
+    ⚠ 判据是**等级**（`>= GUEST_MANAGER_MIN_LEVEL`）而不是 `== "TEACHER"`：
+    写成角色相等判断的话，加了等级更高的院长之后就会出现倒挂——
+    班主任能管访客、院长（更高）反而不能。
     """
     from .errors import BizException
 
-    if target_role == GUEST_ROLE and actor_role != "TEACHER":
-        raise BizException.forbidden("访客账号只能由班主任管理")
+    if target_role == GUEST_ROLE and role_level(actor_role) < GUEST_MANAGER_MIN_LEVEL:
+        raise BizException.forbidden("访客账号只能由班主任及以上管理")
 
     actor, target = role_level(actor_role), role_level(target_role)
     if target < actor:
@@ -393,7 +437,7 @@ def require_ownership(actor_id: int, created_by: int | None, *, what: str) -> No
 
 
 def require_roles(*roles: str):
-    """端点依赖：从 request.state 取登录用户并校验角色（403 文案同 Java）。"""
+    """端点依赖：从 request.state 取登录用户并校验角色。"""
     async def _dep(request: Request) -> LoginUser:
         user: LoginUser | None = getattr(request.state, "user", None)
         if user is None:

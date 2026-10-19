@@ -1,4 +1,4 @@
-"""收费批次服务：建批次 → 逐人标记缴费（同事务生成流水）→ 关闭/删除（对应 Java BatchService）。
+"""收费批次服务：建批次 → 逐人标记缴费（同事务生成流水）→ 关闭/删除。
 
 不变式（同一事务维护）：
 1. fee_payment.status=PAID ⟺ 其 record_id 指向一条 NORMAL 流水
@@ -341,7 +341,7 @@ def detail(db: Session, user: LoginUser, batch_id: int) -> dict:
             users.setdefault(u.id, u)
 
     rows = [payment_vo(p, users.get(p.user_id)) for p in payments]
-    # 按学号排序（空当空串），Python sort 稳定，等价 Java Comparator 链
+    # 按学号排序（空当空串）；Python 的 sort 稳定，等价于链式比较器
     rows.sort(key=lambda v: (v["studentNo"] or "", v["realName"] or ""))
     return {"batch": to_vo_list(db, [batch])[0], "payments": rows}
 

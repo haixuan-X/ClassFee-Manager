@@ -1,4 +1,4 @@
-"""成员缴费接口：成员列表 + 指定批次的缴费状态，仅管理员（对应 Java MemberController）。"""
+"""成员缴费接口：成员列表 + 指定批次的缴费状态，仅管理员。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query

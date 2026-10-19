@@ -1,4 +1,4 @@
-"""统一响应体：{ code, message, data }（与 Java R.java 逐一相同）。
+"""统一响应体：{ code, message, data }。
 
 用 simplejson(use_decimal=True) 渲染，保证 Decimal 保留小数位（2343.50 而非 2343.5），
 对齐 Jackson 序列化 BigDecimal 的输出。

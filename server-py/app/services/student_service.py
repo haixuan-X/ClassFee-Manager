@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from ..errors import BizException
 from ..models import (
+    ClsClass,
     StudentAccessRequest,
     StudentField,
     StudentGrant,
@@ -47,7 +48,8 @@ from ..models import (
     StudentRecordValue,
     SysUser,
 )
-from ..security import LoginUser
+from ..security import ROLE_LEVEL, LoginUser, role_level
+from ..serializers import fmt_dt
 
 # ---------------- scope 常量（唯一的语义来源） ----------------
 SCOPE_EDIT_OWN = "EDIT_OWN"
@@ -72,10 +74,21 @@ FIELD_TYPE_TEXT = {
     FT_BOOL: "是/否",
 }
 
-# 可以新增字段的角色：**班主任 + 班长**（用户明确要求）。生活委员不行。
-FIELD_ADD_ROLES = frozenset({"TEACHER", "MONITOR"})
-# 审批人只有班主任（用户原话「这个得让班主任来授权」）
-APPROVER_ROLES = frozenset({"TEACHER"})
+# 可以新增字段的角色：**班长及以上**（用户原话「班主任 + 班长」，生活委员不行）。
+# 审批人：**班主任及以上**（用户原话「这个得让班主任来授权」）。
+#
+# 这两个集合从 `ROLE_LEVEL` **推导**出来，而不是手写角色名：
+# 手写 `{"TEACHER","MONITOR"}` 的话，第二十八轮加院长时就得回来补一次，
+# 而「忘了补」的表现是院长莫名其妙不能加字段——静默降权，最难查。
+# 推导的写法以后再加任何角色都会自动带上，漏补的可能性直接归零。
+def _roles_at_least(role_name: str) -> frozenset[str]:
+    """等级 >= 指定角色的全部角色名。"""
+    floor = role_level(role_name)
+    return frozenset(r for r, lv in ROLE_LEVEL.items() if lv >= floor)
+
+
+FIELD_ADD_ROLES = _roles_at_least("MONITOR")   # 班长 + 班主任 + 院长
+APPROVER_ROLES = _roles_at_least("TEACHER")    # 班主任 + 院长
 
 # 访客（第二十四轮）：**纯只读**。
 #
@@ -84,8 +97,8 @@ APPROVER_ROLES = frozenset({"TEACHER"})
 #   1. 能看**所有**学生的信息——MEMBER 默认只看得到自己那一行，对领导毫无意义
 #   2. 不能改、不能加字段、不能审批、不能进成员管理
 #
-# 刻意**不放进** APPROVER_ROLES / FIELD_ADD_ROLES：那是「班主任」和「班长」的特权，
-# 访客一个都沾不到。
+# 刻意**不放进** APPROVER_ROLES / FIELD_ADD_ROLES：那是「班长及以上」的特权，
+# 访客等级为 0，永远进不去。
 GUEST_ROLE = "GUEST"
 #: 访客可见哪些 scope。只给「看全部」，不给任何编辑权。
 GUEST_SCOPES = frozenset({SCOPE_VIEW_ALL})
@@ -695,6 +708,143 @@ def _load_values(db: Session, record_ids: list[int]) -> dict[tuple[int, int], st
     ):
         out[(rid, fid)] = val
     return out
+
+
+# ==================== 仪表盘「学生情况总览」 ====================
+
+#: `reg_status`（注册状态）模板里是**纯 TEXT**，全库没有取值字典——
+#: 没有任何代码约束它只能填哪几个词（实测：seed 只给了字段名和类型）。
+#: 所以「在籍」只能靠关键词推断。这里列的是**明确离校**的写法，
+#: 其余（含**空值**）一律算在籍。
+#:
+#: 为什么把空值算在籍而不是「未知」：`student_record` 是导入 Excel 建出来的，
+#: 模板有 34 个字段而 Excel 不可能每列都填满，一空就算未知的话，
+#: 分母会被掏空，「注册人数」比「学生总数」还小——那明显不对。
+#: 宁可多算一个在读的，也别把在读的学生从分母里剔掉。
+_NOT_REGISTERED_KEYWORDS = ("休学", "退学", "结业", "毕业", "保留学籍", "开除", "肄业")
+
+#: 趋势图默认展示近几个月。**只有 `enroll_date`（入校日期）是真正的时间轴**，
+#: 其余字段（TEXT/NUMBER/BOOL）没有日期维度，无从谈趋势。
+DEFAULT_TREND_MONTHS = 12
+
+#: 「最新学籍信息」取几条。
+LATEST_LIMIT = 8
+
+
+def _is_registered(status: str | None) -> bool:
+    s = (status or "").strip()
+    if not s:
+        return True  # 空值按在籍算，见 _NOT_REGISTERED_KEYWORDS 的说明
+    return not any(k in s for k in _NOT_REGISTERED_KEYWORDS)
+
+
+def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND_MONTHS) -> dict:
+    """仪表盘「学生情况总览」的聚合数据。
+
+    ## 可见范围 = 学生信息表的同一套口径
+
+    走 `_visible_record_ids`，而不是「无条件 COUNT 全班」。普通同学默认只看得到
+    自己那一行——仪表盘上给他显示「全班 68 人」是**越权**：人数本身也是信息，
+    能据此推知班里有多少人、还差几个。访客有独立范围，同理。
+
+    所以 `canViewAll=false` 时返回的是**他自己那一行**的统计（通常 studentTotal=1），
+    界面必须把这一点说出来，不能让「1 人」看起来像「班里只有 1 个人」。
+
+    ## 学籍变化：**还没有数据源**
+
+    全库没有任何历史/快照/异动表（`student_record_value` 只存当前值）。
+    所以这里把 `changeTotal` 返回成 `null` 并带 `changeSupported: false`，
+    界面上如实显示「暂无异动记录」而不是画一条假的零线——
+    一条全零的折线会被读成「本年零异动」，那是**撒谎**。
+    """
+    vis = visibility(db, user)
+    ids = _visible_record_ids(db, user)
+    fields = _field_map(db, user.class_id)
+    values = _load_values(db, ids)
+
+    reg_field = fields.get("reg_status")
+    enroll_field = fields.get("enroll_date")
+    grade_field = fields.get("grade")
+    major_field = fields.get("major_name")
+
+    records: dict[int, StudentRecord] = {}
+    if ids:
+        records = {
+            r.id: r
+            for r in db.scalars(
+                select(StudentRecord).where(StudentRecord.id.in_(ids))
+            )
+        }
+
+    def val(rid: int, field: StudentField | None) -> str | None:
+        if field is None:
+            return None
+        v = values.get((rid, field.id))
+        return (v or "").strip() or None
+
+    total = len(records)
+    breakdown: dict[str, int] = {}
+    registered = 0
+    enroll_months: dict[str, int] = {}
+    latest_rows: list[dict] = []
+
+    for rid, rec in records.items():
+        status = val(rid, reg_field)
+        # 空状态归到「未填写」而不是「在籍」——分母里算在籍，但分布图上
+        # 让老师看得见「有 N 个人这项是空的」，否则模板空列永远是隐形的。
+        label = status or "未填写"
+        breakdown[label] = breakdown.get(label, 0) + 1
+        if _is_registered(status):
+            registered += 1
+
+        ed = val(rid, enroll_field)
+        if ed and len(ed) >= 7:
+            ym = ed[:7]  # YYYY-MM
+            enroll_months[ym] = enroll_months.get(ym, 0) + 1
+
+        latest_rows.append({
+            "id": rec.id,
+            "studentNo": rec.student_no,
+            "name": rec.name,
+            # ⚠ 必须过 `fmt_dt`：ORM 的 updated_at 是 datetime 对象，
+            # 直接塞进响应体会被 simplejson 拒掉（500 Object of type datetime
+            # is not JSON serializable）。项目里所有时间出参都走这个函数。
+            "updatedAt": fmt_dt(rec.updated_at),
+            "regStatus": status,
+            "grade": val(rid, grade_field),
+            "majorName": val(rid, major_field),
+            "enrollDate": ed,
+            "registered": _is_registered(status),
+        })
+
+    # 累计在校人数曲线：按入校月份累加，末值 = 有入校日期的学生总数。
+    # 只画**有入校日期**的学生——没填日期的没法归月，硬塞进第一个月是编数据。
+    trend: list[dict] = []
+    running = 0
+    for ym in sorted(enroll_months):
+        running += enroll_months[ym]
+        trend.append({"ym": ym, "added": enroll_months[ym], "cumulative": running})
+
+    latest_rows.sort(key=lambda r: (r["updatedAt"] or "", r["id"]), reverse=True)
+
+    clazz = db.get(ClsClass, user.class_id)
+    return {
+        "canViewAll": bool(vis["canViewAll"]),
+        "classGrade": (clazz.grade if clazz else "") or "",
+        "studentTotal": total,
+        "registeredTotal": registered,
+        "statusBreakdown": [
+            {"status": k, "count": v}
+            for k, v in sorted(breakdown.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        "enrollTrend": trend,
+        "months": months,
+        "latest": latest_rows[:LATEST_LIMIT],
+        # 学籍异动：暂无数据源（见函数 docstring）。null 而不是 0——
+        # 0 会被读成「确实零异动」，null 才如实表达「还没这回事」。
+        "changeTotal": None,
+        "changeSupported": False,
+    }
 
 
 def list_records(db: Session, user: LoginUser, *, keyword: str | None = None) -> dict:

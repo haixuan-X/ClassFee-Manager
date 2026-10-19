@@ -2,7 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { fetchMe } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
 import type { GuestScope } from '@/types'
-import { GUEST_SCOPE_OPTIONS } from '@/types'
+import { GUEST_SCOPE_OPTIONS, STAFF_ROLES } from '@/types'
 
 /** 四项全开。后端把库里的 NULL 展开成这个；前端拿不到 scope 时也用它兜底。 */
 const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
@@ -79,13 +79,13 @@ const routes: RouteRecordRaw[] = [
         path: 'income',
         name: 'income',
         component: () => import('@/views/records/index.vue'),
-        meta: { title: '收入登记', type: 'INCOME', roles: ['ADMIN', 'MONITOR', 'TEACHER'] },
+        meta: { title: '收入登记', type: 'INCOME', roles: STAFF_ROLES },
       },
       {
         path: 'expense',
         name: 'expense',
         component: () => import('@/views/records/index.vue'),
-        meta: { title: '支出登记', type: 'EXPENSE', roles: ['ADMIN', 'MONITOR', 'TEACHER'] },
+        meta: { title: '支出登记', type: 'EXPENSE', roles: STAFF_ROLES },
       },
       {
         // 我的缴费（第十八轮）：回答普通同学的三个问题 —— 有没有班费要交 / 我交了吗 /
@@ -124,20 +124,20 @@ const routes: RouteRecordRaw[] = [
         path: 'members',
         name: 'members',
         component: () => import('@/views/members/index.vue'),
-        meta: { title: '成员缴费', roles: ['ADMIN', 'MONITOR', 'TEACHER'] },
+        meta: { title: '成员缴费', roles: STAFF_ROLES },
       },
       {
         path: 'batches',
         name: 'batches',
         component: () => import('@/views/batches/index.vue'),
-        meta: { title: '收费批次', roles: ['ADMIN', 'MONITOR', 'TEACHER'] },
+        meta: { title: '收费批次', roles: STAFF_ROLES },
       },
       {
         // 账号管理：老师建班（新增/编辑/重置密码/停用启用），后端 /api/users 仅运营角色
         path: 'member-manage',
         name: 'member-manage',
         component: () => import('@/views/member-manage/index.vue'),
-        meta: { title: '成员管理', roles: ['ADMIN', 'MONITOR', 'TEACHER'] },
+        meta: { title: '成员管理', roles: STAFF_ROLES },
       },
       {
         // 班级信息：全员可读；班级名/年级/班主任的编辑仅运营角色
@@ -173,7 +173,7 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   const userStore = useUserStore()
 
-  document.title = to.meta.title ? `${to.meta.title} · 班费收支系统` : '班费收支系统'
+  document.title = to.meta.title ? `${to.meta.title} · 学生信息管理系统` : '学生信息管理系统'
 
   // 未登录访问受保护页面 → 跳登录并带上回跳地址
   if (!to.meta.public && !userStore.isLogin) {

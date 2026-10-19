@@ -1,4 +1,4 @@
-"""收费批次接口：全部仅管理员（对应 Java BatchController）。"""
+"""收费批次接口：全部仅管理员。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends

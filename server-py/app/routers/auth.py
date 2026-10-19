@@ -1,4 +1,4 @@
-"""认证接口（对应 Java AuthController）。"""
+"""认证接口。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends

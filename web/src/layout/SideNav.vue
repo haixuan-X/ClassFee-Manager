@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { fetchVersion } from '@/api/meta'
 import { useUserStore } from '@/stores/user'
 import type { GuestScope, Role } from '@/types'
-import { GUEST_SCOPE_OPTIONS } from '@/types'
+import { GUEST_SCOPE_OPTIONS, STAFF_ROLES } from '@/types'
 
 /** 四项全开。后端把库里的 NULL 展开成这个，前端拿不到 scope 时也用它兜底。 */
 const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
+
+/** `v1.1.0`。拉不到就空串，模板不渲染——宁可少一行，不要挂个假版本号。 */
+const versionLabel = ref('')
+
+onMounted(async () => {
+  try {
+    versionLabel.value = `v${(await fetchVersion()).version}`
+  } catch {
+    versionLabel.value = ''
+  }
+})
 
 interface NavItem {
   index: string
@@ -36,8 +48,12 @@ interface NavGroup {
 const route = useRoute()
 const userStore = useUserStore()
 
-/** 运营角色（与后端 _STAFF_ROUTES 同口径：生活委员 / 班长 / 班主任） */
-const STAFF: Role[] = ['ADMIN', 'MONITOR', 'TEACHER']
+/**
+ * 运营角色。**从 `@/types` 的共享常量来**，不再在本文件里另写一份——
+ * 加角色时只改 types 一处，侧栏、路由 meta.roles、成员管理按钮全部跟着对。
+ * （原先三处各写一份字面量，加院长时只改一处，侧栏立刻少了 5 个入口。）
+ */
+const STAFF = STAFF_ROLES
 
 /**
  * 访客能看到哪几个页面（用户口径：总览、账目、学生信息、我的，就这些；
@@ -183,7 +199,7 @@ const visibleGroups = computed(() =>
         <el-icon :size="18"><Wallet /></el-icon>
       </div>
       <div>
-        <div class="brand-name">班费收支系统</div>
+        <div class="brand-name">学生信息管理系统</div>
         <div class="brand-sub">{{ userStore.user?.className ?? '未加入班级' }}</div>
       </div>
     </div>
@@ -216,7 +232,11 @@ const visibleGroups = computed(() =>
 
     <div class="sidenav-foot">
       余额由流水实时对账<br />
-      <span class="num">v1.0</span>
+      <!--
+        版本号取自后端，不写死。以前这里是硬编码的 `v1.0`——每加一轮功能就
+        忘了改，界面上挂着一个假版本号，比不显示还糟。拉不到就不渲染。
+      -->
+      <span v-if="versionLabel" class="num">{{ versionLabel }}</span>
     </div>
   </div>
 </template>

@@ -1,4 +1,4 @@
-"""仪表盘统计：余额、本月收支、近 N 月趋势、支出分类占比、最新流水（对应 Java DashboardService）。
+"""仪表盘统计：余额、本月收支、近 N 月趋势、支出分类占比、最新流水。
 
 统一口径：只统计 status='NORMAL' 的流水，作废（红冲）不参与。
 SQL 与 ReportMapper 的 @Select 逐字对齐。

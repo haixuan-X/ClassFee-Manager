@@ -1,4 +1,4 @@
-"""小票图片上传与查看（第八轮新增；Java 原版只有 fee_record.receipt_url 字段、未实现接口）。
+"""小票图片上传与查看（第八轮新增；此前只有 fee_record.receipt_url 字段、未实现接口）。
 
 - POST /api/files           multipart 上传（运营角色，中间件 _STAFF_ROUTES 拦截）
 - GET  /api/files/{path}    登录即可查看，且必须被本班流水引用（越权/孤儿路径 404）

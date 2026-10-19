@@ -23,9 +23,6 @@ web/dist/
 web/.vite/
 *.local
 
-# ---- Java 存档（server/ 不参与运行）----
-server/target/
-
 # ---- IDE / 编辑器 ----
 .idea/
 .vscode/
@@ -53,7 +50,6 @@ backups/
 # 例外：建表脚本是**源码**不是 dump。后端启动时靠它建表，
 # 跟着 git 走才能让 clone 下来的人直接跑起来、也能进 Docker 构建上下文。
 !server-py/db/schema.sql
-!server/src/main/resources/db/schema.sql
 
 # ---- 日志 ----
 *.log

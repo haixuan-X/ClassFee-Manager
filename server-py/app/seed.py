@@ -153,7 +153,13 @@ def _init_teacher_account(db: Session, cfg: dict, class_id: int) -> None:
         return
 
     role = cfg["teacher_role"]
-    if role not in ("ADMIN", "TEACHER"):
+    # DEAN（院长·系统管理员）第二十八轮起也允许：部署方要用这个变量
+    # 直接开出一个最高权限账号时，不必绕道「先建成班主任、再手工改角色」。
+    #
+    # 这里用字面量而不是等级判定：ADMIN(1) 也是合法值，而「>= 班主任」会把
+    # 生活委员排除掉——等级表达不了「生活委员 或 班主任及以上」这个集合。
+    # 非法值一律**回退成 TEACHER**并打日志，绝不静默接受。
+    if role not in ("ADMIN", "TEACHER", "DEAN"):
         log.warning("CLASSFEE_TEACHER_ROLE=%s 非法，回退为 TEACHER", role)
         role = "TEACHER"
     account = SysUser(
@@ -217,7 +223,8 @@ def _init_categories(db: Session, class_id: int) -> None:
 def migrate_role_enum() -> None:
     """给 `sys_user.role` 的 ENUM 补齐新增角色。
 
-    第十四轮加了 'MONITOR'（班长），第二十四轮加了 'GUEST'（访客·给领导看的只读账号）。
+    第十四轮加了 'MONITOR'（班长），第二十四轮加了 'GUEST'（访客·给领导看的只读账号），
+第二十八轮加了 'DEAN'（院长·系统管理员）。
 
     为什么需要单独迁移：schema.sql 用 `CREATE TABLE IF NOT EXISTS`，
     **已建好的库不会因为改了 DDL 文本而变更列定义**（只有新库能拿到新枚举）。
@@ -228,7 +235,7 @@ def migrate_role_enum() -> None:
     每次都是**整列重写**成完整枚举，别改成"只加一个"的增量写法：
     那样老库上会出现枚举值顺序不稳定的问题。
     """
-    wanted = ("ADMIN", "MEMBER", "GUEST", "MONITOR", "TEACHER")
+    wanted = ("ADMIN", "MEMBER", "GUEST", "MONITOR", "TEACHER", "DEAN")
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         column_type = conn.execute(
             text(

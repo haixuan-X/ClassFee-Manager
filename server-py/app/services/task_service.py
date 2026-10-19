@@ -59,10 +59,18 @@ from sqlalchemy.orm import Session
 
 from ..errors import BizException
 from ..models import ClsTask, ClsTaskAnswer, SysUser
-from ..security import LoginUser
+from ..security import ROLE_LEVEL, LoginUser, role_level
 
-# 发布权限：班主任 + 班长（用户口径）
-PUBLISH_ROLES = frozenset({"TEACHER", "MONITOR"})
+
+def _roles_at_least(role_name: str) -> frozenset[str]:
+    """等级 >= 指定角色的全部角色名（第二十八轮起权限集一律这样推导）。"""
+    floor = role_level(role_name)
+    return frozenset(r for r, lv in ROLE_LEVEL.items() if lv >= floor)
+
+# 发布权限：**班长及以上**（用户口径「班主任 + 班长」）。
+# 从 ROLE_LEVEL 推导而非手写角色名——加了更高的角色忘了补这里，表现为
+# 静默降权（院长发不了题），这类问题没有报错、只能靠人撞见。
+PUBLISH_ROLES = _roles_at_least("MONITOR")   # 班长 + 班主任 + 院长
 
 # 访客角色名。刻意用常量而不是到处写字面量：它是「应答对象」这条规则的
 # 排除条件之一，写错了两边就不配套（见 is_answer_target）。
@@ -73,13 +81,14 @@ TEACHER_ROLE = "TEACHER"
 
 # **不被统计的角色**。
 #
-# - 班主任：老师，不是被点名的同学。他发题、催交、看明细，但自己不填。
-#   （用户原话「统计班主任干什么」。）注意这条和「排除发布人」是**两回事**：
-#   班长发题时班主任不在应答名单里，靠的就是这里，不是靠 creator_id。
+# - 班主任及以上（含院长）：老师，不是被点名的同学。他们发题、催交、看明细，
+#   但自己不填。（用户原话「统计班主任干什么」。）注意这条和「排除发布人」
+#   是**两回事**：班长发题时班主任不在应答名单里，靠的就是这里，不是靠 creator_id。
 # - 访客：校方/领导，是看的人不是被统计的人。
 #
 # 生活委员和班长**是**同学（他们就是班委），所以要答、能被统计。
-NON_ANSWER_ROLES = frozenset({TEACHER_ROLE, GUEST_ROLE})
+# 院长与班主任同理——他是校方的人，不是被点名的同学。
+NON_ANSWER_ROLES = _roles_at_least("TEACHER") | {GUEST_ROLE}
 
 # 四种题型。刻意不设 TEXT：单问题 + 有结构的选项，够覆盖点名/统计，
 # 开放式文字题反而会让「回收率」这种统计失去意义（用户没选它）。
@@ -124,8 +133,12 @@ def can_publish(user: LoginUser) -> bool:
 
 
 def can_see_detail(task: ClsTask, user: LoginUser) -> bool:
-    """能不能看到「谁填了什么」。规则见模块 docstring 的可见性表。"""
-    return task.created_by == user.id or user.role == "TEACHER"
+    """能不能看到「谁填了什么」。规则见模块 docstring 的可见性表。
+
+    班主任**及以上**（含院长）都能看，不只是发布人自己。用等级判定而非
+    `== TEACHER`：写成角色相等的话，院长就看不到明细了，而院长的等级比班主任高。
+    """
+    return task.created_by == user.id or user.role in _roles_at_least("TEACHER")
 
 
 def can_answer(task: ClsTask, user: LoginUser) -> bool:
@@ -633,7 +646,7 @@ def delete_task(db: Session, user: LoginUser, task_id: int) -> None:
     """删除任务，**连带回答**（发布人删题 = 这题的答案没有保留意义）。
 
     先删回答不是冗余：整个库**一张外键都没有**（`information_schema` 里
-    FOREIGN KEY 约束数为 0，沿用 Java 版只建索引的做法），
+    FOREIGN KEY 约束数为 0，只建索引不建外键），
     所以 DDL 里的 `ON DELETE CASCADE` 并不存在，删任务不会自动带走答案。
     少这一句就是一批永久孤儿数据，而且没人会来报。
     """

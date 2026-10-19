@@ -1,4 +1,4 @@
-# 班费收支系统 · Docker Compose（复用服务器上已有的 MySQL/MariaDB）
+# 学生信息管理系统 · Docker Compose（复用服务器上已有的 MySQL/MariaDB）
 #
 # 与 docker-compose.yml 的差别：**不创建数据库容器**，backend 直接连服务器上已在跑的 MySQL。
 # 用法（与主 compose 完全一致的命令）：

@@ -1,4 +1,4 @@
-"""收支类别字典服务（对应 Java CategoryService）。"""
+"""收支类别字典服务。"""
 from __future__ import annotations
 
 from sqlalchemy import func, select
@@ -15,7 +15,7 @@ def list_categories(db: Session, user: LoginUser, kind: str | None) -> list[dict
     conds = [FeeCategory.class_id == user.class_id, FeeCategory.status == 1]
     has_kind = kind is not None and kind.strip() != ""
     if has_kind:
-        # 过滤用原始值（Java .eq 绑定未 trim 的 kind）
+        # 过滤用原始值（绑定的是未 trim 的 kind）
         conds.append(FeeCategory.kind == kind)
     rows = db.scalars(
         select(FeeCategory)

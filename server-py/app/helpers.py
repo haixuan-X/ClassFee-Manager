@@ -1,4 +1,4 @@
-"""跨服务共用的 SQL 辅助：与 Java 各 Service 中的私有工具逐一对应。"""
+"""跨服务共用的 SQL 辅助。"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ from .errors import BizException
 
 
 def escape_like(raw: str) -> str:
-    """LIKE 通配符转义（对应 Java escapeLike：反斜杠为转义符）。"""
+    """LIKE 通配符转义（反斜杠为转义符）。"""
     return raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -22,7 +22,7 @@ def like_pattern(raw: str) -> str:
 def parse_boundary(text_value: str | None, is_end: bool) -> datetime | None:
     """yyyy-MM-dd → 次日/当日零点（左闭右开）；空→None；非法→400 日期格式应为 yyyy-MM-dd。
 
-    严格两位补零，与 Java LocalDate.parse(ISO) 一致（2026-9-1 两侧都拒绝）。
+    严格两位补零：要求 ISO 严格格式（2026-9-1 两侧都拒绝）。
     """
     if text_value is None or not text_value.strip():
         return None

@@ -7,7 +7,7 @@ from pathlib import Path
 
 DEFAULT_JWT_SECRET = "classfee-m1-dev-secret-please-change-me-0123456789"
 # 默认连接串用 **SQLAlchemy 原生写法**（驱动://主机:端口/库名?参数）。
-# 注意字符集写 charset（PyMySQL 认这个），时区不在 URL 里配 —— 那是 Java 驱动的参数，
+# 注意字符集写 charset（PyMySQL 认这个），时区不在 URL 里配 —— 那是 JDBC 驱动的参数，
 # PyMySQL 没有；应用时区由容器的 TZ=Asia/Shanghai 环境变量保证。
 DEFAULT_DB_URL = "mysql+pymysql://localhost:3306/classfee?charset=utf8mb4"
 
@@ -18,9 +18,9 @@ def _normalize_db_url(url: str) -> str:
     首选写法（本项目现在用的）：``mysql+pymysql://host:3306/db?charset=utf8mb4``
     —— 原样使用，参数由自己掌控。
 
-    同时**保留对 Java 版 JDBC 串的兼容**（老 .env / 老部署文档里还写着这种）：
+    同时**保留对 JDBC 连接串的兼容**（老 .env / 老部署文档里还写着这种）：
     ``jdbc:mariadb://host:3306/db?x=y`` → ``mysql+pymysql://host:3306/db?charset=utf8mb4``
-    —— 注意 JDBC 后面那些 `useUnicode` / `serverTimezone` 是 **Java 驱动专有参数，
+    —— 注意 JDBC 串后面那些 `useUnicode` / `serverTimezone` 是**驱动专有参数，
     PyMySQL 不认**，所以直接丢弃并统一用 charset（实测两种写法连同一库结果一致）。
     """
     url = url.strip()
@@ -35,7 +35,7 @@ def _normalize_db_url(url: str) -> str:
 
 @lru_cache(maxsize=1)
 def settings() -> dict:
-    # 数据库连接：优先 CLASSFEE_DB_*（本项目命名），仍兼容 SPRING_DATASOURCE_*（旧 Java/Spring 版沿用名）
+    # 数据库连接：优先 CLASSFEE_DB_*（本项目命名），仍兼容 SPRING_DATASOURCE_*（旧版沿用名）
     raw_url = os.environ.get("CLASSFEE_DB_URL") or os.environ.get(
         "SPRING_DATASOURCE_URL", DEFAULT_DB_URL
     )

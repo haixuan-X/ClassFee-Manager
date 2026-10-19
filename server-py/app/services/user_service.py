@@ -19,6 +19,7 @@ from ..errors import BizException
 from ..models import FeeBatch, FeePayment, FeeRecord, StudentRecord, SysUser
 from ..schemas import ProfileUpdateRequest, UserCreateRequest, UserUpdateRequest
 from ..security import (
+    GUEST_MANAGER_MIN_LEVEL,
     GUEST_ROLE,
     LoginUser,
     dump_guest_scopes,
@@ -80,7 +81,7 @@ def _ensure_student_no_unique(
 ) -> None:
     """同班学号唯一（学号是缴费名单、批次排序的识别键，不能重号）。
 
-    DDL 里 student_no 没有唯一索引（与 Java 存档一致），这里按业务规则在服务层拦。
+    DDL 里 student_no 没有唯一索引，这里按业务规则在服务层拦。
     """
     conds = [SysUser.class_id == class_id, SysUser.student_no == student_no]
     if exclude_id is not None:
@@ -114,12 +115,14 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             raise BizException.bad_request(
                 "权限不足：不能创建权限高于自己的账号"
             )
-        # 第二十四轮：访客**只由班主任创建**（用户原话「访客权限由班主任创建」）。
+        # 第二十四轮：访客**只由班主任及以上创建**（用户原话「访客权限由班主任创建」）。
         # 等级校验拦不住这条——GUEST 和 MEMBER 同为 0 级，班长等级高、反而"能建"。
         # 但访客是给领导/校方开的只读账号，属于"对外"的口子，
         # 不该由班长随手开一个。
-        if role == "GUEST" and user.role != "TEACHER":
-            raise BizException.forbidden("访客账号只能由班主任创建")
+        # 第二十八轮改成等级判定：院长(4) 也够格，否则会出现「院长管不了访客、
+        # 班主任却管得了」的倒挂。
+        if role == GUEST_ROLE and role_level(user.role) < GUEST_MANAGER_MIN_LEVEL:
+            raise BizException.forbidden("访客账号只能由班主任及以上创建")
         password = req.password or DEFAULT_INITIAL_PASSWORD
         username = req.username or ""
         # 学号：老师显式填的优先；没填时 MEMBER 默认回填登录名（列 VARCHAR(20)，超长则留空）
@@ -460,10 +463,20 @@ def _plan_view(plan: dict, *, executed: bool) -> dict:
     }
 
 
+#: 「按学生信息一键建号」的最低等级 = 班主任（第三十一轮起含院长）。
+#: 两个入口（预演 / 执行）共用这一道闸——分开写过一次，结果两边文案漂了。
+ACCOUNT_PLANNER_MIN_LEVEL = role_level("TEACHER")
+
+
+def _require_account_planner(user: LoginUser) -> None:
+    """只有班主任及以上能按学生信息建号。用等级判定，院长(4) 自然包含。"""
+    if role_level(user.role) < ACCOUNT_PLANNER_MIN_LEVEL:
+        raise BizException.forbidden("只有班主任及以上可以按学生信息创建账号")
+
+
 def preview_accounts_from_students(db: Session, user: LoginUser) -> dict:
     """预演：看一眼会建什么、挂什么、跳过什么。**一个字节都不写。**"""
-    if user.role != "TEACHER":
-        raise BizException.forbidden("只有班主任可以按学生信息创建账号")
+    _require_account_planner(user)
     return _plan_view(_plan_from_students(db, user), executed=False)
 
 
@@ -482,8 +495,7 @@ def create_accounts_from_students(db: Session, user: LoginUser) -> dict:
     2. **结果要在事务里转成普通 dict**。`db.begin()` 退出时对象上的属性被标记为过期，
        之后再读 `u.id` 会触发一次懒加载查询——在已经收掉的 session 上会炸。
     """
-    if user.role != "TEACHER":
-        raise BizException.forbidden("只有班主任可以按学生信息创建账号")
+    _require_account_planner(user)
 
     created: list[dict] = []
     with db.begin():

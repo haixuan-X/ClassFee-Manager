@@ -1,6 +1,6 @@
 ﻿<div align="center">
 
-# 班费收支系统 · ClassFee Manager
+# 学生信息管理系统 · Student Info Manager
 
 **一个班级的班费账本：公开、透明、可追溯、好对账。**
 
@@ -15,10 +15,6 @@
 `Vue 3 + Element Plus` ｜ `FastAPI + SQLAlchemy 2.0` ｜ `MySQL 8 / MariaDB`
 
 </div>
-
----
-
-## ⚠️ 这是一个 Vibe Coding 项目
 
 ---
 
@@ -272,7 +268,6 @@ classfee-manager/
 │  └─ 部署-Linux.md         手动部署 / Docker Compose / 故障排查
 ├─ design-system/          UI 设计规范（含交付前检查清单）
 ├─ prototype/              可点击的高保真原型
-├─ server/                 （存档）早期 Java 实现，仅供 REST 契约对照，不参与运行
 ├─ docker-compose.yml               一键部署（自带数据库容器）
 ├─ docker-compose.use-existing-db.yml  复用服务器上已有的 MySQL/MariaDB
 ├─ start-*.bat             Windows 一键启动
@@ -315,10 +310,9 @@ classfee-manager/
 - **多班级未实现**：`class_id` 字段已就位，但没有多班级切换与跨班汇总。
 - **金额无业务上限**：仅有 `DECIMAL(10,2)` 的存储约束（约 9999 万），未做业务层封顶。
 - **Docker 镜像未在开发机实测**（开发机无 Docker），`Dockerfile` 与 compose 只做过静态校对与 BOM 检查。
-- **`server/` 是存档**：早期 Java 实现，不参与运行，保留仅为 REST 契约对照。
 
 ---
 
 ## License
 
-[MIT](LICENSE) © 2026 ClassFee Manager contributors
+[MIT](LICENSE) © 2026 Student Info Manager contributors

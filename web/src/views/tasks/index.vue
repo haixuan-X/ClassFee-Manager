@@ -308,7 +308,10 @@ async function onDelete(row: Task) {
 
 /* ============================ 杂项 ============================ */
 
+// 只用于**已知角色**的兜底显示（`ROLE_TEXT[row.role] ?? row.role`）。
+// 权威中文名在 `@/types` 的 ROLE_TEXT，这里保持同口径。
 const ROLE_TEXT: Record<string, string> = {
+  DEAN: '院长',
   TEACHER: '班主任',
   MONITOR: '班长',
   ADMIN: '生活委员',

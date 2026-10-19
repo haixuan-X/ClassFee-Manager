@@ -1,4 +1,4 @@
-"""收支流水接口：查询全员可读，记账/作废/删除/导出仅管理员（对应 Java RecordController）。"""
+"""收支流水接口：查询全员可读，记账/作废/删除/导出仅管理员。"""
 from __future__ import annotations
 
 import urllib.parse

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { nextTick, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Lock, User } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { login } from '@/api/auth'
+import { fetchVersion } from '@/api/meta'
 import { getErrorMessage } from '@/api/request'
 import { useUserStore } from '@/stores/user'
 import type { LoginRequest } from '@/types'
@@ -17,6 +18,19 @@ const loading = ref(false)
 /** 顶部错误摘要（role=alert，键盘/读屏可发现） */
 const alertMessage = ref('')
 const alertRef = ref<HTMLElement>()
+
+/** 「学生信息管理系统 v1.1.0」。拉不到就是空串，模板整块不渲染。 */
+const versionLabel = ref('')
+
+onMounted(async () => {
+  // 版本号是锦上添花：拉失败绝不能影响登录，所以吞掉异常、留空即可
+  try {
+    const v = await fetchVersion()
+    versionLabel.value = `${v.appName} v${v.version}`
+  } catch {
+    versionLabel.value = ''
+  }
+})
 
 const form = reactive<LoginRequest>({
   username: '',
@@ -78,7 +92,7 @@ async function onSubmit() {
           <el-icon :size="22"><Wallet /></el-icon>
         </div>
         <div>
-          <h1>班费收支系统</h1>
+          <h1>学生信息管理系统</h1>
           <p>公开 · 透明 · 可追溯</p>
         </div>
       </div>
@@ -131,6 +145,12 @@ async function onSubmit() {
       <div class="demo-hint">
         <span>账号由老师在「成员管理」中创建，初始密码默认 123456</span>
       </div>
+
+      <!--
+        版本号放在登录页：出问题时人还没登录，第一眼要能看到「这是哪一版」。
+        拉不到就整块不渲染——空占位比没有更让人以为界面坏了。
+      -->
+      <p v-if="versionLabel" class="version-line">{{ versionLabel }}</p>
     </main>
   </div>
 </template>
@@ -210,5 +230,14 @@ async function onSubmit() {
 .demo-hint .el-button {
   min-height: 40px;
   min-width: 40px;
+}
+
+/* 版本号：比提示文字再淡一档，别和登录表单抢注意力 */
+.version-line {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-muted-fg);
+  opacity: 0.75;
 }
 </style>

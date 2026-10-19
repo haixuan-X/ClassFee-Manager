@@ -11,7 +11,7 @@ from typing import Any
 
 from .models import ClsClass, FeeBatch, FeeCategory, FeePayment, FeeRecord, SysUser
 
-# 读取对象字段的哨兵：用于区分「未传」与「显式 None（对齐 Java 刚插入未回填）」
+# 读取对象字段的哨兵：用于区分「未传」与「显式 None（刚插入未回填的对象）」
 UNSET: Any = object()
 
 

@@ -1,4 +1,4 @@
-"""收支类别字典接口：读全员，写仅管理员（对应 Java CategoryController）。"""
+"""收支类别字典接口：读全员，写仅管理员。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query

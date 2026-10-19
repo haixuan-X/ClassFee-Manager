@@ -21,6 +21,7 @@ from .routers import (
     dashboard,
     files,
     members,
+    meta,
     records,
     students,
     tasks,
@@ -28,6 +29,7 @@ from .routers import (
 )
 from .security import install_auth_middleware
 from .seed import bootstrap
+from .version import VERSION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,12 +40,14 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ping_db()      # 数据库连接重试（适配 compose 慢启动）
-    bootstrap()    # schema.sql 幂等执行 + 种子数据（同 Java spring.sql.init + DataInitializer）
+    bootstrap()    # schema.sql 幂等执行 + 种子数据
     yield
 
 
 app = FastAPI(
     title="classfee-server",
+    # OpenAPI 文档页上直接显示版本，省得再多一个地方同步版本号
+    version=VERSION,
     default_response_class=RJSONResponse,
     lifespan=lifespan,
 )
@@ -65,6 +69,7 @@ for _router in (
     class_info,
     students,
     tasks,
+    meta,
 ):
     app.include_router(_router.router)
 

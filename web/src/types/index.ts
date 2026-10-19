@@ -6,7 +6,7 @@ export interface ApiResponse<T = unknown> {
 }
 
 /** 角色 */
-export type Role = 'ADMIN' | 'MEMBER' | 'GUEST' | 'MONITOR' | 'TEACHER'
+export type Role = 'ADMIN' | 'MEMBER' | 'GUEST' | 'MONITOR' | 'TEACHER' | 'DEAN'
 
 /** 当前用户信息（后端 UserVO） */
 export interface UserInfo {
@@ -160,6 +160,50 @@ export interface DashboardSummary {
   latestRecords: FeeRecord[]
 }
 
+/**
+ * 仪表盘「学生情况总览」的聚合数据（后端 `student_service.dashboard_stats`）。
+ *
+ * ⚠ 全部字段都**受可见范围限制**：普通同学默认只看得到自己那一行，
+ * 所以 `studentTotal` 可能是 1 而不是全班人数。这是**有意**的：
+ * 人数本身也是信息，仪表盘不该成为绕过学生信息权限的后门。
+ * 界面必须靠 `canViewAll` 决定怎么措辞。
+ */
+export interface StudentDashboard {
+  /** false = 只统计到「你有权看的那几行」，数字不代表全班 */
+  canViewAll: boolean
+  /** 班级年级，来自 `cls_class.grade`；没填时为空串 */
+  classGrade: string
+  /** 可见范围内的学生记录数 */
+  studentTotal: number
+  /** 其中「在籍」的人数（休学/退学/毕业等不计入，空值算在籍） */
+  registeredTotal: number
+  /** 注册状态分布，按人数降序；未填写归到「未填写」一项 */
+  statusBreakdown: { status: string; count: number }[]
+  /** 按入校月份的新增与累计人数——**唯一有真实时间轴的序列** */
+  enrollTrend: { ym: string; added: number; cumulative: number }[]
+  months: number
+  /** 最近有改动的学生行 */
+  latest: {
+    id: number
+    studentNo: string
+    name: string
+    updatedAt: string | null
+    regStatus: string | null
+    grade: string | null
+    majorName: string | null
+    enrollDate: string | null
+    registered: boolean
+  }[]
+  /**
+   * 学籍异动人次。**目前恒为 `null`**——库里没有异动表、没有历史快照，
+   * 画一条全零折线会被读成「本年零异动」，那是撒谎。`null` 才如实表达
+   * 「这个功能还没有数据源」。配套的 `changeSupported` 让界面能显式
+   * 说明原因，而不是画个空图。
+   */
+  changeTotal: number | null
+  changeSupported: boolean
+}
+
 /** 月度趋势点 */
 export interface TrendPoint {
   ym: string
@@ -173,14 +217,34 @@ export interface PieItem {
   value: number
 }
 
-/** 角色中文名：普通成员(只读) / 访客(只读·给领导看) / 生活委员 / 班长 / 班主任（后三者为运营角色） */
+/**
+ * 角色中文名：普通成员(只读) / 访客(只读·给领导看) / 生活委员 / 班长 / 班主任 / 院长
+ * （后四者为运营角色 `STAFF_ROLES`；院长是系统管理员，等级最高）。
+ *
+ * ⚠ 必须与后端 `security.ROLE_LEVEL` 的键**完全一致**：多一个少一个，
+ * 界面上就会出现「后端认识但前端显示 undefined」的角色名。
+ */
 export const ROLE_TEXT: Record<Role, string> = {
   ADMIN: '生活委员',
   MEMBER: '普通成员',
   GUEST: '访客',
   MONITOR: '班长',
   TEACHER: '班主任',
+  DEAN: '院长',
 }
+
+/**
+ * 运营角色（与后端 `security.STAFF_ROLES` 同口径）。
+ *
+ * ⚠ 这份列表在**三个地方**都要用：侧栏入口过滤、路由 `meta.roles`、成员管理
+ * 的操作按钮。原先它们各写一份字面量，于是加「院长」时只改一处就会出问题——
+ * 实测过的两种表现：① 侧栏少了 5 个入口；② `/member-manage` 被路由守卫弹回
+ * 仪表盘（页面看着像坏了，其实只是没授权）。
+ * 收成一份共享常量后，「加角色漏改」最多只剩「忘了往这个常量里加」一处。
+ *
+ * 回归里有断言盯着它与后端一致（`test_a20_dean_role`）。
+ */
+export const STAFF_ROLES: Role[] = ['ADMIN', 'MONITOR', 'TEACHER', 'DEAN']
 
 /* ============================ M4 班级信息 ============================ */
 
@@ -364,6 +428,33 @@ export interface ProfileUpdateRequest {
  * 需要这两项时由页面读 `GET /api/users` 里的自己那一行。
  */
 export type MyProfile = UserAccount
+
+/* ============================ 语义化版本 ============================ */
+
+/**
+ * `GET /api/version` 的返回（第二十七轮）。
+ *
+ * **唯一真相源在后端** `server-py/app/version.py` 的 `VERSION` 常量，
+ * 前端只是把它显示出来——不要在前端另写一份版本号，两处手写迟早漂。
+ *
+ * `web/package.json` 的 `version` 同步改，但只作为**漂移检测的锚**：
+ * 回归里有一条断言盯着它和后端一致（`test_a19_version`）。
+ *
+ * 字段与后端 `version_info()` 逐一对应。
+ */
+export interface AppVersion {
+  /** 应用名。与版本号一起显示——光一个 "1.1.0" 看不出是什么的版本 */
+  appName: string
+  /** 完整版本号，形如 `1.1.0` / `1.2.0-rc.1` */
+  version: string
+  major: number
+  minor: number
+  patch: number
+  /** 预发布标记（`1.2.0-rc.1` 里的 `rc.1`）；正式版为 null */
+  preRelease: string | null
+  /** 构建后缀（`1.2.0+20261019` 里的日期）；一般没用 */
+  build: string | null
+}
 
 /* ============================ 第七轮 账号管理（老师建班） ============================ */
 

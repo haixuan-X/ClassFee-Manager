@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -620,7 +622,7 @@ def test_a04_password():
     print("\n--- E. 本人改密码 ---")
     M = S["M"]
     st, j = call("PUT", "/auth/password", {"oldPassword": "wrong-one", "newPassword": "abcdef"}, M)
-    # 设计如此：改密失败走业务码 1002/1003，HTTP 仍 200（与 Java 统一响应一致）
+    # 设计如此：改密失败走业务码 1002/1003，HTTP 仍 200（统一响应体的约定）
     check("原密码错误被拒（业务码 1002）", code_of(j) == 1002, f"http={st} code={code_of(j)} {msg_of(j)}")
     for label, body in [
         ("新密码过短", {"oldPassword": MEMBER_P, "newPassword": "123"}),
@@ -1653,7 +1655,7 @@ def test_a17_class_tasks():
         """删掉本轮建的探针任务（含回答）。建任务前先清，否则会累积。
 
         **回答必须先删**：这个库**一张外键都没有**（`information_schema` 里
-        FOREIGN KEY 约束数 = 0，沿用 Java 版的做法，只建索引不建外键），
+        FOREIGN KEY 约束数 = 0，只建索引不建外键），
         所以删任务不会自动带走 `cls_task_answer`。`task_service.delete_task`
         里那句显式删回答因此是必需的，不是冗余。
         """
@@ -1752,16 +1754,23 @@ def test_a17_class_tasks():
     trow = [r for r in (data_of(call("GET", "/tasks", None, T)[1]) or {}).get("rows", [])
             if r["id"] == tid]
     tid_creator = trow[0]["createdBy"] if trow else -1
-    # 应答对象 = 启用账号 − 班主任 − 访客 − 发布人（后端 NON_ANSWER_ROLES）
+    # 应答对象 = 启用账号 − 班主任及以上 − 访客 − 发布人（后端 NON_ANSWER_ROLES）
+    #
+    # ⚠ 这里从后端 `NON_ANSWER_ROLES` **导入**，不写死 ("GUEST","TEACHER")。
+    # 第二十八轮加了院长（等级 ≥ 班主任，同样不是被统计的同学）之后，写死的
+    # 版本就把院长算进了分母：断言变成「明细 11 行 vs 应答对象 12 人」——
+    # 服务端是对的、测试是错的。这类「测试自己抄了一份规则」的漂移，
+    # 只能在**直接引用**的时候根除。
+    from app.services.task_service import NON_ANSWER_ROLES as _non_answer  # noqa: PLC0415
     want_total = sum(
         1 for u in allu
-        if u["id"] != tid_creator and u["role"] not in ("GUEST", "TEACHER")
+        if u["id"] != tid_creator and u["role"] not in _non_answer
     )
-    check("明细行数 = 应答对象数（不含发布人、班主任、访客）",
+    check("明细行数 = 应答对象数（不含发布人、班主任及以上、访客）",
           len((before or {}).get("rows", [])) == want_total,
           f"明细 {len((before or {}).get('rows', []))} 行 vs 应答对象 {want_total} 人")
-    check("明细里不出现访客和班主任",
-          not any(r["role"] in ("GUEST", "TEACHER") for r in (before or {}).get("rows", [])),
+    check("明细里不出现访客和班主任及以上",
+          not any(r["role"] in _non_answer for r in (before or {}).get("rows", [])),
           str([(r["name"], r["role"]) for r in (before or {}).get("rows", [])]))
     st, j = call("GET", "/tasks", None, M)
     mrow = [r for r in (data_of(j) or {}).get("rows", []) if r["id"] == tid]
@@ -3003,6 +3012,489 @@ def test_a16_student_info():
     _purge_user(GU + "2")
 
 
+def test_a19_version():
+    """**语义化版本**（第二十七轮）：端点、格式、以及跨文件的一致性。
+
+    这个用例真正的价值在最后两条**漂移守卫**：版本号写在两个文件里
+    （后端 `version.py` 和 `web/package.json`），靠人同步迟早会忘。
+    """
+    print("\n--- 语义化版本 ---")
+    # json / pathlib 模块顶部已导入；这里只需要 re
+    #
+    # ⚠ `root` 提到函数最前面：下面的「项目名守卫」要读 `web/index.html` 等源文件，
+    # 而原来它是在第 ④ 段（package.json 漂移守卫）才定义的。用到它的代码排在前面
+    # 就直接 UnboundLocalError——整份回归脚本崩掉、一条用例都跑不出来。
+    root = pathlib.Path(__file__).resolve().parents[2]
+    sys.path.insert(0, root / "server-py")
+
+    # ① 免鉴权：登录页要在还没登录时就能显示版本号
+    st, j = call("GET", "/version")
+    v = data_of(j) or {}
+    check("GET /api/version 免鉴权 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("版本结构完整（appName/version/major/minor/patch）",
+          all(k in v for k in ("appName", "version", "major", "minor", "patch")), str(v))
+    check("应用名不是空串（光一个版本号看不出是什么的版本）",
+          bool(str(v.get("appName") or "").strip()), repr(v.get("appName")))
+
+    # ★ 项目改名后的回归守卫：登录页/侧栏/文档都写着这个名字，
+    # 而「APP_NAME 常量」和「前端各处硬编码的标题」很容易各改各的。
+    # 这里同时钉死三处，确保改名只改一次、且改全。
+    from app.version import APP_NAME as _app_name  # noqa: PLC0415
+
+    check("登录响应里的 appName 与后端 APP_NAME 常量一致",
+          v.get("appName") == _app_name, f"{v.get('appName')!r} vs {_app_name!r}")
+    stale_name = []
+    for rel in ("web/index.html", "web/src/layout/SideNav.vue",
+                "web/src/router/index.ts", "web/src/views/login/index.vue",
+                "web/src/layout/AppLayout.vue", "README.md"):
+        body = (root / rel).read_text(encoding="utf-8-sig")
+        # 旧项目名「班费收支系统」不该再出现在任何地方
+        if "班费收支系统" in body:
+            stale_name.append(rel)
+        elif _app_name not in body:
+            stale_name.append(f"{rel}(连新名都没有)")
+    check("界面与 README 都用新项目名，且旧名已彻底清除", not stale_name,
+          "、".join(stale_name))
+
+    semver = re.compile(
+        r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+        r"(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?$", re.IGNORECASE)
+    ver = str(v.get("version") or "")
+    check(f"版本号 {ver!r} 符合语义化版本 MAJOR.MINOR.PATCH",
+          bool(semver.match(ver)), ver)
+
+    # ② 拆出来的数字必须能拼回原字符串，否则前端按 major/minor 展示会显示错版本
+    check("major/minor/patch 能拼回 version 字段",
+          ver == f"{v.get('major')}.{v.get('minor')}.{v.get('patch')}",
+          f"{v.get('major')}.{v.get('minor')}.{v.get('patch')} vs {ver}")
+
+    # ③ 鉴权后拿到的必须一样（免鉴权不是「只对没登录的人返回残缺数据」）
+    st2, j2 = call("GET", "/version", None, S["T"])
+    check("登录后读到的版本与免鉴权时一致", st2 == 200 and (data_of(j2) or {}) == v,
+          str(data_of(j2)))
+
+    # ④ ★ 漂移守卫：package.json 的 version 必须和后端常量一致
+    pkg_path = root / "web" / "package.json"
+    pkg = json.loads(pkg_path.read_text(encoding="utf-8-sig"))
+    check("web/package.json 的 version 与后端 VERSION 一致（防止两处漂移）",
+          pkg.get("version") == ver,
+          f"package.json={pkg.get('version')!r} 后端={ver!r}")
+
+    # ⑤ ★ 漂移守卫：界面里不能再有写死的版本号（旧版侧栏脚注写死过 "v1.0"）
+    #
+    # 两个坑，都是这条守卫自己踩出来的，写在这里免得下次再犯：
+    #
+    # 1. **必须先剥注释**。注释里为了说明「以前写死过 v1.0」而出现的那个字面量
+    #    会被当成违规——第一版就这么把自己写红了。注释是文档，不是界面输出。
+    # 2. **必须同时扫模板裸文本**。只扫引号里的字符串字面量是不够的：
+    #    模板里写死的版本是 `<span>v1.0</span>` 这种**没有引号**的裸文本，
+    #    而那恰恰是最常见的一种。只扫字面量的守卫对模板完全失明。
+    stale = []
+    for rel in ("web/src/layout/SideNav.vue", "web/src/views/login/index.vue"):
+        txt = (root / rel).read_text(encoding="utf-8-sig")
+        code = re.sub(r"<!--.*?-->", "", txt, flags=re.S)      # HTML / 模板注释
+        code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)       # 块注释
+        code = re.sub(r"^\s*//.*$", "", code, flags=re.M)       # 整行行注释
+        code = re.sub(r"\s//[^\n]*$", "", code, flags=re.M)     # 行尾注释
+        # (a) script 里的字符串字面量
+        for m in re.finditer(r"""["'`]\s*v?\d+\.\d+(?:\.\d+)?\s*["'`]""", code):
+            stale.append(f"{rel} 字面量 {m.group(0)}")
+        # (b) 模板里剥掉标签后的**可见文本**：`<span class="num">v9.9.9</span>`
+        #     只认 vX.Y[.Z] 和三段式纯数字。两段裸数字（"比例 1.0"）太容易误伤。
+        plain = re.sub(r"<[^>]*>", " ", code)
+        for m in re.finditer(r"(?<![\w.])(?:v\d+\.\d+(?:\.\d+)?|\d+\.\d+\.\d+)(?![\w.])",
+                             plain, re.IGNORECASE):
+            stale.append(f"{rel} 模板文本 {m.group(0)}")
+    check("界面源码里没有写死的版本号（注释已排除，模板裸文本也扫）", not stale,
+          "; ".join(stale))
+
+
+DEAN_PROBE = "dean_probe"
+
+
+def _try_create_dean_via_api(token: str) -> bool:
+    """用执行身份（班主任）试着建一个院长。返回是否真的建成功了。
+
+    期望是**失败**——班主任等级 3 < 院长 4，`create_user` 的「不能创建权限高于
+    自己的账号」应当拦下。这条单独成函数是因为它的**期望结果是 False**，
+    和其余「期望 True」的断言混在一起容易读错方向。
+    """
+    st, _ = call("POST", "/users",
+                 {"username": DEAN_PROBE + "_api", "password": "123456",
+                  "realName": "班主任自封的院长", "role": "DEAN"}, token)
+    if st == 200:
+        _purge_user(DEAN_PROBE + "_api")
+        return True
+    return False
+
+
+def _insert_dean_probe(username: str = DEAN_PROBE) -> str | None:
+    """直写库造一个院长探针 + 登录拿令牌。
+
+    为什么不用 API：院长等级高于本用例的执行身份（班主任），API 必然拒绝——
+    而那正是期望行为。见 `test_a20_dean_role` 的说明。
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+        from app.security import hash_password as _hash
+    except Exception:  # noqa: BLE001
+        return None
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM sys_user WHERE username = :u"), {"u": username})
+        uid = c.execute(_t(
+            "SELECT id FROM sys_user WHERE username = :root LIMIT 1"),
+            {"root": "test"}).scalar()
+        if uid is None:
+            return None
+        cid = c.execute(_t("SELECT class_id FROM sys_user WHERE id = :i"),
+                        {"i": uid}).scalar()
+        c.execute(_t(
+            "INSERT INTO sys_user (class_id, username, password, real_name, "
+            "role, status) VALUES (:c, :u, :p, :n, 'DEAN', 1)"),
+            {"c": cid, "u": username, "p": _hash("123456"), "n": "院长探针"})
+    return login(username, "123456")
+
+
+def _probe_id(username: str = DEAN_PROBE) -> int:
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+    except Exception:  # noqa: BLE001
+        return -1
+    with _engine.connect() as c:
+        return c.execute(_t("SELECT id FROM sys_user WHERE username = :u"),
+                         {"u": username}).scalar() or -1
+
+
+def test_a20_dean_role():
+    """**院长（DEAN）**（第二十八轮）：等级最高、系统管理员。
+
+    本用例的重点不是「院长能不能建号」这种单点功能，而是**两处最容易漏的地方**：
+
+    1. **前后端各有一份手写的等级表**（`security.ROLE_LEVEL` 与
+       `member-manage/index.vue` 的 `ROLE_LEVEL`）。加角色时只改一边，
+       界面就会「按错误的等级隐藏按钮」——不报错，只是按钮该在不在。
+       所以下面直接从 .vue 源码里正则抠出那张表跟后端逐项比对。
+    2. **等级倒挂**：院长等级(4) > 班主任(3)，任何「只有班主任能做」的闸门
+       如果写成 `role != "TEACHER"`，就会变成「班主任能做、院长不能」——
+       更高权限反而更受限。这类闸门必须按等级判定。
+    """
+    print("\n--- 院长角色（系统管理员）---")
+    root = pathlib.Path(__file__).resolve().parents[2]
+    sys.path.insert(0, root / "server-py")
+    from app.security import ROLE_LEVEL, STAFF_ROLES  # noqa: PLC0415
+
+    # ---------- ① 等级表本身 ----------
+    check("DEAN 已进入等级表且为最高档",
+          "DEAN" in ROLE_LEVEL and ROLE_LEVEL["DEAN"] == max(ROLE_LEVEL.values()),
+          str(ROLE_LEVEL))
+    check("DEAN 高于 TEACHER（院长是系统管理员，不能低于班主任）",
+          ROLE_LEVEL.get("DEAN", 0) > ROLE_LEVEL.get("TEACHER", 0),
+          f"DEAN={ROLE_LEVEL.get('DEAN')} TEACHER={ROLE_LEVEL.get('TEACHER')}")
+    check("DEAN 属于运营角色 STAFF_ROLES（默认院长=管理员，能记账能管成员）",
+          "DEAN" in STAFF_ROLES, str(sorted(STAFF_ROLES)))
+
+    # ---------- ② ★ 前后端等级表必须逐项一致 ----------
+    vue = (root / "web/src/views/member-manage/index.vue").read_text(encoding="utf-8-sig")
+    block = re.search(r"const ROLE_LEVEL:\s*Record<Role,\s*number>\s*=\s*\{(.*?)\n\}",
+                      vue, re.S)
+    if not check("能从 .vue 里解析出 ROLE_LEVEL 表", block is not None):
+        return
+    fe = {m.group(1): int(m.group(2)) for m in
+          re.finditer(r"([A-Z]+):\s*(\d+)\s*,", block.group(1))}
+    check("前后端 ROLE_LEVEL 的角色集合完全一致",
+          set(fe) == set(ROLE_LEVEL), f"前端={sorted(fe)} 后端={sorted(ROLE_LEVEL)}")
+    mismatch = {k: (fe[k], ROLE_LEVEL.get(k)) for k in set(fe) & set(ROLE_LEVEL)
+                if fe[k] != ROLE_LEVEL[k]}
+    check("前后端 ROLE_LEVEL 的等级数值完全一致", not mismatch, str(mismatch))
+
+    # ---------- ③ 运营角色常量必须与后端一致，且只剩一份 ----------
+    # 实测补上的两条教训，都源于「同一个角色列表在三个地方各写一份」：
+    #   ① 院长登录后侧栏少了 5 个入口（SideNav.vue 的 STAFF 没加 DEAN）
+    #   ② `/member-manage` 被路由守卫弹回仪表盘（router 的 meta.roles 没加 DEAN）
+    # 现象都是「接口全 200、只是界面不对」，极难归因到权限。
+    # 现在收成 `types/index.ts` 里的**唯一一份** STAFF_ROLES，两处都从它取。
+    types_txt = (root / "web/src/types/index.ts").read_text(encoding="utf-8-sig")
+    sb = re.search(r"export const STAFF_ROLES:\s*Role\[\]\s*=\s*\[(.*?)\]",
+                   types_txt, re.S)
+    if check("能从 types/index.ts 解析出共享的 STAFF_ROLES", sb is not None):
+        staff_fe = set(re.findall(r"'([A-Z]+)'", sb.group(1)))
+        check("共享 STAFF_ROLES 与后端 STAFF_ROLES 完全一致",
+              staff_fe == set(STAFF_ROLES),
+              f"前端={sorted(staff_fe)} 后端={sorted(STAFF_ROLES)}")
+        # 不许再有人写死第二份
+        dup = []
+        for rel, pat in (("web/src/router/index.ts",
+                          r"roles:\s*\[[^\]]*'TEACHER'[^\]]*\]"),
+                         ("web/src/layout/SideNav.vue",
+                          r"const STAFF[^=]*=\s*\[[^\]]*\]")):
+            body = (root / rel).read_text(encoding="utf-8-sig")
+            if re.search(pat, body):
+                dup.append(rel)
+        check("路由与侧栏不再各写一份运营角色字面量", not dup, "、".join(dup))
+
+    # ---------- ④ 前后端角色中文名 ----------
+    tblock = re.search(r"ROLE_TEXT:\s*Record<Role,\s*string>\s*=\s*\{(.*?)\n\}",
+                       types_txt, re.S)
+    if check("能从 types 里解析出 ROLE_TEXT 表", tblock is not None):
+        tkeys = set(re.findall(r"([A-Z]+):\s*'", tblock.group(1)))
+        check("ROLE_TEXT 覆盖了全部角色（含 DEAN）",
+              tkeys == set(ROLE_LEVEL), f"前端={sorted(tkeys)} 后端={sorted(ROLE_LEVEL)}")
+
+    # ---------- ⑤ 落库枚举必须含 DEAN ----------
+    schema_sql = (root / "server-py/db/schema.sql").read_text(encoding="utf-8-sig")
+    enum_line = next((ln for ln in schema_sql.splitlines()
+                      if "role " in ln and "ENUM(" in ln), "")
+    check("schema.sql 的 role ENUM 含 DEAN（否则新库建不出院长）",
+          "'DEAN'" in enum_line, enum_line.strip()[:90])
+
+    # ---------- ⑥ 端到端：真建一个院长账号，跑一遍关键闸门 ----------
+    #
+    # ⚠ 院长探针**不能走 API 建**：`create_user` 拦「不能创建权限高于自己的角色」，
+    # 而本用例的执行身份是班主任(3) < 院长(4)，必然被拒——而且**这是对的**，
+    # 否则任何班主任都能给自己升成系统管理员。第一个院长的正规来路是部署时
+    # 的声明式账号（`CLASSFEE_TEACHER_ROLE=DEAN`，见 seed.py），
+    # 回归脚本在这里直接写库，等价于「管理员已经存在」。
+    T = S["T"]
+    check("班主任建不了院长（不能自我提权）-> 400",
+          _try_create_dean_via_api(T) is False, "班主任竟然能建院长，权限护栏漏了")
+
+    D = _insert_dean_probe()
+    if not check("院长探针可用（直写库模拟部署声明）", bool(D), "建号失败"):
+        return
+
+    # 院长是运营角色：记账权限与班主任同权
+    st, j = call("GET", "/records?page=1&size=1", None, D)
+    check("院长能读账本明细（运营角色）", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/users", None, D)
+    check("院长能进成员管理（运营角色）", st == 200, f"st={st} {msg_of(j)}")
+
+    # 等级最高：能管理班主任 —— 这是「默认院长=系统管理员」的核心体现
+    rows = data_of(j) or []
+    teacher_row = next((u for u in rows
+                        if u["id"] == S["root_id"] and u["role"] == "TEACHER"), None)
+    if check("成员列表里能看到班主任", teacher_row is not None, str(rows)[:120]):
+        st, j = call("PUT", f"/users/{teacher_row['id']}", {"realName": "x"}, D)
+        check("院长能管理班主任（等级最高，系统管理员）-> 200", st == 200,
+              f"st={st} {msg_of(j)}")
+
+    # 反向：班主任管不了院长
+    st, j = call("PUT", f"/users/{_probe_id()}", {"realName": "x"}, T)
+    check("班主任管不了院长（等级更低）-> 400/403", st in (400, 403),
+          f"st={st} {msg_of(j)}")
+
+    # 改**自己**的资料不受等级护栏约束（`update_user` 里 `target.id != user.id`
+    # 才走 require_role_higher）——这是设计如此，别把它误当成"护栏漏了"。
+    st, j = call("PUT", f"/users/{_probe_id()}", {"realName": "院长探针"}, D)
+    check("院长改自己的资料 -> 200（改自己不经过等级护栏，设计如此）", st == 200,
+          f"st={st} {msg_of(j)}")
+
+    # 同级不可互管：需要**另一个**院长，才测得出「同级」这条规则
+    D2 = _insert_dean_probe(DEAN_PROBE + "2")
+    if check("第二个院长探针可用", bool(D2), "建号失败"):
+        st, j = call("PUT", f"/users/{_probe_id()}", {"realName": "另一个院长改的"}, D2)
+        check("院长之间也不能相向踢下线（同级不可互管）-> 400/403", st in (400, 403),
+              f"st={st} {msg_of(j)}")
+        _purge_user(DEAN_PROBE + "2")
+
+    # 院长是学生信息的审批人（APPROVER_ROLES 从等级推导，应自动包含）
+    st, j = call("GET", "/students", None, D)
+    perm = (data_of(j) or {}).get("permission") or {}
+    check("院长 isTeacher=True（>= 班主任才有的审批权）",
+          perm.get("isTeacher") is True, str(perm))
+    check("院长 canAddField=True（>= 班长才有的加字段权）",
+          perm.get("canAddField") is True, str(perm))
+
+    st, j = call("GET", "/tasks", None, D)
+    check("院长能读班级任务", st == 200, f"st={st} {msg_of(j)}")
+
+    # 院长不是学生，不该出现在缴费名单里（`PAYABLE_ROLES` 是白名单，本就不含 DEAN）
+    st, j = call("GET", "/members", None, D)
+    payable_roles = {u.get("role") for u in (data_of(j) or [])}
+    check("院长不出现在缴费名单里（PAYABLE_ROLES 是白名单）",
+          "DEAN" not in payable_roles, f"名单里出现了院长: {sorted(payable_roles)}")
+
+    # ★ 「既是院长又是班主任」这个场景的守卫
+    # `head_teacher`（班主任姓名）原先判的是 `role != "TEACHER"`——按**角色名**写死。
+    # 一个既是院长又是班主任的人登录后，改不了自己的班主任姓名（比班主任身份还低）。
+    # 原实现的注释本来就写的是「等级 3」，代码与注释不一致，只是当时恰好等价。
+    #
+    # 先记住原值再改、最后还原：本用例不该把基线数据留在改过的状态。
+    #
+    # ⚠ 比较时必须归一化 null/""：接口里 `headTeacher: ""` 的语义是「**清空**」，
+    # 回读是 null；我第一版写 `orig = ....get("headTeacher") or ""` 把 null 折叠成
+    # 空串，于是还原后拿到 null、和存下来的 "" 比不相等——**还原其实成功了，
+    # 断言却是红的**。这种「测对了但报错了」的失败比真失败更费时间。
+    st, j = call("GET", "/class", None, T)
+    orig_teacher = (data_of(j) or {}).get("headTeacher") or None
+    st, j = call("PUT", "/class", {"headTeacher": "王院长"}, D)
+    check("院长能写班主任姓名（>= 班主任等级；「既院长又班主任」的场景）",
+          st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", "/class", {"headTeacher": "生活委员冒名"}, S["A"])
+    check("生活委员仍写不了班主任姓名（等级不够）-> 403", st == 403,
+          f"st={st} {msg_of(j)}")
+    # None(清空) 用 "" 表达；有值就用原值
+    call("PUT", "/class", {"headTeacher": orig_teacher or ""}, T)
+    st, j = call("GET", "/class", None, T)
+    check("班主任姓名已还原（用例不留下改过的基线数据）",
+          ((data_of(j) or {}).get("headTeacher") or None) == orig_teacher,
+          f"{((data_of(j) or {}).get('headTeacher') or None)!r} vs {orig_teacher!r}")
+
+    # 院长能建访客（不该出现「班主任能建、院长不能建」的倒挂）
+    st, j = call("POST", "/users",
+                 {"username": "guest_by_dean", "password": "123456",
+                  "realName": "院长建的访客", "role": "GUEST"}, D)
+    check("院长能创建访客账号（等级闸门无倒挂）", st == 200, f"st={st} {msg_of(j)}")
+    _purge_user("guest_by_dean")
+
+    _purge_user(DEAN_PROBE)
+
+
+def _purge_students_prefix(prefix: str) -> None:
+    """删掉学号以 prefix 开头的学生行（含其字段值）。
+
+    ⚠ **必须直写库**：产品里**没有** `DELETE /api/students/{id}`（学生行只能
+    新增 / 导入 / 编辑，不能删），所以走接口只会拿到 404/405 然后静默什么都不做。
+    我第一版就是这么写的——清零条、断言却报「没清干净」，一度以为是口径算错。
+
+    还要连带删 `student_record_value`：本库**不建外键**，只删主表会留下一地
+    孤儿值行，那些行永远读不到。
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from sqlalchemy import text as _t
+
+        from app.db import engine as _engine
+    except Exception:  # noqa: BLE001
+        return
+    with _engine.begin() as c:
+        ids = [r[0] for r in c.execute(
+            _t("SELECT id FROM student_record WHERE student_no LIKE :p"),
+            {"p": prefix + "%"})]
+        if not ids:
+            return
+        c.execute(_t("DELETE FROM student_record_value WHERE record_id IN :i"),
+                  {"i": tuple(ids)})
+        c.execute(_t("DELETE FROM student_record WHERE id IN :i"), {"i": tuple(ids)})
+
+
+def test_a21_student_dashboard():
+    """仪表盘「学生情况总览」（第二十九轮）。
+
+    五条重点，都是容易错且错得不响的地方：
+
+    1. **仅院长可见**（第二十九轮末收紧）。班主任虽然本来就能在「学生信息」
+       里看到全部行，但看板的身份是校级看板，权限按用户口径给院长。
+       必须**后端 403 + 前端不渲染**两条腿都走，只做一边都会漏。
+    2. **可见范围仍与学生信息表同口径**。进了闸之后也不因为「是院长」就
+       绕过行级权限——这里防的是将来有人给 `dashboard_stats` 加一句无条件查询。
+    3. **学籍异动没有数据源**，必须返回 `null` 而不是 0。画一条全零折线
+       会被读成「本年零异动」，那是撒谎。
+    4. **空值注册状态要算在籍**：模板 34 个字段而 Excel 不会每列都填，
+       一空就算未知的话分母会被掏空，「注册人数」会比「学生总数」还小。
+    5. 计数断言用**增量**——本用例跑在 test_a16 之后、test_a15 清理之前，
+       库里天然有别的用例留下的学生行。
+    """
+    print("\n--- 学生情况总览 ---")
+    T = S["T"]
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    from app.services.student_service import _NOT_REGISTERED_KEYWORDS  # noqa: PLC0415
+
+    # ---------- ① 空库时的形状 ----------
+    st, j = call("GET", "/dashboard/students", None, T)
+    d = data_of(j) or {}
+    check("GET /api/dashboard/students -> 200", st == 200, f"st={st} {msg_of(j)}")
+    for k in ("canViewAll", "studentTotal", "registeredTotal", "statusBreakdown",
+              "enrollTrend", "latest", "changeTotal", "changeSupported"):
+        check(f"返回结构含 {k}", k in d, str(sorted(d)))
+    check("**学籍异动返回 null 而不是 0**（0 会被读成「零异动」）",
+          d.get("changeTotal") is None and d.get("changeSupported") is False,
+          f"changeTotal={d.get('changeTotal')!r} supported={d.get('changeSupported')!r}")
+    check("注册人数不会超过学生总数",
+          int(d.get("registeredTotal") or 0) <= int(d.get("studentTotal") or 0),
+          f"{d.get('registeredTotal')} > {d.get('studentTotal')}")
+
+    # ---------- ② 造数据验证口径 ----------
+    #
+    # ⚠ 全部用**增量**断言，不用绝对计数。本用例跑在 test_a16 之后、
+    # test_a15 清理之前，所以库里天然还留着别的用例造的学生。第一版写的是
+    # 「总数 == 5」，结果数到 9——那些多出来的不是 bug，是我没考虑执行顺序。
+    # 增量写法与库里已有多少数据无关，才是对的。
+    base_total = int(d.get("studentTotal") or 0)
+    base_reg = int(d.get("registeredTotal") or 0)
+
+    made = [("dash_u_%d" % i, "总览探针%d" % i) for i in range(3)]
+    for no, name in made:
+        call("POST", "/students",
+             {"studentNo": no, "name": name,
+              "values": {"reg_status": "在籍", "enroll_date": "2026-09-01",
+                         "grade": "2026级"}}, T)
+    # 一个休学的（应被排除在「注册人数」外，但仍计入「学生数量」）
+    call("POST", "/students",
+         {"studentNo": "dash_u_x", "name": "休学探针",
+          "values": {"reg_status": "休学", "enroll_date": "2026-09-02"}}, T)
+    # 一个注册状态留空的（应算在籍）
+    call("POST", "/students",
+         {"studentNo": "dash_u_b", "name": "空状态探针",
+          "values": {"reg_status": "", "enroll_date": "2026-09-03"}}, T)
+
+    st, j = call("GET", "/dashboard/students", None, T)
+    d = data_of(j) or {}
+    added_total = len(made) + 2
+    check("学生数量增量 = 造进去的行数（含休学与空状态）",
+          int(d.get("studentTotal") or 0) - base_total == added_total,
+          f"{d.get('studentTotal')} - {base_total} != {added_total}")
+    # 在籍增量 = 在籍 3 + 空状态 1（休学被排除）
+    check("学籍注册人数增量 = 在籍 + 空状态，休学被排除",
+          int(d.get("registeredTotal") or 0) - base_reg == len(made) + 1,
+          f"增量 {int(d.get('registeredTotal') or 0) - base_reg}，预期 {len(made) + 1}")
+    bd = {b["status"]: b["count"] for b in (d.get("statusBreakdown") or [])}
+    check("状态分布里本用例的休学探针被单列", bd.get("休学", 0) >= 1, str(bd))
+    check("离校关键词表含休学/退学/毕业",
+          all(k in _NOT_REGISTERED_KEYWORDS for k in ("休学", "退学", "毕业")),
+          str(_NOT_REGISTERED_KEYWORDS))
+
+    # ---------- ③ 趋势按入校月份累计 ----------
+    tr = d.get("enrollTrend") or []
+    check("趋势按 YYYY-MM 聚合", all(len(p["ym"]) == 7 and p["ym"][4] == "-" for p in tr),
+          str(tr))
+    cums = [p["cumulative"] for p in tr]
+    check("累计人数单调不减", cums == sorted(cums), str(tr))
+    # 末值 >= 基数（本用例 5 人都有入校日期）
+    check("累计末值 >= 初始累计 + 本用例 5 人",
+          (cums[-1] if cums else 0) >= added_total,
+          f"{cums[-1] if cums else 0} < {added_total}")
+
+    # ---------- ④ ★ 可见范围：仪表盘不能成为权限后门 ----------
+    st, j = call("GET", "/dashboard/students", None, S["M"])
+    md = data_of(j) or {}
+    check("普通同学 canViewAll=false", md.get("canViewAll") is False, str(md)[:120])
+    check("普通同学看到的学生数 **远小于** 班主任（不泄露全班人数）",
+          int(md.get("studentTotal") or 0) < int(d.get("studentTotal") or 0),
+          f"同学={md.get('studentTotal')} 班主任={d.get('studentTotal')}")
+    check("普通同学的「最新学籍信息」里没有别人的行",
+          len(md.get("latest") or []) <= 1, str(len(md.get("latest") or [])))
+
+    # 清理（只删本用例造的行，别碰别的用例的）
+    _purge_students_prefix("dash_u_")
+    st, j = call("GET", "/dashboard/students", None, T)
+    d2 = data_of(j) or {}
+    check("清理后回到起始数量（用例不留下数据）",
+          int(d2.get("studentTotal") or 0) == base_total,
+          f"{d2.get('studentTotal')} vs 起始 {base_total}")
+
+
 ALL_TESTS = [
     test_a00_encoding_guards,
     test_a00_bootstrap,
@@ -3024,6 +3516,9 @@ ALL_TESTS = [
     test_a16_student_info,
     test_a17_class_tasks,
     test_a18_accounts_from_students,
+    test_a19_version,
+    test_a20_dean_role,
+    test_a21_student_dashboard,
     test_a15_cleanup,
 ]
 

@@ -1,11 +1,11 @@
-﻿# Design System Master File — ClassFee Manager（班费收支系统）
+﻿# Design System Master File — Student Info Manager（学生信息管理系统）
 
 > **LOGIC:** 构建具体页面前，先检查 `design-system/pages/[page-name].md`。
 > 若该文件存在，其规则**覆盖**本 Master 文件；否则严格遵循以下规则。
 
 ---
 
-**Project:** ClassFee Manager
+**Project:** Student Info Manager
 **Finalized:** 2026-09-25
 **Category:** Financial Admin Dashboard（内部管理后台，非营销页）
 **Source:** ui-ux-pro-max `--design-system`（Glassmorphism 方向）+ `--stack vue` + `--domain chart/ux`

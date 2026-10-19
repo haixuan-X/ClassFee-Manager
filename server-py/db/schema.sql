@@ -1,5 +1,5 @@
 -- ============================================================
--- 班费收支系统 · 数据库结构（MySQL 8 / MariaDB 10.6+ 兼容）
+-- 学生信息管理系统 · 数据库结构（MySQL 8 / MariaDB 10.6+ 兼容）
 -- 幂等：可重复执行；应用启动时也会自动执行（spring.sql.init.mode=always）
 -- ============================================================
 CREATE TABLE IF NOT EXISTS cls_class (
@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS sys_user (
   password      VARCHAR(100) NOT NULL               COMMENT 'BCrypt 密文',
   real_name     VARCHAR(32) NOT NULL,
   student_no    VARCHAR(20) NULL,
-  role          ENUM('ADMIN','MEMBER','GUEST','MONITOR','TEACHER') NOT NULL DEFAULT 'MEMBER',
+  role          ENUM('ADMIN','MEMBER','GUEST','MONITOR','TEACHER','DEAN') NOT NULL DEFAULT 'MEMBER'
+                COMMENT 'MEMBER普通成员/GUEST访客/ADMIN生活委员/MONITOR班长/TEACHER班主任/DEAN院长(系统管理员,等级最高)',
   guest_scopes  TEXT NULL COMMENT '第二十六轮·仅访客用：可见范围 JSON 数组（DASHBOARD/RECORDS/STUDENTS/TASKS）；NULL=全部可见',
   phone         VARCHAR(20) NULL,
   status        TINYINT     NOT NULL DEFAULT 1      COMMENT '1启用 0停用',
@@ -220,7 +221,7 @@ CREATE TABLE IF NOT EXISTS cls_task (
 --    MULTI 存 JSON 数组，DATE 存 YYYY-MM-DD。
 --    存原文不存下标：发布人可能事后加一个"其他"选项，按下标回读会把老答案指到别的项上。
 --
---    ⚠ 本库**不建外键**（沿用 Java 版做法：只建索引，由 service 负责级联删除），
+--    ⚠ 本库**不建外键**（只建索引，由 service 负责级联删除），
 --      所以这里没有 ON DELETE CASCADE。删任务必须由 `task_service.delete_task`
 --      显式先删回答，否则会攒下一批没人会发现、也没法清理的孤儿数据。
 CREATE TABLE IF NOT EXISTS cls_task_answer (

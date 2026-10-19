@@ -1,4 +1,4 @@
-"""认证与账号服务（对应 Java AuthService）。"""
+"""认证与账号服务。"""
 from __future__ import annotations
 
 import time

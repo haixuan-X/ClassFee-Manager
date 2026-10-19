@@ -1,4 +1,4 @@
-"""请求入参模型：字段名/校验文案与 Java DTO 注解逐一相同。
+"""请求入参模型：字段名与校验文案在此统一定义。
 
 - 校验失败经 errors.py 转成 400「参数校验失败」+ [{field,message}]（= Spring @Valid 字段列表）
 - 字段类型/日期格式错误 → 400「请求体格式不正确」（= Jackson HttpMessageNotReadable）
@@ -23,7 +23,8 @@ _ENUM_PAY_STATUS = re.compile(r"UNPAID|PAID|REFUNDED")
 # 角色白名单。GUEST（访客，第二十四轮）：给领导/校方看的纯只读账号——
 # 能看全班学生信息、能勾选导出，但改不了任何东西、不进成员管理。
 # 注意它**不在** STAFF_ROLES 里，所以访客调任何记账/账号管理接口都是 403。
-_ENUM_ROLE = re.compile(r"ADMIN|MEMBER|GUEST|MONITOR|TEACHER")
+# DEAN（院长，第二十八轮）：**系统管理员**，等级在班主任之上。
+_ENUM_ROLE = re.compile(r"ADMIN|MEMBER|GUEST|MONITOR|TEACHER|DEAN")
 # 小票相对路径（file_service.save_receipt 生成 receipts/<uuid>.<ext>，只认这一形态）
 _ENUM_RECEIPT = re.compile(r"receipts/[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -44,7 +45,7 @@ def _not_blank(v: Any, message: str) -> None:
 
 
 def _check_size(v: Any, max_len: int | None, message: str, min_len: int | None = None) -> None:
-    # @Size：null 跳过；按原始字符串长度（Java String.length）
+    # 长度校验：null 跳过；按原始字符串长度算
     if v is None or not isinstance(v, str):
         return
     if min_len is not None and len(v) < min_len:
@@ -79,7 +80,7 @@ def _check_amount(v: Decimal | None, *, required_message: str | None) -> Decimal
 
 
 def _parse_datetime_str(v: Any, fmt: str) -> datetime | date | None:
-    """严格按 Java @JsonFormat 的 pattern 解析；空串→null（同 Jackson）。"""
+    """按 pattern 严格解析；空串→null。"""
     if v is None:
         return None
     if isinstance(v, str):
@@ -586,8 +587,10 @@ class StudentAccessRequest(_BodyModel):
 class UserCreateRequest(_BodyModel):
     """新建账号（运营建班）：username=登录名；password 缺省 123456；role 缺省 MEMBER。
 
-    role 五选一：MEMBER(普通成员，只读) / GUEST(访客，只读·给领导看) /
-    ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任)，后三者同为运营角色（STAFF_ROLES）。
+    role 六选一：MEMBER(普通成员，只读) / GUEST(访客，只读·给领导看) /
+    ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任) / DEAN(院长·系统管理员)，
+    后四者同为运营角色（STAFF_ROLES）。等级：MEMBER/GUEST 0 < ADMIN 1 <
+    MONITOR 2 < TEACHER 3 < DEAN 4；**只能创建不高于自己的角色**。
     studentNo=学号（可与登录名不同）：留空时 MEMBER 默认回填登录名（超 20 字则留空）。
 
     guestScopes（第二十六轮，**仅 role=GUEST 时有意义**）：访客能看的页面范围，

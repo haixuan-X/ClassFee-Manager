@@ -1,4 +1,4 @@
-"""业务异常与全局异常处理：错误码/文案与 Java GlobalExceptionHandler 逐一相同。"""
+"""业务异常与全局异常处理：统一错误码与文案。"""
 from __future__ import annotations
 
 import logging
@@ -45,7 +45,7 @@ class BizException(Exception):
         return cls(200, code, message)
 
 
-# PydanticCustomError 用该类型标记“字段级业务校验”（对应 Java @NotBlank 等 → 字段列表）
+# PydanticCustomError 用该类型标记“字段级业务校验”
 FIELD_CONSTRAINT = "field_constraint"
 
 
