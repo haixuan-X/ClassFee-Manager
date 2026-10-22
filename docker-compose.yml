@@ -42,13 +42,18 @@ services:
       #   CLASSFEE_TEACHER_USERNAME=test
       #   CLASSFEE_TEACHER_PASSWORD=换成强口令
       #   CLASSFEE_TEACHER_NAME=测试班主任          # 可选，姓名（默认同用户名）
-      #   CLASSFEE_TEACHER_ROLE=TEACHER        # 可选，ADMIN | TEACHER，默认 TEACHER
+      #   CLASSFEE_TEACHER_ROLE=TEACHER        # 可选，ADMIN | TEACHER | DEAN，默认 TEACHER
+      #   CLASSFEE_DEAN_ONLY=0                 # 仅 ROLE=DEAN 时有意义：0=院长兼班主任（默认）1=纯院长（只管学院）
       # 两项都为空 → 不创建任何账号（代码里不写死默认口令），登录页将无账号可登；
       # 其余学生/管理员账号由班主任登录后在「成员管理」中创建。
       CLASSFEE_TEACHER_USERNAME: ${CLASSFEE_TEACHER_USERNAME:-}
       CLASSFEE_TEACHER_PASSWORD: ${CLASSFEE_TEACHER_PASSWORD:-}
       CLASSFEE_TEACHER_NAME: ${CLASSFEE_TEACHER_NAME:-}
       CLASSFEE_TEACHER_ROLE: ${CLASSFEE_TEACHER_ROLE:-TEACHER}
+      CLASSFEE_DEAN_ONLY: ${CLASSFEE_DEAN_ONLY:-0}
+      # 学院名：显示在侧栏顶部的「你的管辖范围」（院长看的是学院，不是某个班）
+      #   留空 = 界面上退回写「学院」两个字
+      CLASSFEE_COLLEGE_NAME: ${CLASSFEE_COLLEGE_NAME:-}
       # 小票图片目录（默认即 /app/uploads，.env 可覆盖；容器重建不丢靠下方 named volume）
       CLASSFEE_UPLOAD_DIR: ${CLASSFEE_UPLOAD_DIR:-/app/uploads}
     # 小票图片持久化：容器重建不丢，备份需连同 classfee_uploads 卷一起备

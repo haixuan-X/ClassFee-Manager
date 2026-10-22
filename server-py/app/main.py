@@ -18,6 +18,7 @@ from .routers import (
     batches,
     categories,
     class_info,
+    college,
     dashboard,
     files,
     members,
@@ -69,6 +70,7 @@ for _router in (
     class_info,
     students,
     tasks,
+    college,
     meta,
 ):
     app.include_router(_router.router)

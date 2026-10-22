@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echarts, { chartColors, prefersReducedMotion, type ECOption } from '@/utils/echarts'
 import type { ECharts } from 'echarts/core'
 
@@ -34,7 +34,12 @@ function render() {
   if (!chart || !hasData.value) return
   const colors = chartColors()
   const option: ECOption = {
-    color: [colors.accent, colors.income],
+    // ⚠ **每条序列都写死颜色**，不靠 `color: [...]` 调色板分配。
+    // 调色板是按「消费顺序」给的：柱子那条带了显式 `itemStyle.color`，
+    // 就不占槽位，于是折线把 `color[0]`（本想给柱子的蓝）拿走了——
+    // 结果柱和线**画成同一个蓝**。写死就没有这个坑。
+    //
+    // 蓝=当月入校（离散事件），绿=累计在校（品牌强调色，连续存量）。
     tooltip: {
       trigger: 'axis',
       valueFormatter: (v) => `${v} 人`,
@@ -66,7 +71,7 @@ function render() {
         type: 'bar',
         barMaxWidth: 22,
         // 柱状不填充：新增是「事件数」，面积会让它看起来像存量
-        itemStyle: { color: colors.accent },
+        itemStyle: { color: colors.count },
         data: props.points.map((p) => p.added),
       },
       {
@@ -74,13 +79,16 @@ function render() {
         type: 'line',
         smooth: true,
         showSymbol: false,
-        lineStyle: { width: 2 },
-        areaStyle: { opacity: 0.14 },
+        lineStyle: { width: 2, color: colors.income },
+        itemStyle: { color: colors.income },
+        areaStyle: { color: colors.income, opacity: 0.14 },
         data: props.points.map((p) => p.cumulative),
       },
     ],
     animation: !prefersReducedMotion(),
   }
+  // 渲染前量一次尺寸：`setOption` 只画不量，容器宽度变了得自己告诉它。
+  chart.resize()
   chart.setOption(option)
 }
 
@@ -88,14 +96,41 @@ function resize() {
   chart?.resize()
 }
 
-onMounted(() => {
-  if (!el.value) return
+/**
+ * 需要时创建 ECharts 实例。
+ *
+ * ⚠ 容器用 `v-if`（有数据才存在），所以**组件挂载那一刻容器可能还不存在**，
+ * `onMounted` 里 `el.value` 是 null。而 `v-if` 从 false 变 true 时
+ * **组件并不会重新挂载**，`onMounted` 不会再跑一次——所以建实例这件事
+ * 不能只写在 `onMounted` 里，否则数据晚到一步图表就永远画不出来。
+ * 这里做成幂等的，两处都调它。
+ */
+function ensureChart() {
+  if (chart || !el.value) return
   chart = echarts.init(el.value)
-  render()
   window.addEventListener('resize', resize)
+  render()
+}
+
+onMounted(() => {
+  ensureChart()
 })
 
-watch(() => props.points, render, { deep: true })
+/**
+ * 数据到达后重画。
+ *
+ * `flush: 'post'`：在 DOM 更新之后再跑——`v-if` 刚创建出来的容器，
+ * 早于 DOM 更新执行是拿不到 ref 的。
+ */
+watch(
+  () => props.points,
+  async () => {
+    await nextTick()
+    ensureChart()
+    render()
+  },
+  { deep: true, flush: 'post' },
+)
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resize)
@@ -106,8 +141,15 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
+    <!--
+      ⚠ 这里用 `v-if` 而不是 `v-show`，是**必需**的：
+      图表容器如果一开始是 `display:none`，ECharts 在它上面 init 时量到的
+      宽度是 0，画布会退化成 100px 挤在容器左边（实测复现），而且
+      之后 `resize()` 也救不回来——ECharts 不会重新量一个隐藏元素的尺寸。
+      `v-if` 让容器**只在有数据时存在**，挂载那一刻它就是可见且有真实宽度的。
+    -->
     <div
-      v-show="hasData"
+      v-if="hasData"
       ref="el"
       class="chart"
       role="img"

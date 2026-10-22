@@ -22,7 +22,7 @@
  * 默认每个人只看得到自己那一行、且只能看不能改（改要申请，见页面里的申请条）。
  * 这与「Excel 式编辑」不冲突：能编辑时是表格，不能编辑时是只读表格 + 申请入口。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Delete, Stamp } from '@element-plus/icons-vue'
 import {
@@ -106,11 +106,38 @@ const ckey = (recordId: number, colKey: string) => `${recordId}:${colKey}`
 
 /** 编辑态里输入框绑的值。每次进入编辑态由 startEdit 复位 */
 const draftVal = ref('')
+/**
+ * 进入编辑态时的**原值**。
+ *
+ * 用来判断「用户在这个输入框里敲过字没有」——
+ * 决定 Ctrl+Z 是「撤销刚敲的字」（原生）还是「撤销上一步保存」（我们的）。
+ */
+const editStartVal = ref('')
 
 const isEditing = (id: number, k: string) => editKey.value === ckey(id, k)
 const isSaving = (id: number, k: string) => savingKey.value === ckey(id, k)
 const justSaved = (id: number, k: string) =>
   savedKey.value === ckey(id, k) && Date.now() - savedAt.value < 1600
+
+/**
+ * 正在编辑的那格的输入框（用来自动聚焦）。
+ *
+ * ## 为什么必须自己聚焦
+ *
+ * `<el-input autofocus>` **指望不上**：`autofocus` 是**创建时**的行为，
+ * 而编辑框是点格子才动态挂上来的；而且热更新复用组件实例时更不会重跑。
+ *
+ * 后果：点一下格子，输入框出来了，**焦点还在表格上**——用户接着打字，
+ * 什么也没进去（字打在了别处）。「点一下怎么编辑不了」就是这么来的。
+ */
+const editorRef = ref<{ focus?: () => void } | null>(null)
+
+/** 编辑框挂上来就聚焦（否则用户还得再点一次才能打字） */
+function bindEditor(el: unknown, id: number, k: string) {
+  if (!el || !isEditing(id, k)) return
+  editorRef.value = el as { focus?: () => void }
+  void nextTick(() => editorRef.value?.focus?.())
+}
 
 /** 锚点列：学号与姓名固定在最前（不在字段表里，是「这是谁的行」） */
 const isAnchor = (k: string) => k === '__no__' || k === '__name__'
@@ -204,7 +231,15 @@ async function loadMyRequests() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  // 全局快捷键（撤销/重做）：挂在 window 上，焦点在哪儿都能用
+  window.addEventListener('keydown', onGlobalKeydown, true)
+  void load()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeydown, true)
+})
 
 // ---------------- 就地编辑 ----------------
 
@@ -217,6 +252,7 @@ function startEdit(id: number, k: string) {
   const row = rows.value.find((r) => r.id === id)
   if (!row || !row.editable) return
   draftVal.value = cellValue(row, k)
+  editStartVal.value = draftVal.value
   editKey.value = ckey(id, k)
 }
 
@@ -230,25 +266,33 @@ function isEditableCol(_k: string) {
   return true
 }
 
-function moveEdit(id: number, k: string, delta: number) {
-  // Tab 在格间移动，这是 Excel 手感的关键部分。
-  // 必须连 draftVal 一起换：只改 editKey 的话新格子里会显示**上一格**的内容，
-  // 用户按两下 Tab 就把上一列的值复制过去了。
-  const row = rows.value.find((r) => r.id === id)
-  if (!row) return
-  const list = columns.value
-  let i = list.findIndex((c) => c.key === k)
-  // 跳过学号等不可编辑列，别让 Tab 停在那儿
-  for (let step = 0; step < list.length; step += 1) {
-    i += delta
-    if (i < 0 || i >= list.length) {
-      editKey.value = null // 到头了就退出编辑态，而不是跳回第一格
-      return
-    }
-    if (isEditableCol(list[i].key)) break
+/**
+ * 在格间移动编辑位置（Excel 手感的关键部分）。
+ *
+ * `dr` / `dc` 是**行/列**的位移：`(0,1)` 右移一格、`(1,0)` 下移一行、
+ * `(-1,0)` 上移一行、`(0,-1)` 左移一格。
+ *
+ * 必须连 draftVal 一起换：只改 editKey 的话新格子里会显示**上一格**的内容，
+ * 用户按两下 Tab 就把上一列的值复制过去了。
+ *
+ * 到头就**退出编辑态**（而不是绕回第一格）——Excel 也是这样。
+ */
+function moveEdit(id: number, k: string, dr: number, dc: number) {
+  const rowIdx = rows.value.findIndex((r) => r.id === id)
+  if (rowIdx < 0) return
+  const colIdx = columns.value.findIndex((c) => c.key === k)
+  if (colIdx < 0) return
+  const nr = rowIdx + dr
+  const nc = colIdx + dc
+  if (nr < 0 || nr >= rows.value.length || nc < 0 || nc >= columns.value.length) {
+    editKey.value = null
+    return
   }
-  draftVal.value = cellValue(row, list[i].key)
-  editKey.value = ckey(id, list[i].key)
+  const row = rows.value[nr]
+  const nk = columns.value[nc].key
+  draftVal.value = cellValue(row, nk)
+  editStartVal.value = draftVal.value
+  editKey.value = ckey(row.id, nk)
 }
 
 function cellValue(row: StudentRow, k: string): string {
@@ -258,13 +302,37 @@ function cellValue(row: StudentRow, k: string): string {
 }
 
 /**
+ * 把一个值写进去（**真正落库**的那一步）。
+ *
+ * 「提交」和「撤销」都要用它——区别只是撤销时**不再记一条撤销记录**。
+ */
+async function applyValue(row: StudentRow, k: string, value: string): Promise<boolean> {
+  if (k === '__name__') await updateStudent(row.id, {}, { name: value })
+  else if (k === '__no__') await updateStudent(row.id, {}, { studentNo: value })
+  else await updateStudent(row.id, { [k]: value })
+  // 乐观更新：先改本地再后台拉，界面不等网络
+  if (k === '__name__') row.name = value
+  else if (k === '__no__') row.studentNo = value
+  else row.values[k] = value
+  return true
+}
+
+/**
  * 提交一格。返回是否保存成功（Tab 要靠它决定要不要往下一格走）。
  *
  * 注意：这里**先**把 `editKey` 置空再发请求。输入框随即被卸载，
  * 而卸载一个正在聚焦的 DOM 节点不会触发 blur —— 所以所有「结束编辑」的路径
  * 都必须经过这个函数，漏一条就是用户敲的字白打。
+ *
+ * `undoable=false` 是**撤销/重做**自己用的：它们要写回去，但**不能再记一条
+ * 撤销记录**（否则按一次 Ctrl+Z 会又攒出一条新的，撤销就永远停不下来）。
  */
-async function commit(id: number, k: string, raw: string | null): Promise<boolean> {
+async function commit(
+  id: number,
+  k: string,
+  raw: string | null,
+  undoable = true,
+): Promise<boolean> {
   const row = rows.value.find((r) => r.id === id)
   if (!row) return false
   // 只在「关的就是当前这一格」时才退出编辑态。Tab 是先移走再异步存的，
@@ -275,13 +343,18 @@ async function commit(id: number, k: string, raw: string | null): Promise<boolea
   if ((raw ?? '') === before) return true // 没改就不发请求
   savingKey.value = ckey(id, k)
   try {
-    if (k === '__name__') await updateStudent(id, {}, { name: raw ?? '' })
-    else if (k === '__no__') await updateStudent(id, {}, { studentNo: raw ?? '' })
-    else await updateStudent(id, { [k]: raw ?? '' })
-    // 乐观更新：先改本地再后台拉，界面不等网络
-    if (k === '__name__') row.name = raw ?? ''
-    else if (k === '__no__') row.studentNo = raw ?? ''
-    else row.values[k] = raw ?? ''
+    await applyValue(row, k, raw ?? '')
+    if (undoable) {
+      undoStack.value.push({
+        recordId: id,
+        key: k,
+        before,
+        after: raw ?? '',
+        label: `改${columns.value.find((c) => c.key === k)?.label ?? k}`,
+      })
+      if (undoStack.value.length > UNDO_LIMIT) undoStack.value.shift()
+      redoStack.value = [] // 有了新操作，重做栈就作废了
+    }
     savedKey.value = ckey(id, k)
     savedAt.value = Date.now()
     setTimeout(() => {
@@ -297,6 +370,106 @@ async function commit(id: number, k: string, raw: string | null): Promise<boolea
   }
 }
 
+// ---------------- 撤销 / 重做 ----------------
+
+/** 一次撤销/重做记的内容 */
+interface UndoStep {
+  recordId: number
+  /** 哪一列 */
+  key: string
+  /** 改之前的值 */
+  before: string
+  /** 改之后的值 */
+  after: string
+  /** 提示语（「改姓名」「改专业名称」…） */
+  label: string
+}
+
+/** 撤销栈最多留多少步 */
+const UNDO_LIMIT = 50
+
+const undoStack = ref<UndoStep[]>([])
+const redoStack = ref<UndoStep[]>([])
+
+/**
+ * 撤销一步。
+ *
+ * 做法是**把旧值再写回去**（不是回滚数据库）——所以撤销本身也是一次普通的
+ * 改动，同样会走校验。失败了就把它放回栈里，不吞掉用户的操作。
+ */
+async function undo() {
+  const step = undoStack.value.pop()
+  if (!step) {
+    ElMessage.info('没有可撤销的操作')
+    return
+  }
+  const row = rows.value.find((r) => r.id === step.recordId)
+  if (!row) {
+    undoStack.value.push(step)
+    ElMessage.warning('这一行已经不在当前列表里，撤不了')
+    return
+  }
+  try {
+    await applyValue(row, step.key, step.before)
+    redoStack.value.push(step)
+    ElMessage.success(`已撤销：${step.label}`)
+  } catch (e) {
+    undoStack.value.push(step)
+    ElMessage.error(getErrorMessage(e, '撤销失败'))
+  }
+}
+
+/** 重做：把刚才撤销的改动再做一遍。 */
+async function redo() {
+  const step = redoStack.value.pop()
+  if (!step) {
+    ElMessage.info('没有可重做的操作')
+    return
+  }
+  const row = rows.value.find((r) => r.id === step.recordId)
+  if (!row) {
+    redoStack.value.push(step)
+    ElMessage.warning('这一行已经不在当前列表里，重做不了')
+    return
+  }
+  try {
+    await applyValue(row, step.key, step.after)
+    undoStack.value.push(step)
+    ElMessage.success(`已重做：${step.label}`)
+  } catch (e) {
+    redoStack.value.push(step)
+    ElMessage.error(getErrorMessage(e, '重做失败'))
+  }
+}
+
+/**
+ * 全局快捷键：Ctrl+Z 撤销 / Ctrl+Y（Ctrl+Shift+Z）重做。
+ *
+ * ## 编辑中要不要抢？
+ *
+ * 用户在输入框里敲了字，Ctrl+Z 的原生行为是「撤销我刚敲的字」——
+ * 那是用户此刻真正想要的，抢过来反而丢东西。
+ *
+ * 但有一种情况**必须抢**：刚按回车提交完，光标已经跳到下一格（输入框里是
+ * 那一格的旧值，**一个字都没敲**）。这时用户按 Ctrl+Z，想的是「撤销我刚才
+ * 那次保存」，而原生撤销在那个输入框里什么也撤不掉——表现就是「Ctrl+Z 没反应」。
+ *
+ * 判据就是**这个输入框里有没有刚敲的字**：
+ * `draftVal !== editStartVal` = 敲过 → 交给原生；相等 = 没敲 → 抢过来撤销保存。
+ */
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey)) return
+  const k = e.key.toLowerCase()
+  const isUndo = k === 'z' && !e.shiftKey
+  const isRedo = k === 'y' || (k === 'z' && e.shiftKey)
+  if (!isUndo && !isRedo) return
+  // 编辑中且**刚敲了字** → 让输入框自己撤销
+  if (editKey.value && draftVal.value !== editStartVal.value) return
+  e.preventDefault()
+  if (isUndo) void undo()
+  else void redo()
+}
+
 /**
  * Tab = 右移一格，顺带把当前这格存了。
  *
@@ -306,9 +479,29 @@ async function commit(id: number, k: string, raw: string | null): Promise<boolea
  *    `@keydown.tab.prevent()` 同时挡住了焦点移走，于是 blur 也不会触发。
  * ② 先移再存，不等网络。raw 已经取值，commit 里改 draftVal 也影响不到它。
  */
-function onTab(id: number, k: string) {
+function onTab(id: number, k: string, dc = 1) {
   const raw = draftVal.value
-  moveEdit(id, k, 1)
+  moveEdit(id, k, 0, dc)
+  void commit(id, k, raw)
+}
+
+/**
+ * Enter = 存下并**往下**移一格（到底了往右）。
+ *
+ * Excel 的手感：改完一行按回车，接着改下一行同一个字段——这是填表最快的路径。
+ */
+function onEnter(id: number, k: string) {
+  const raw = draftVal.value
+  const rowIdx = rows.value.findIndex((r) => r.id === id)
+  const atLastRow = rowIdx >= rows.value.length - 1
+  moveEdit(id, k, atLastRow ? 0 : 1, atLastRow ? 1 : 0)
+  void commit(id, k, raw)
+}
+
+/** 方向键 = 存下并移动到相邻格（继续编辑）。 */
+function onArrow(id: number, k: string, dr: number, dc: number) {
+  const raw = draftVal.value
+  moveEdit(id, k, dr, dc)
   void commit(id, k, raw)
 }
 
@@ -325,11 +518,24 @@ async function clearCell(row: StudentRow, k: string) {
  * blur 不冒泡，且**输入框被卸载时不派发**——而点另一格正是"当前输入框被卸载"，
  * 万一 blur 没赶上（焦点没真正移走、或组件把 blur 挂到了外层包装 div 上），
  * 用户敲的字就白打了。focusout 会从内层 input 一路冒泡到 td，稳。
+ *
+ * ## ⚠ 必须区分「焦点跳到本格的编辑框」和「用户真的走了」
+ *
+ * 点一下格子 → 输入框挂上来 → 它抢走焦点 → td 触发 `focusout`。
+ * 这时候**编辑框还开着**，用户正在里面打字呢！
+ * 不区分就会：焦点一进编辑框就提交 + 关闭 → 用户看着「点进去又弹出来」。
+ *
+ * 判据是 `relatedTarget`（焦点接下来去了哪儿）：落在**同一个 td 里**
+ * 就是「还在本格」，不提交也不关闭。
  */
-function onCellFocusOut(row: StudentRow, k: string) {
+function onCellFocusOut(e: FocusEvent, row: StudentRow, k: string) {
   // 只有「正是在编辑这一格」才提交：Tab 移走后输入框卸载也会冒泡上来，
   // 那时 editKey 已经指向新格子，再提交一次等于把旧值盖回去。
   if (editKey.value !== ckey(row.id, k)) return
+  const to = e.relatedTarget as Node | null
+  const cell = e.currentTarget as HTMLElement | null
+  // 焦点只是跳进了本格的编辑框 → 还在本格，别管
+  if (to && cell && cell.contains(to)) return
   void commit(row.id, k, draftVal.value)
 }
 
@@ -345,19 +551,51 @@ function onCellFocusOut(row: StudentRow, k: string) {
  * 用 `.capture`（捕获阶段）而不是默认的冒泡：el-select 内部的 onKeydown 对
  * Escape 会 `stopPropagation`，冒泡阶段根本轮不到这里的 handler，Esc 就废了。
  * 捕获阶段先于目标元素触发，抢在组件之前拿到键盘事件。
- * 注意只拦 Esc / Tab / Delete，**不碰 Enter 和方向键**——那两个是 select / date
- * 面板自己用来选中、翻页的，抢过来会让下拉框选不中。
+ *
+ * ## 两套快捷键
+ *
+ * **编辑中**：Enter 存下并往下移一格 · Tab 下一格 · ↑↓←→ 存下并移动 · Esc 取消
+ *
+ * **没在编辑**（焦点在格子上）：Enter/F2 进入编辑 · ↑↓←→ 移动 · Delete 清空 ·
+ * Home/End 行首行尾 · Ctrl+Z 撤销 · Ctrl+Y 重做
+ *
+ * ⚠ el-select / el-date-picker 的**面板里**，方向键和 Enter 是它们自己的
+ * （选值、翻页），抢过来会让下拉框选不中——所以那儿不处理。
  */
 function onCellKeydown(e: KeyboardEvent, row: StudentRow, k: string) {
-  // 未编辑状态下按 Delete：清掉该格（Excel 的 Delete 键）
-  if (e.key === 'Delete' && !editKey.value) {
-    if (!canEdit.value || !row.editable) return
-    e.preventDefault()
-    void clearCell(row, k)
+  const inInput =
+    e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement
+  // 面板里（el-select / el-date-picker 弹出来的那块）不抢方向键和 Enter
+  const inPanel = !inInput && e.target !== e.currentTarget
+  const editing = editKey.value === ckey(row.id, k)
+
+  if (!editing) {
+    // ---- 没在编辑：焦点在格子上 ----
+    if (e.key === 'Delete') {
+      if (!canEdit.value || !row.editable) return
+      e.preventDefault()
+      void clearCell(row, k)
+      return
+    }
+    if (e.key === 'Enter' || e.key === 'F2') {
+      e.preventDefault()
+      startEdit(row.id, k)
+      return
+    }
+    if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault()
+      focusCellAt(row.id, e.key === 'Home' ? 0 : columns.value.length - 1)
+      return
+    }
+    if (ARROWS[e.key]) {
+      e.preventDefault()
+      const [dr, dc] = ARROWS[e.key]
+      focusCellBy(row.id, k, dr, dc)
+    }
     return
   }
-  if (editKey.value !== ckey(row.id, k)) return
 
+  // ---- 编辑中 ----
   if (e.key === 'Escape') {
     editKey.value = null // 不保存直接关（Excel 里 Esc 的语义）
     return
@@ -365,8 +603,64 @@ function onCellKeydown(e: KeyboardEvent, row: StudentRow, k: string) {
   if (e.key === 'Tab') {
     // 必须拦 keydown：浏览器在这一阶段就把焦点移走，输入框随即被卸载
     e.preventDefault()
-    onTab(row.id, k)
+    onTab(row.id, k, e.shiftKey ? -1 : 1)
+    return
   }
+  if (inPanel) return // select / date 面板里交给它自己
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    onEnter(row.id, k)
+    return
+  }
+  if (ARROWS[e.key]) {
+    e.preventDefault()
+    const [dr, dc] = ARROWS[e.key]
+    onArrow(row.id, k, dr, dc)
+  }
+}
+
+/** 方向键 → 位移 */
+const ARROWS: Record<string, [number, number]> = {
+  ArrowUp: [-1, 0],
+  ArrowDown: [1, 0],
+  ArrowLeft: [0, -1],
+  ArrowRight: [0, 1],
+}
+
+/**
+ * 焦点在格子上（**没在编辑**）时的键盘处理。
+ *
+ * 挂在 td 上的另一个监听器：方向键在格子里移动、Home/End 跳行首行尾、
+ * Enter/F2 进入编辑。编辑态的那些键由 `onCellKeydown` 管。
+ */
+
+/**
+ * 把焦点挪到**同一行的某一列**（Home / End）。
+ *
+ * 焦点是给键盘用户的：格子本身是 `tabindex=0`，能接住焦点。
+ */
+function focusCellAt(id: number, colIdx: number) {
+  const rowIdx = rows.value.findIndex((r) => r.id === id)
+  if (rowIdx < 0) return
+  const col = columns.value[Math.min(Math.max(colIdx, 0), columns.value.length - 1)]
+  if (!col) return
+  const el = document.querySelector<HTMLElement>(
+    `.cell[data-r="${rowIdx}"][data-c="${col.key}"]`,
+  )
+  el?.focus()
+}
+
+/** 把焦点挪到**相邻格**（方向键）。 */
+function focusCellBy(id: number, k: string, dr: number, dc: number) {
+  const rowIdx = rows.value.findIndex((r) => r.id === id)
+  const colIdx = columns.value.findIndex((c) => c.key === k)
+  if (rowIdx < 0 || colIdx < 0) return
+  const nr = rowIdx + dr
+  const nc = colIdx + dc
+  if (nr < 0 || nr >= rows.value.length || nc < 0 || nc >= columns.value.length) return
+  const col = columns.value[nc]
+  const el = document.querySelector<HTMLElement>(`.cell[data-r="${nr}"][data-c="${col.key}"]`)
+  el?.focus()
 }
 
 // ---------------- 新增字段（可在任意位置插入） ----------------
@@ -900,10 +1194,10 @@ const accNothingToDo = computed(() => {
         <h2>学生信息</h2>
         <p class="sub">
           <template v-if="perm?.isGuest">
-            共 {{ rows.length }} 人 · 只读，勾选后可导出
+            本班共 {{ rows.length }} 人 · 只读，勾选后可导出
           </template>
           <template v-else-if="perm?.canViewAll">
-            共 {{ rows.length }} 人 ·
+            <strong>本班</strong>共 {{ rows.length }} 人 ·
             <template v-if="perm?.canEditAll">点任意格子即可修改，回车保存</template>
             <template v-else>当前只读</template>
           </template>
@@ -1106,15 +1400,18 @@ const accNothingToDo = computed(() => {
                 readonly: !canEdit || !row.editable,
                 saved: justSaved(row.id, col.key),
               }"
+              :data-r="ri"
+              :data-c="col.key"
               :title="col.key === '__no__' ? '学号是导入名单时的匹配依据，改动后再导同一份名单会重复插入' : undefined"
               tabindex="0"
               @click="startEdit(row.id, col.key)"
               @keydown.capture="onCellKeydown($event, row, col.key)"
-              @focusout="onCellFocusOut(row, col.key)"
+              @focusout="onCellFocusOut($event, row, col.key)"
             >
               <!-- 编辑态：按字段类型给对应控件 -->
               <el-select
                 v-if="isEditing(row.id, col.key) && col.type === 'BOOL'"
+                :ref="(el: unknown) => bindEditor(el, row.id, col.key)"
                 v-model="draftVal"
                 size="small"
                 @change="commit(row.id, col.key, draftVal)"
@@ -1127,6 +1424,7 @@ const accNothingToDo = computed(() => {
 
               <el-date-picker
                 v-else-if="isEditing(row.id, col.key) && col.type === 'DATE'"
+                :ref="(el: unknown) => bindEditor(el, row.id, col.key)"
                 v-model="draftVal"
                 type="date"
                 size="small"
@@ -1135,13 +1433,12 @@ const accNothingToDo = computed(() => {
                 @change="commit(row.id, col.key, draftVal)"
               />
 
-              <!-- 键盘事件（Esc / Tab / Delete）统一由 td 冒泡处理，三种编辑器行为一致 -->
+              <!-- 键盘事件（Esc / Tab / Delete / Enter / 方向键）统一由 td 冒泡处理 -->
               <el-input
                 v-else-if="isEditing(row.id, col.key)"
+                :ref="(el: unknown) => bindEditor(el, row.id, col.key)"
                 v-model="draftVal"
                 size="small"
-                autofocus
-                @keyup.enter="commit(row.id, col.key, draftVal)"
               />
 
               <!-- 显示态 -->
@@ -1169,7 +1466,11 @@ const accNothingToDo = computed(() => {
 
     <p class="foot">
       <template v-if="canEdit">
-        单击格子修改，回车或移开自动保存 · Tab 跳下一格 · Delete 清空该格 · Esc 取消
+        <span class="foot-line">单击格子修改，回车或移开自动保存 · Esc 取消 · Delete 清空该格</span>
+        <span class="foot-line">
+          快捷键：Enter 存下并往下移一格 · ↑↓←→ 存下并移动 · Tab 下一格 ·
+          F2 进入编辑 · Home/End 行首行尾 · Ctrl+Z 撤销 · Ctrl+Y 重做
+        </span>
       </template>
       <template v-if="canAddField" class="foot-tip">
         · 点列名可改名，点类型小标签可改类型；鼠标移到列名上会出现 ＋ 和 ✕，
@@ -2154,5 +2455,9 @@ h2 {
   margin: 0;
   font-size: 12px;
   color: var(--color-muted-fg);
+}
+
+.foot-line {
+  display: block;
 }
 </style>

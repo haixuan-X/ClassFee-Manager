@@ -2,9 +2,10 @@
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { fetchMe, fetchMyProfile, updateProfile } from '@/api/auth'
+import { fetchClassChoices } from '@/api/class'
 import { getErrorMessage } from '@/api/request'
 import { useUserStore } from '@/stores/user'
-import { ROLE_TEXT } from '@/types'
+import { ROLE_TEXT, STAFF_ROLES } from '@/types'
 import type { Role, UserAccount } from '@/types'
 
 /**
@@ -29,7 +30,44 @@ const formRef = ref<FormInstance>()
 const alertMessage = ref('')
 const alertRef = ref<HTMLElement>()
 
-const form = reactive({ realName: '', studentNo: '', phone: '' })
+const form = reactive({
+  realName: '',
+  studentNo: '',
+  phone: '',
+  deanOnly: false,
+  /** 第三十二轮：我带的班（班主任是班的多对多属性） */
+  classIds: [] as number[],
+})
+
+/** 是不是院长——「职务范围」这一栏只对院长出现（别的角色没这一说） */
+const isDean = computed(() => userStore.user?.role === 'DEAN')
+
+/**
+ * 能不能改「我带的班」——**只有运营角色**（生活委员/班长/班主任/院长）。
+ *
+ * 班主任是**班**的归属，普通同学跟这个没关系（他不是班主任），
+ * 给普通同学一个「我带的班」的开关只会让人以为自己多了什么。
+ */
+const canManageClasses = computed(() => STAFF_ROLES.includes(userStore.user?.role ?? 'MEMBER'))
+
+/**
+ * 「所在班级」= **当前正在操作的那个班**（第三十二轮）。
+ *
+ * 之前写的是 `user.className`（默认班）——那是个**死数据**：
+ * 一个老师管两个班、切换到另一个班之后，这一行还写着原来那个班。
+ */
+const currentClassName = computed(() => {
+  const u = userStore.user
+  if (!u) return '—'
+  const ids = u.classIds?.length ? u.classIds : [u.classId]
+  const idx = ids.indexOf(userStore.currentClassId ?? u.classId)
+  return u.classNames?.[idx] ?? u.className ?? '—'
+})
+
+/** 所有启用的班（供「我带的班」多选） */
+const allClasses = ref<{ id: number; className: string; grade: string }[]>([])
+/** 我的默认班（永远包含在「我带的班」里） */
+const defaultClassName = computed(() => userStore.user?.className ?? '—')
 
 const rules: FormRules<typeof form> = {
   realName: [
@@ -57,6 +95,16 @@ async function load() {
     form.realName = mine.realName
     form.studentNo = mine.studentNo ?? ''
     form.phone = mine.phone ?? ''
+    // 第三十二轮：职务范围（纯院长 ↔ 兼班主任）
+    form.deanOnly = mine.deanOnly === true
+    // 第三十二轮：我带的班
+    form.classIds = [...(mine.managedClassIds ?? [mine.classId])]
+    // 可选的班（运营角色以上才有；普通同学这栏是空的）
+    try {
+      allClasses.value = (await fetchClassChoices()).classes ?? []
+    } catch {
+      allClasses.value = []
+    }
     // 顶栏的角色/班级也一并刷新（可能刚被运营改过）
     userStore.setUser(await fetchMe())
     loadError.value = false
@@ -98,6 +146,10 @@ async function onSubmit() {
       // 沿用「空串=清空」语义（后端 None=不改）
       studentNo: form.studentNo.trim(),
       phone: form.phone.trim(),
+      // 第三十二轮：职务范围。只给院长传（别的角色传了后端会忽略）
+      deanOnly: isDean.value ? form.deanOnly : undefined,
+      // 第三十二轮：我带的班（**直接生效**）
+      classIds: canManageClasses.value ? form.classIds : undefined,
     })
     userStore.setUser(updated)
     if (detail.value) {
@@ -106,6 +158,7 @@ async function onSubmit() {
         realName: updated.realName,
         studentNo: form.studentNo.trim() || null,
         phone: form.phone.trim() || null,
+        deanOnly: updated.deanOnly,
       }
     }
     ElMessage.success('个人信息已更新')
@@ -130,7 +183,10 @@ onMounted(load)
     <div class="page-head">
       <div>
         <h2>个人信息</h2>
-        <p>这里改的是<strong>你自己</strong>的资料；角色与账号状态由运营在「成员管理」维护，登录名创建后不可修改</p>
+        <p>
+          这里改的是<strong>你自己</strong>的资料；角色、账号状态、登录名由运营在「成员管理」维护
+          （<template v-if="isDean">你的<strong>职务范围</strong>下面可以自己改</template>），登录名创建后不可修改
+        </p>
       </div>
     </div>
 
@@ -185,6 +241,52 @@ onMounted(load)
             />
           </el-form-item>
 
+          <!--
+            职务范围（第三十二轮）：**只有院长本人**能改。
+            「纯院长」是第三十轮给院长加的一个**限制**（只管学院、不参与班级事务），
+            「兼班主任」才是院长的默认状态——所以这一栏是「解除限制」，
+            不是给自己发新权力。
+          -->
+          <el-form-item v-if="isDean" label="职务范围">
+            <el-radio-group v-model="form.deanOnly">
+              <el-radio :value="false">院长 + 班主任</el-radio>
+              <el-radio :value="true">纯院长（只管学院）</el-radio>
+            </el-radio-group>
+            <div class="form-tip">
+              「纯院长」= 只管学院这一层（全校名册、班主任名册、学院任务），
+              <strong>不参与班级事务</strong>（记账、缴费、班级任务、班级成员）。
+              改成「院长 + 班主任」就会<strong>开始参与</strong>你所在那个班的班级事务。
+              <strong>改完立刻生效</strong>，不用重新登录。
+            </div>
+          </el-form-item>
+
+          <!--
+            我带的班（第三十二轮）：班主任是**班**的归属，一个老师可以带好几个班。
+            改了立刻生效——登录后左侧就能切到这些班，各班的账目、成员、
+            任务、学生信息**分开**，互不串。
+          -->
+          <el-form-item v-if="canManageClasses" label="我带的班">
+            <el-select
+              v-model="form.classIds"
+              multiple
+              filterable
+              placeholder="选你带的班（不选就只带默认班）"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="c in allClasses"
+                :key="c.id"
+                :label="c.className"
+                :value="c.id"
+              />
+            </el-select>
+            <div class="form-tip">
+              带上的班，登录后能在<strong>左侧切换</strong>；各班的账目、成员、任务、
+              学生信息分开，互不串。<strong>改完立刻生效</strong>，不用重新登录。
+              你的默认班（{{ defaultClassName }}）始终包含在内。
+            </div>
+          </el-form-item>
+
           <div class="form-actions">
             <el-button @click="onReset">重置</el-button>
             <el-button type="primary" :loading="saving" @click="onSubmit">
@@ -214,7 +316,7 @@ onMounted(load)
           </div>
           <div class="row">
             <dt>所在班级</dt>
-            <dd>{{ userStore.user?.className ?? '—' }}</dd>
+            <dd>{{ currentClassName }}</dd>
           </div>
           <div class="row">
             <dt>账号状态</dt>
@@ -367,7 +469,12 @@ onMounted(load)
   line-height: 1.6;
 }
 
-@media (max-width: 900px) {
+/**
+ * 两栏塌成单列的断点。与仪表盘的 `.grid-2` **同口径**（1024px）：
+ * 两页的侧栏一样宽，塌列的时机也应该一样——否则用户拖窗口时会看到
+ * 「仪表盘塌了、个人中心没塌」这种自相矛盾的现象。
+ */
+@media (max-width: 1024px) {
   .grid-2 {
     grid-template-columns: 1fr;
   }

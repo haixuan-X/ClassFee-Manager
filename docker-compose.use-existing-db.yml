@@ -30,6 +30,10 @@ services:
       CLASSFEE_TEACHER_PASSWORD: ${CLASSFEE_TEACHER_PASSWORD:-}
       CLASSFEE_TEACHER_NAME: ${CLASSFEE_TEACHER_NAME:-}
       CLASSFEE_TEACHER_ROLE: ${CLASSFEE_TEACHER_ROLE:-TEACHER}
+      # 纯院长（仅 ROLE=DEAN 时有意义）：0=院长兼班主任（默认）1=纯院长（只管学院）
+      CLASSFEE_DEAN_ONLY: ${CLASSFEE_DEAN_ONLY:-0}
+      # 学院名：显示在侧栏顶部的「你的管辖范围」（留空 = 界面上写「学院」）
+      CLASSFEE_COLLEGE_NAME: ${CLASSFEE_COLLEGE_NAME:-}
       # 小票图片目录（compose 已挂 named volume，容器重建不丢）
       CLASSFEE_UPLOAD_DIR: ${CLASSFEE_UPLOAD_DIR:-/app/uploads}
     volumes:

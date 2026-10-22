@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from io import BytesIO
+from typing import Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -133,6 +134,7 @@ def _find_or_create_fields(
     headers: list[str],
     actor: LoginUser,
     samples: dict[str, list[str]] | None = None,
+    key_maker: "Callable[[str], str] | None" = None,
 ) -> tuple[dict[str, StudentField], list[str], list[dict]]:
     """把表头对齐到字段定义，**没见过的列顺手建出来**。
 
@@ -144,6 +146,14 @@ def _find_or_create_fields(
     `samples` 是 `{表头: 该列的非空取值样本}`，用来给**新建**的字段猜类型。
     没有样本（列全是空的）就按文本建——空列猜不出任何东西，
     用户填了值之后可以在表格里改成别的类型。
+
+    ## `key_maker`：新建字段时**用哪个 field_key**
+
+    默认按班生成（`_make_field_key`）——班级版就该各班各的。
+
+    学院版要**所有班共用同一个 key**：学院视图按 `field_key` 把各班的列合并成
+    一份，key 不同就合并成两列同名、而值各填各的（改一列另一列不动）。
+    所以学院版传一个「按列名记忆」的生成器：同一个列名在所有班拿到同一个 key。
     """
     if actor.role not in svc.FIELD_ADD_ROLES:
         # 没有加字段权限的人不能顺带建字段：他导进来的表如果带了陌生列，
@@ -196,7 +206,7 @@ def _find_or_create_fields(
         ftype = _guess_field_type((samples or {}).get(h, []))
         f = StudentField(
             class_id=class_id,
-            field_key=_make_field_key(db, class_id, h),
+            field_key=(key_maker(h) if key_maker else _make_field_key(db, class_id, h)),
             field_label=h,
             field_type=ftype,
             is_system=0,
@@ -210,6 +220,167 @@ def _find_or_create_fields(
         mapping[h] = f
         new_fields.append({"label": h, "type": ftype, "typeText": svc.FIELD_TYPE_TEXT.get(ftype, ftype)})
     return mapping, unmatched, new_fields
+
+
+def _read_body(
+    rows, headers: list[str]
+) -> tuple[list[tuple[int, list[str]]], dict[str, list[str]]]:
+    """把数据行读进内存，同时收集每列的非空样本。
+
+    为什么一次性读进内存：新建字段时要按**整列**的取值形态猜类型，
+    没法边读行边建字段（第一行还不知道后面有没有混进一个"301"）。
+    MAX_ROWS 已经限死了体量（5000 行 × 几十列），一次性读进内存没问题。
+
+    `samples` 每列最多留 200 个非空样本，够判出整列性质了。
+    """
+    body: list[tuple[int, list[str]]] = []
+    samples: dict[str, list[str]] = {}
+    processed = 0
+    for excel_row_no, raw in enumerate(rows, start=2):
+        cells = [_cell_text(c) for c in raw]
+        if not any(cells):
+            continue
+        processed += 1
+        if processed > MAX_ROWS:
+            raise BizException.bad_request(
+                f"单次导入超过 {MAX_ROWS} 行，请拆分后再导（当前已读 {processed} 行）"
+            )
+        if len(cells) < len(headers):
+            cells += [""] * (len(headers) - len(cells))
+        body.append((excel_row_no, cells))
+        for i, h in enumerate(headers):
+            v = cells[i].strip()
+            if v:
+                col = samples.setdefault(h, [])
+                if len(col) < 200:
+                    col.append(v)
+    return body, samples
+
+
+def _import_rows_into_class(
+    db: Session,
+    actor: LoginUser,
+    class_id: int,
+    headers: list[str],
+    body: list[tuple[int, list[str]]],
+    samples: dict[str, list[str]],
+    key_maker: "Callable[[str], str] | None" = None,
+) -> dict:
+    """把一批行写进**某一个班**。
+
+    返回 `{created, updated, skippedEmptyCells, unmatchedColumns, newFields, errors}`。
+
+    ## 为什么要抽出来
+
+    班级版（`import_xlsx`）和学院版（`college_excel.import_xlsx`）都要用这套
+    判据：学号是 upsert 键、空格子不覆盖旧值、没见过的列自动建字段、
+    重复学号后一行覆盖前一行。**两份实现必然漂**——而且漂了极难查：
+    「班级能导进去的列，学院导不进去」这种差异，用户只会觉得学院功能有 bug。
+    所以这里只有一份实现，两个入口都调它。
+    """
+    col_no = headers.index("学号")
+    col_name = headers.index("姓名")
+
+    created = updated = skipped = 0
+    errors: list[str] = []
+
+    mapping, unmatched, new_fields = _find_or_create_fields(
+        db, class_id, headers, actor, samples, key_maker
+    )
+    existing: dict[str, StudentRecord] = {}
+    for r in db.scalars(select(StudentRecord).where(StudentRecord.class_id == class_id)):
+        existing[r.student_no] = r
+
+    # {学号: 首次出现的行号}，用来报"第 N 行与第 M 行重复"
+    seen_in_file: dict[str, int] = {}
+
+    for excel_row_no, cells in body:
+        student_no = cells[col_no].strip()
+        name = cells[col_name].strip()
+        if not student_no:
+            errors.append(f"第 {excel_row_no} 行：学号为空，已跳过")
+            continue
+        if not name:
+            errors.append(f"第 {excel_row_no} 行：姓名为空，已跳过")
+            continue
+
+        # 同一张表里学号重复：**后一行覆盖前一行**，不报错也不中止。
+        #
+        # 这里曾经是个 500：两行会各自往同一个 (record_id, field_id) 插一条值，
+        # 撞上 uk_cell 唯一索引 → IntegrityError → 整个事务回滚，
+        # 连前面已经导对的数据一起没了。用户看到的是「系统繁忙」，重试还是 500。
+        # 重复学号在真实表格里很常见（复制粘贴漏删、空行没清干净）。
+        if student_no in seen_in_file:
+            dup_row = seen_in_file[student_no]
+            errors.append(
+                f"第 {excel_row_no} 行：学号 {student_no} 与第 {dup_row} 行重复，"
+                f"已按本行覆盖"
+            )
+        seen_in_file[student_no] = excel_row_no
+
+        rec = existing.get(student_no)
+        if rec is None:
+            rec = StudentRecord(
+                class_id=class_id,
+                student_no=student_no,
+                name=name,
+                user_id=svc.match_user_id(db, class_id, student_no),
+            )
+            db.add(rec)
+            db.flush()
+            existing[student_no] = rec
+            created += 1
+        else:
+            # 姓名以本次表格为准，但允许表格里留空时保留旧值
+            if name:
+                rec.name = name
+            rec.user_id = rec.user_id or svc.match_user_id(db, class_id, student_no)
+            updated += 1
+
+        # 逐格写入；空格子不动旧值。
+        # 用 enumerate 而不是 headers.index(h)：后者是 O(n) 线性查找，
+        # 40 列 × 5000 行会白烧掉 20 万次比较。
+        cells_to_write: list[tuple[int, int, str]] = []
+        for ci, h in enumerate(headers):
+            f = mapping.get(h)
+            if f is None or h in ANCHOR_HEADERS:
+                continue
+            raw_val = cells[ci].strip()
+            # 学号/姓名这两列已经写进 student_record，不重复写进字段值表
+            if not raw_val:
+                skipped += 1
+                continue
+            try:
+                norm = svc.normalize_value(f.field_type, raw_val, f.field_label)
+            except BizException as e:
+                errors.append(f"第 {excel_row_no} 行「{f.field_label}」：{e.message}")
+                continue
+            if norm is not None:
+                cells_to_write.append((rec.id, f.id, norm))
+        for rid, fid, val in cells_to_write:
+            cur = db.execute(
+                select(StudentRecordValue).where(
+                    StudentRecordValue.record_id == rid,
+                    StudentRecordValue.field_id == fid,
+                )
+            ).scalar_one_or_none()
+            if cur is None:
+                db.add(StudentRecordValue(record_id=rid, field_id=fid, value_text=val))
+                # 立刻 flush：同一张表里重复学号时，下一行会再插一条**同样的**
+                # (record_id, field_id)，不 flush 就得等到事务提交才撞唯一索引，
+                # 那时整笔已经回滚、没法再回头修了。
+                db.flush()
+            else:
+                cur.value_text = val
+
+    return {
+        "created": created,
+        "updated": updated,
+        "skippedEmptyCells": skipped,
+        "unmatchedColumns": unmatched,
+        "newFields": new_fields,
+        "errors": errors,
+    }
 
 
 def import_xlsx(db: Session, user: LoginUser, content: bytes) -> dict:
@@ -233,140 +404,23 @@ def import_xlsx(db: Session, user: LoginUser, content: bytes) -> dict:
         raise BizException.bad_request("表格里必须有「学号」列——它是用来说明这行数据是谁的")
     if "姓名" not in headers:
         raise BizException.bad_request("表格里必须有「姓名」列")
-    col_no = headers.index("学号")
-    col_name = headers.index("姓名")
-
-    created = updated = skipped = 0
-    errors: list[str] = []
-    processed = 0
 
     # 表头匹配也是 SELECT，必须与写入同处一个事务：否则后续 db.begin() 会抛
     # InvalidRequestError（HTTP 500）。本轮在这里踩过一次。
     with db.begin():
-        # 先把所有数据行读成内存表：新建字段时要按**整列**的取值形态猜类型，
-        # 没法边读行边建字段（第一行还不知道后面有没有混进一个"301"）。
-        # MAX_ROWS 已经限死了体量（5000 行 × 几十列），一次性读进内存没问题。
-        body: list[tuple[int, list[str]]] = []
-        samples: dict[str, list[str]] = {}
-        for excel_row_no, raw in enumerate(rows, start=2):
-            cells = [_cell_text(c) for c in raw]
-            if not any(cells):
-                continue
-            processed += 1
-            if processed > MAX_ROWS:
-                raise BizException.bad_request(
-                    f"单次导入超过 {MAX_ROWS} 行，请拆分后再导（当前已读 {processed} 行）"
-                )
-            if len(cells) < len(headers):
-                cells += [""] * (len(headers) - len(cells))
-            body.append((excel_row_no, cells))
-            # 每列最多留 200 个非空样本用于猜类型，够判出整列性质了
-            for i, h in enumerate(headers):
-                v = cells[i].strip()
-                if v:
-                    col = samples.setdefault(h, [])
-                    if len(col) < 200:
-                        col.append(v)
+        body, samples = _read_body(rows, headers)
+        processed = len(body)
+        r = _import_rows_into_class(db, user, user.class_id, headers, body, samples)
 
-        mapping, unmatched, new_fields = _find_or_create_fields(
-            db, user.class_id, headers, user, samples
-        )
-        existing: dict[str, StudentRecord] = {}
-        for r in db.scalars(
-            select(StudentRecord).where(StudentRecord.class_id == user.class_id)
-        ):
-            existing[r.student_no] = r
-
-        # {学号: 首次出现的行号}，用来报"第 N 行与第 M 行重复"
-        seen_in_file: dict[str, int] = {}
-
-        for excel_row_no, cells in body:
-            student_no = cells[col_no].strip()
-            name = cells[col_name].strip()
-            if not student_no:
-                errors.append(f"第 {excel_row_no} 行：学号为空，已跳过")
-                continue
-            if not name:
-                errors.append(f"第 {excel_row_no} 行：姓名为空，已跳过")
-                continue
-
-            # 同一张表里学号重复：**后一行覆盖前一行**，不报错也不中止。
-            #
-            # 这里曾经是个 500：两行会各自往同一个 (record_id, field_id) 插一条值，
-            # 撞上 uk_cell 唯一索引 → IntegrityError → 整个事务回滚，
-            # 连前面已经导对的数据一起没了。用户看到的是「系统繁忙」，重试还是 500。
-            # 重复学号在真实表格里很常见（复制粘贴漏删、空行没清干净）。
-            if student_no in seen_in_file:
-                dup_row = seen_in_file[student_no]
-                errors.append(
-                    f"第 {excel_row_no} 行：学号 {student_no} 与第 {dup_row} 行重复，"
-                    f"已按本行覆盖"
-                )
-            seen_in_file[student_no] = excel_row_no
-
-            rec = existing.get(student_no)
-            if rec is None:
-                rec = StudentRecord(
-                    class_id=user.class_id,
-                    student_no=student_no,
-                    name=name,
-                    user_id=svc.match_user_id(db, user.class_id, student_no),
-                )
-                db.add(rec)
-                db.flush()
-                existing[student_no] = rec
-                created += 1
-            else:
-                # 姓名以本次表格为准，但允许表格里留空时保留旧值
-                if name:
-                    rec.name = name
-                rec.user_id = rec.user_id or svc.match_user_id(db, user.class_id, student_no)
-                updated += 1
-
-            # 逐格写入；空格子不动旧值。
-            # 用 enumerate 而不是 headers.index(h)：后者是 O(n) 线性查找，
-            # 40 列 × 5000 行会白烧掉 20 万次比较。
-            cells_to_write: list[tuple[int, int, str]] = []
-            for ci, h in enumerate(headers):
-                f = mapping.get(h)
-                if f is None or h in ANCHOR_HEADERS:
-                    continue
-                raw_val = cells[ci].strip()
-                # 学号/姓名这两列已经写进 student_record，不重复写进字段值表
-                if not raw_val:
-                    skipped += 1
-                    continue
-                try:
-                    norm = svc.normalize_value(f.field_type, raw_val, f.field_label)
-                except BizException as e:
-                    errors.append(f"第 {excel_row_no} 行「{f.field_label}」：{e.message}")
-                    continue
-                if norm is not None:
-                    cells_to_write.append((rec.id, f.id, norm))
-            for rid, fid, val in cells_to_write:
-                cur = db.execute(
-                    select(StudentRecordValue).where(
-                        StudentRecordValue.record_id == rid,
-                        StudentRecordValue.field_id == fid,
-                    )
-                ).scalar_one_or_none()
-                if cur is None:
-                    db.add(StudentRecordValue(record_id=rid, field_id=fid, value_text=val))
-                    # 立刻 flush：同一张表里重复学号时，下一行会再插一条**同样的**
-                    # (record_id, field_id)，不 flush 就得等到事务提交才撞唯一索引，
-                    # 那时整笔已经回滚、没法再回头修了。
-                    db.flush()
-                else:
-                    cur.value_text = val
-
+    errors = r["errors"]
     return {
-        "created": created,
-        "updated": updated,
+        "created": r["created"],
+        "updated": r["updated"],
         "rows": processed,
-        "skippedEmptyCells": skipped,
-        "newFields": new_fields,
+        "skippedEmptyCells": r["skippedEmptyCells"],
+        "newFields": r["newFields"],
         "duplicateRows": len([e for e in errors if "重复" in e]),
-        "unmatchedColumns": unmatched,
+        "unmatchedColumns": r["unmatchedColumns"],
         "errors": errors[:50],
         "errorCount": len(errors),
     }

@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sys_user (
   role          ENUM('ADMIN','MEMBER','GUEST','MONITOR','TEACHER','DEAN') NOT NULL DEFAULT 'MEMBER'
                 COMMENT 'MEMBER普通成员/GUEST访客/ADMIN生活委员/MONITOR班长/TEACHER班主任/DEAN院长(系统管理员,等级最高)',
   guest_scopes  TEXT NULL COMMENT '第二十六轮·仅访客用：可见范围 JSON 数组（DASHBOARD/RECORDS/STUDENTS/TASKS）；NULL=全部可见',
+  dean_only     TINYINT     NOT NULL DEFAULT 0      COMMENT '第三十轮·仅院长用：1=纯院长（只管学院，不参与班级事务）；0=兼班主任',
   phone         VARCHAR(20) NULL,
   status        TINYINT     NOT NULL DEFAULT 1      COMMENT '1启用 0停用',
   last_login_at DATETIME    NULL,
@@ -32,6 +33,29 @@ CREATE TABLE IF NOT EXISTS sys_user (
   UNIQUE KEY uk_username (username),
   KEY idx_class (class_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='系统用户/班级成员';
+
+-- ============================================================
+-- 第三十二轮：一个人管**多个**班
+-- ============================================================
+-- 现实中一个班主任常带两个班（云计算2502 + 云计算2501）。
+-- 以前 `sys_user.class_id` 一个账号只能属于一个班，于是只能给他开两个账号
+-- （要登两次、密码两份、成员名单两份），或者干脆让他管不全。
+--
+-- 这张表是**多对多**：一个账号可以管多个班，一个班也可以有多个管理者
+-- （正、副班主任，或者跨班兼管）。
+--
+-- `sys_user.class_id` 保留 = **默认班**（登录后先落在哪个班）。
+-- 请求里带 `classId` 就切到那个班（必须在 association 表里）。
+--
+-- ⚠ 不用「把 class_id 存成逗号分隔的字符串」那种省事写法：
+--   查「这个班有哪几个老师」「这个人管哪几个班」都得字符串拆分，
+--   而且没法加外键、没法建索引。
+CREATE TABLE IF NOT EXISTS sys_user_class (
+  user_id  BIGINT NOT NULL,
+  class_id BIGINT NOT NULL,
+  PRIMARY KEY (user_id, class_id),
+  KEY idx_uc_class (class_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='账号可管理的班级（多对多）；sys_user.class_id 是默认班';
 
 CREATE TABLE IF NOT EXISTS fee_category (
   id       BIGINT       NOT NULL AUTO_INCREMENT,
@@ -209,6 +233,7 @@ CREATE TABLE IF NOT EXISTS cls_task (
   deadline      DATETIME     NULL COMMENT '截止时间，NULL=不限；过了就不再收答案',
   status        TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1=开放 0=已关闭（发布人手动关）',
     pinned        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '置顶：会出现在所有人仪表盘的「置顶任务」里',
+    scope        VARCHAR(8)   NOT NULL DEFAULT 'CLASS' COMMENT 'CLASS=本班任务（同学应答）；COLLEGE=学院任务（全学院可见，班主任应答）',
   created_by    BIGINT       NOT NULL,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

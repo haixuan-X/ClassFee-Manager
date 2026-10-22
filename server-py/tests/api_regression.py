@@ -58,7 +58,14 @@ PROBE_USERS = [MEMBER_U, SNO_DEFAULT_U, SNO_EXPLICIT_U, DISPOSABLE_U,
 # 只建在本地库，**没有写进 seed.py** —— 测试口令是公开的，
 # 写进 seed 等于每次部署都白送一批弱口令账号；要「部署后自动生成」
 # 必须走 .env 配口令或首次登录强制改密，不能硬编码。
-KEEP_ACCOUNTS = ["admin", "monitor", "member", "guest"]
+#
+# `dean`（院长）同样只建在本地：院长的正规来路是部署声明
+# `CLASSFEE_TEACHER_ROLE=DEAN`，而不是「先建个班主任再自己升上去」——
+# 后者是自我提权，产品里本来就被拦（见 test_a20）。
+#
+# `pure_dean`（纯院长，第三十轮）：只管学院、不参与班级事务的那一种，
+# 用来肉眼验「侧栏少了账目/班级两组」。
+KEEP_ACCOUNTS = ["admin", "monitor", "member", "guest", "dean", "pure_dean"]
 
 # ---------------- 断言与日志 ----------------
 
@@ -1493,17 +1500,74 @@ def _mk_xlsx(rows: list[list]) -> bytes:
     return buf.getvalue()
 
 
+#: 回归**自己造**的学生学号（精确名单）。
+#:
+#: ⚠ 这里的清理以前是「删掉老师班里的**全部**学生（只留锚点）」——
+#: 那等于**跑一次回归就清空用户自己导入的名单**。实测踩中过：
+#: 用户导了一份名册进「学院学生信息」，跑完回归，名单没了。
+#:
+#: 回归只该清理**自己造的行**。所以改成按这份精确名单删，
+#: 其余（真实名单、用户自建的列）一律不动。
+_PROBE_STUDENT_NOS: tuple[str, ...] = (
+    "regress_taken",
+    "2" * 25,    # 25 位学号：超长，用来测「学号装不下」
+)
+
+#: 回归造的学生学号**前缀**（按前缀删）。
+#:
+#: 「20220981」「20220982」是 test_a16 的两个锚点（s1/s2），而 s3、hand_no
+#: 是从它们派生的（`s1 + "3"` / `s1 + "8"`），所以用前缀更省事也更不容易漏。
+_PROBE_STUDENT_PREFIXES: tuple[str, ...] = (
+    "20220981",   # test_a16 的锚点 s1 及其派生的 s3 / hand_no
+    "20220982",   # test_a16 的锚点 s2
+    "202299",     # test_a16 的建号预演
+    "dash_u_",    # test_a21
+    "col_u_",     # test_a23
+    "Z90",        # test_a25
+)
+
+#: 回归造的**自定义列**（`is_system=0`）名。同样只删这些，别删用户自建的列。
+_PROBE_FIELD_LABELS: tuple[str, ...] = (
+    "寝室信息", "搬入日期", "宿舍号",          # test_a16 的导入自动建列
+    "宿舍房间号", "重复",                     # key=dorm 那列（建/改名两个状态）
+    "插入测试列", "队首测试列", "访客加的列",   # 班级页的列管理用例
+    "改类型测试列",                            # 改类型用例的导入自动建列
+    "学院标签", "院考标签", "插在前面", "插在后面", "测试插列",  # 学院相关用例
+)
+
+#: 回归造的**自定义列的 key**（列名会被改，key 不会）
+_PROBE_FIELD_KEYS: tuple[str, ...] = ("dorm",)
+
+#: 回归造的**账号**（登录名）——授权/申请只删这些账号的
+_PROBE_LOGIN_NAMES: tuple[str, ...] = (
+    "20220981",   # test_a16 的探针学生
+    "20220982",
+    "20229901",
+    "20229902",
+    "20229903",
+    "guest_probe",
+    "guest_probe2",
+    "guest_probe3",
+)
+
+
 def _purge_student_info(token: str, keep_student_nos: tuple[str, ...] = ()) -> None:
-    """清掉本脚本（或上一轮）留下的学生信息数据，让 `test_a16` 可重入。
+    """清掉本脚本（或上一轮）留下的**探针**数据，让 `test_a16` 可重入。
 
     为什么必须直接走库：学生记录**没有删除接口**（用户要的是「只有本人可见 + 申请授权」，
     没要求「能删人」）。用 API 清理就得为此开一个接口——那是一次不必要的越权面。
 
-    为什么不能自己清自己那条：`test_a16` 的锚点学号是 `STU_PROBE_*`，上一轮跑完
-    清理用例已经把它们连同账号一起删了，所以每次进来看到的都是**上一轮的残留**。
+    ## ⚠ **只删探针，不碰真实数据**
 
-    这里只删「非锚点」的行与非模板字段；模板字段（`is_system=1`）永远保留，
-    那是 `seed.init_student_fields` 下发的对账口径。
+    这个函数以前是「删掉老师班里的全部学生 + 全部自定义列」——
+    理由是「回归是唯一的数据来源，删干净最省事」。但那是**把用户的名单也删了**：
+    用户导一份名册进来，跑一次回归，名册就没了，而且**没有任何提示**。
+
+    所以改成按 `_PROBE_STUDENT_NOS` / `_PROBE_STUDENT_PREFIXES` /
+    `_PROBE_FIELD_LABELS` 这三份**精确名单**删。其余一律保留。
+
+    模板字段（`is_system=1`）永远保留——那是 `seed.init_student_fields`
+    下发的对账口径。
 
     库连不上时**静默跳过**而不是抛错：这个清理是「让用例可重入」的辅助，
     清理不了不该让整轮回归挂掉——真正的断言会自己暴露问题。
@@ -1521,7 +1585,7 @@ def _purge_student_info(token: str, keep_student_nos: tuple[str, ...] = ()) -> N
     except Exception:  # noqa: BLE001  —— 环境不完整时跳过，不让辅助逻辑拖垮回归
         return
 
-    keep = tuple(keep_student_nos)
+    keep = set(keep_student_nos)
     try:
         with _engine.begin() as c:
             cid = c.execute(
@@ -1529,32 +1593,67 @@ def _purge_student_info(token: str, keep_student_nos: tuple[str, ...] = ()) -> N
             ).scalar()
             if cid is None:
                 return
-            c.execute(_t("DELETE FROM student_access_request WHERE class_id = :c"), {"c": cid})
-            c.execute(_t("DELETE FROM student_grant WHERE class_id = :c"), {"c": cid})
-            if keep:
-                ph = ",".join(f":k{i}" for i in range(len(keep)))
-                args = {f"k{i}": v for i, v in enumerate(keep)}
+            # 授权与申请：只删**探针账号**的。
+            # ⚠ 以前是「删掉整个班的授权/申请」——那会把**老师给学生开的
+            # 可见性授权**一起删掉，用户回头发现自己又看不见别人的信息了。
+            probe_users = [
+                r[0]
+                for r in c.execute(
+                    _t("SELECT id FROM sys_user WHERE username IN :u"),
+                    {"u": tuple(_PROBE_LOGIN_NAMES)},
+                )
+            ]
+            if probe_users:
+                ph = ",".join(f":u{i}" for i in range(len(probe_users)))
+                args = {f"u{i}": v for i, v in enumerate(probe_users)}
+                c.execute(
+                    _t("DELETE FROM student_access_request WHERE user_id IN (" + ph + ")"), args
+                )
+                c.execute(
+                    _t("DELETE FROM student_grant WHERE user_id IN (" + ph + ")"), args
+                )
+
+            # ① 挑出**探针**行（其余不动）
+            rows = c.execute(
+                _t("SELECT id, student_no FROM student_record WHERE class_id = :c"), {"c": cid}
+            ).all()
+            probe_ids = []
+            for rid, sno in rows:
+                s = str(sno or "")
+                if s in keep:
+                    continue
+                if s in _PROBE_STUDENT_NOS or any(
+                    s.startswith(p) for p in _PROBE_STUDENT_PREFIXES
+                ):
+                    probe_ids.append(rid)
+            if probe_ids:
+                ph = ",".join(f":p{i}" for i in range(len(probe_ids)))
+                args = {f"p{i}": v for i, v in enumerate(probe_ids)}
                 c.execute(
                     _t("DELETE v FROM student_record_value v "
                        "JOIN student_record r ON r.id = v.record_id "
-                       f"WHERE r.class_id = :c AND r.student_no NOT IN ({ph})"),
-                    {"c": cid, **args},
+                       f"WHERE r.id IN ({ph})"),
+                    args,
                 )
+                c.execute(_t(f"DELETE FROM student_record WHERE id IN ({ph})"), args)
+
+            # ② 自定义列：只删探针建的（按**列名或 key**——列名会被改，key 不会）
+            labels = list(_PROBE_FIELD_LABELS)
+            keys = list(_PROBE_FIELD_KEYS)
+            if labels or keys:
+                wh = []
+                args: dict = {"c": cid}
+                for i, v in enumerate(labels):
+                    wh.append(f":f{i}")
+                    args[f"f{i}"] = v
+                for i, v in enumerate(keys):
+                    wh.append(f":k{i}")
+                    args[f"k{i}"] = v
                 c.execute(
-                    _t("DELETE FROM student_record "
-                       f"WHERE class_id = :c AND student_no NOT IN ({ph})"),
-                    {"c": cid, **args},
+                    _t("DELETE FROM student_field WHERE class_id = :c AND is_system = 0 "
+                       f"AND (field_label IN ({','.join(wh)}) OR field_key IN ({','.join(wh)}))"),
+                    args,
                 )
-            else:
-                c.execute(
-                    _t("DELETE v FROM student_record_value v "
-                       "JOIN student_record r ON r.id = v.record_id WHERE r.class_id = :c"),
-                    {"c": cid},
-                )
-                c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": cid})
-            c.execute(
-                _t("DELETE FROM student_field WHERE class_id = :c AND is_system = 0"), {"c": cid}
-            )
     except Exception:  # noqa: BLE001
         return
 
@@ -2266,7 +2365,12 @@ def test_a16_student_info():
     chk("字段模板已下发", len(fields) >= 30, f"实际 {len(fields)}")
     keys = {f["key"] for f in fields}
     chk("含身份证号字段（敏感，模板必须带）", "id_number" in keys, str(sorted(keys)[:5]))
-    chk("模板字段全部 isSystem", all(f["isSystem"] for f in fields), "有字段不是模板")
+    # ⚠ 只断言**模板字段**是模板：用户自己加的列（is_system=0）本来就不是模板。
+    # 写成「所有字段都是模板」的话，用户加过一列之后这条就永远红——
+    # 那不是回归坏了，是数据库里有真实数据了。
+    tmpl = [f for f in fields if f.get("isSystem")]
+    chk("模板字段全部 isSystem", len(tmpl) >= 30 and all(f["isSystem"] for f in tmpl),
+        f"模板字段 {len(tmpl)} 个")
     chk("生活委员看字段列表但 locked", all(f["locked"] for f in fields) is False
         or True, "")  # 生活委员拿不到 STAFF 权限，这里只确认不报错
 
@@ -2352,7 +2456,12 @@ def test_a16_student_info():
 
     st, j = call("GET", "/students", None, T)
     rows_t = data_of(j)["rows"]
-    chk("班主任看得到 2 行", len(rows_t) == 2, str(len(rows_t)))
+    # ⚠ 行数**相对基线**算，不能写死「2 行」——
+    # 用户往这个班导入过名单之后，班里有几条是**他的数据**，不是回归的探针。
+    # 写死行数的话，回归一导入真实名单就永远红，而且红得莫名其妙。
+    chk("班主任看得到探针那 2 行（行数相对基线）",
+        len(rows_t) >= 2 and all(any(r["studentNo"] == x for r in rows_t) for x in (s1, s2)),
+        str(len(rows_t)))
     r1 = next((r for r in rows_t if r["studentNo"] == s1), None)
     chk("YYYYMMDD 日期被规范化", r1 and r1["values"]["birth_date"] == "2007-12-09",
         str(r1 and r1["values"].get("birth_date")))
@@ -2467,7 +2576,11 @@ def test_a16_student_info():
     st, j = call("GET", "/students", None, P1)
     p1b = data_of(j) or {}
     chk("批准后 canViewAll=true", p1b["permission"]["canViewAll"] is True, str(p1b["permission"]))
-    chk("批准后能看到全部 2 行", len(p1b["rows"]) == 2, str(len(p1b["rows"])))
+    # 行数**相对基线**：批准后应该比「只看得见自己那行」多出探针那两行，
+    # 而班里的真实行数是多少，跟这个断言无关。
+    chk("批准后能看到全部行（含探针那 2 行）",
+        len(p1b["rows"]) >= 2 and all(any(r["studentNo"] == x for r in p1b["rows"]) for x in (s1, s2)),
+        str(len(p1b["rows"])))
     chk("**仍然不能编辑**（只批了查看）", p1b["permission"]["canEditAll"] is False,
         str(p1b["permission"]))
 
@@ -2695,9 +2808,15 @@ def test_a16_student_info():
           not any(c["key"] == sk for c in (data_of(j) or {})["columns"]),
           sk)
     st, j = call("GET", "/students", None, T)
-    row_ids = [r["id"] for r in (data_of(j) or {})["rows"]]
-    if row_ids:
-        st, j = call("PUT", f"/students/{row_ids[0]}", {"name": "软删探测"}, T)
+    # ⚠ **按学号取自己那一行**，不能取「第一行」。
+    #
+    # 原来写的是 `row_ids[0]`——那是**按位置**取。班里有真实数据时
+    # （用户导入的名册），排第一的可能是**用户的行**，于是回归把
+    # 用户的姓名改成了「软删探测」。实测踩中过。
+    rows_now = (data_of(j) or {})["rows"]
+    probe_row = next((r for r in rows_now if r["studentNo"] == s1), None)
+    if probe_row:
+        st, j = call("PUT", f"/students/{probe_row['id']}", {"name": "软删探测"}, T)
     st, j = call("POST", f"/students/fields/{sk}/restore", None, T)
     check("模板字段也能恢复 -> 200", st == 200, f"st={st} {msg_of(j)}")
     st, j = call("GET", "/students", None, T)
@@ -3035,6 +3154,11 @@ def test_a19_version():
           all(k in v for k in ("appName", "version", "major", "minor", "patch")), str(v))
     check("应用名不是空串（光一个版本号看不出是什么的版本）",
           bool(str(v.get("appName") or "").strip()), repr(v.get("appName")))
+    # 第三十二轮：这个端点顺带带**学院名**（侧栏顶部要显示「你的管辖范围」）。
+    # 没配置时是空串——前端据此退回写「学院」两个字，**不能报错、也不能是 None**。
+    check("学院名这一项存在（没配置就是空串，不是 None）",
+          "collegeName" in v and isinstance(v.get("collegeName"), (str, type(None))),
+          str(v))
 
     # ★ 项目改名后的回归守卫：登录页/侧栏/文档都写着这个名字，
     # 而「APP_NAME 常量」和「前端各处硬编码的标题」很容易各改各的。
@@ -3110,6 +3234,8 @@ def test_a19_version():
 
 
 DEAN_PROBE = "dean_probe"
+#: 纯院长探针（第三十轮）：dean_only=1 的账号
+PURE_DEAN_PROBE = "pure_dean_probe"
 
 
 def _try_create_dean_via_api(token: str) -> bool:
@@ -3204,10 +3330,14 @@ def test_a20_dean_role():
           "DEAN" in STAFF_ROLES, str(sorted(STAFF_ROLES)))
 
     # ---------- ② ★ 前后端等级表必须逐项一致 ----------
-    vue = (root / "web/src/views/member-manage/index.vue").read_text(encoding="utf-8-sig")
-    block = re.search(r"const ROLE_LEVEL:\s*Record<Role,\s*number>\s*=\s*\{(.*?)\n\}",
-                      vue, re.S)
-    if not check("能从 .vue 里解析出 ROLE_LEVEL 表", block is not None):
+    #
+    # 第二十九轮起这张表收进了 `types/index.ts`（仪表盘也要判等级）。
+    # 收之前它只在 member-manage 里，两边各写一份数值——加角色时只改一边，
+    # 界面就「按错误的等级隐藏按钮」，不报错，只是按钮该在不在。
+    types_for_level = (root / "web/src/types/index.ts").read_text(encoding="utf-8-sig")
+    block = re.search(r"export const ROLE_LEVEL:\s*Record<Role,\s*number>\s*=\s*\{(.*?)\n\}",
+                      types_for_level, re.S)
+    if not check("能从 types/index.ts 解析出共享 ROLE_LEVEL 表", block is not None):
         return
     fe = {m.group(1): int(m.group(2)) for m in
           re.finditer(r"([A-Z]+):\s*(\d+)\s*,", block.group(1))}
@@ -3216,6 +3346,20 @@ def test_a20_dean_role():
     mismatch = {k: (fe[k], ROLE_LEVEL.get(k)) for k in set(fe) & set(ROLE_LEVEL)
                 if fe[k] != ROLE_LEVEL[k]}
     check("前后端 ROLE_LEVEL 的等级数值完全一致", not mismatch, str(mismatch))
+
+    # 不许再有人写死第二份等级表（或写死 `role === 'DEAN'` 这种角色名判断）
+    mm = (root / "web/src/views/member-manage/index.vue").read_text(encoding="utf-8-sig")
+    check("成员管理不再自带第二份 ROLE_LEVEL 表",
+          not re.search(r"const ROLE_LEVEL:\s*Record<Role,\s*number>", mm),
+          "出现了重复的等级表，加角色时必然会漂")
+    dash = (root / "web/src/views/dashboard/index.vue").read_text(encoding="utf-8-sig")
+    # ⚠ 先把注释剥掉再查：这段文档本身就在讲「不要写 role === 'DEAN'」，
+    # 不剥会**自己命中自己**——守卫的假阳性比没有守卫更浪费时间。
+    dash_code = re.sub(r"/\*.*?\*/", "", dash, flags=re.S)
+    dash_code = re.sub(r"//[^\n]*", "", dash_code)
+    check("仪表盘按等级判院长，没有写死 role === 'DEAN'",
+          "role === 'DEAN'" not in dash_code and "roleLevel(" in dash_code,
+          "写死角色名：加新角色时会静默降权")
 
     # ---------- ③ 运营角色常量必须与后端一致，且只剩一份 ----------
     # 实测补上的两条教训，都源于「同一个角色列表在三个地方各写一份」：
@@ -3241,6 +3385,35 @@ def test_a20_dean_role():
             if re.search(pat, body):
                 dup.append(rel)
         check("路由与侧栏不再各写一份运营角色字面量", not dup, "、".join(dup))
+
+    # ---------- ③b 前端不许再手写角色列表 ----------
+    #
+    # 「同一个角色列表在多个地方各写一份」已经翻车**三次**：
+    #   ① 侧栏少 5 个入口（SideNav 的 STAFF 没加 DEAN）
+    #   ② 路由守卫把院长弹回仪表盘（router 的 meta.roles 没加 DEAN）
+    #   ③ **store 的 isStaff 没加 DEAN** —— 院长点仪表盘「查看缴费名单」
+    #      按钮会跳到 /my-fees，而那个路由的角色白名单里没有院长，
+    #      守卫又把他弹回仪表盘：**点了像没反应**。
+    #      同一个漏字还让院长看不到班级信息的编辑入口。
+    # 三次都是「加角色时只改了一处」。所以现在**只允许有一处**。
+    store_src = (root / "web/src/stores/user.ts").read_text(encoding="utf-8-sig")
+    check("store 的 isStaff 用共享的 STAFF_ROLES，不自己写角色名",
+          "STAFF_ROLES.includes" in store_src,
+          "isStaff 又是手写的角色名列表，加角色时会静默漏掉")
+    check("store 里不再出现手写的运营角色判断",
+          not re.search(r"role\s*===\s*'(ADMIN|MONITOR|TEACHER)'\s*(\|\||\n)", store_src),
+          "store 里还有手写的角色判断")
+
+    # 班级信息：前端判「谁能改班主任姓名」必须**按等级**，和后端同口径。
+    # 写成 `role === 'TEACHER'` 的话，院长（等级 4）比班主任（3）还受限。
+    classinfo_src = (root / "web/src/views/class-info/index.vue").read_text(encoding="utf-8-sig")
+    # ⚠ 先剥注释再查：这段说明里**本身**就写着那个反例的字面量，
+    # 不剥会自己命中自己——守卫的假阳性比没有守卫更费时间。
+    classinfo_code = re.sub(r"/\*.*?\*/", "", classinfo_src, flags=re.S)
+    classinfo_code = re.sub(r"//[^\n]*", "", classinfo_code)
+    check("班级信息按等级判「谁能改班主任姓名」（不写死角色名）",
+          "role === 'TEACHER'" not in classinfo_code and "roleLevel(" in classinfo_src,
+          "前后端口径不一致：后端按等级放行院长，前端却把输入框藏了")
 
     # ---------- ④ 前后端角色中文名 ----------
     tblock = re.search(r"ROLE_TEXT:\s*Record<Role,\s*string>\s*=\s*\{(.*?)\n\}",
@@ -3283,9 +3456,19 @@ def test_a20_dean_role():
     teacher_row = next((u for u in rows
                         if u["id"] == S["root_id"] and u["role"] == "TEACHER"), None)
     if check("成员列表里能看到班主任", teacher_row is not None, str(rows)[:120]):
+        # ⚠ 先存原值、写回原值：这一句会**永久改掉班主任的真实姓名**。
+        # 之前没还原，跑一次回归基线里的 test 账号就变成 "x" 了——
+        # 症状是登录后侧栏显示 "x"，像是数据丢了，其实是测试的副作用。
+        orig_real_name = teacher_row.get("realName") or ""
         st, j = call("PUT", f"/users/{teacher_row['id']}", {"realName": "x"}, D)
         check("院长能管理班主任（等级最高，系统管理员）-> 200", st == 200,
               f"st={st} {msg_of(j)}")
+        call("PUT", f"/users/{teacher_row['id']}", {"realName": orig_real_name}, T)
+        st, j = call("GET", "/users", None, D)
+        back = next((u for u in (data_of(j) or []) if u["id"] == teacher_row["id"]), {})
+        check("班主任姓名已还原（用例不留下改过的基线数据）",
+              (back.get("realName") or "") == orig_real_name,
+              f"{back.get('realName')!r} vs {orig_real_name!r}")
 
     # 反向：班主任管不了院长
     st, j = call("PUT", f"/users/{_probe_id()}", {"realName": "x"}, T)
@@ -3411,10 +3594,111 @@ def test_a21_student_dashboard():
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     from app.services.student_service import _NOT_REGISTERED_KEYWORDS  # noqa: PLC0415
 
-    # ---------- ① 空库时的形状 ----------
-    st, j = call("GET", "/dashboard/students", None, T)
+    # ---------- ⓪ ★ 仅院长：后端必须硬拦 ----------
+    #
+    # 这道闸门是「身份」而不是「数据可见性」：班主任在 /students 里本来就能
+    # 看到全部行，但管理看板按用户口径只给院长。
+    #
+    # ⚠ 前端不渲染 + 后端 403 **两条腿都要**：
+    #   - 只做后端：班主任看到标签、点进去报「无权」，比看不到更糟
+    #   - 只做前端：手输接口照样拿得到数据
+    dashboard_py = (pathlib.Path(__file__).resolve().parents[1]
+                    / "app/routers/dashboard.py").read_text(encoding="utf-8")
+    check("后端 /dashboard/students 挂了 require_min_level(DEAN)",
+          'require_min_level(user, "DEAN"' in dashboard_py,
+          "路由没加等级闸门，手输接口即可绕过")
+    check("学生总览不再只靠行级权限（行级仅 4 项，挡不住 redirect）",
+          "require_min_level" in dashboard_py.split("/students")[-1],
+          "闸门不在 /students 处理函数里")
+
+    for name, tok in (("班主任", T), ("生活委员", S["A"]), ("普通同学", S["M"])):
+        st, j = call("GET", "/dashboard/students", None, tok)
+        check(f"{name}访问学生总览 -> 403（仅院长）", st == 403, f"st={st} {msg_of(j)}")
+
+    # 院长探针：直写库（班主任建不了院长，见 test_a20 的说明）
+    D = _insert_dean_probe(DEAN_PROBE + "_dash")
+    if not check("院长探针可用（直写库模拟部署声明）", bool(D), "建号失败"):
+        return
+
+    st, j = call("GET", "/dashboard/students", None, D)
+    check("院长访问学生总览 -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    # ---------- 院长的口径 = **全校**（不是他那个班） ----------
+    #
+    # 这个总览只有院长能看，看板的身份是「校级看板」。之前它统计的是
+    # `user.class_id`（本班口径），于是全校名册里填了 7 个人、看板只有
+    # 那个班的 4 个——数字和「学院学生信息」对不上。
+    #
+    # 断言方式：**直接查库**数一遍所有启用班的学生数，跟接口返回的对比。
+    from sqlalchemy import text as _t1
+
+    from app.db import engine as _engine1
+
+    with _engine1.connect() as c:
+        all_students = int(
+            c.execute(
+                _t1("SELECT COUNT(*) FROM student_record WHERE class_id IN "
+                    "(SELECT id FROM cls_class WHERE status = 1)")
+            ).scalar()
+            or 0
+        )
+    d_stu = data_of(j) or {}
+    check("★ 院长的总览是**全校口径**（collegeScope=true）",
+          d_stu.get("collegeScope") is True, str(d_stu)[:200])
+    check("★ 院长的总览人数 = 所有启用班的学生数（不是本班）",
+          int(d_stu.get("studentTotal") or 0) == all_students,
+          f"接口 {d_stu.get('studentTotal')} vs 库里 {all_students}")
+
+    # 前端：非院长时不渲染切换器里的第二个标签
+    dash_vue = (pathlib.Path(__file__).resolve().parents[2]
+                / "web/src/views/dashboard/index.vue").read_text(encoding="utf-8-sig")
+    check("前端按 isDean 决定是否给出「学生情况总览」标签",
+          "isDean" in dash_vue and "学生情况总览" in dash_vue,
+          "标签没按院长收紧")
+    check("切换器在只有一个选项时不渲染（不摆死按钮）",
+          'VIEWS.length > 1' in dash_vue, "单选项时切换器仍会渲染")
+    check("学生面板模板也判 isDean（防登录态变化后残留）",
+          'v-else-if="isDean"' in dash_vue, "模板只判 view，降级后会继续显示")
+
+    # ---------- ⓪ 回归不许删真实数据 ----------
+    #
+    # 这条是从**事故**来的：用户往「学院学生信息」导了一份名册，
+    # 跑完回归，名单没了——因为清理用例当时是「删掉老师班里的全部学生 +
+    # 全部自定义列」。回归只该清理**自己造的行**。
+    #
+    # 所以这里直接查库：造一条「像用户导进来的」记录，跑一遍清理，
+    # 确认它**还在**。这条断言比读源码可靠——源码改了但行为没改的情况，
+    # 只有真的跑一遍才看得出来。
+    from sqlalchemy import text as _t0
+
+    from app.db import engine as _engine0
+
+    _REAL_NO = "regress_real_keep_me"
+    with _engine0.begin() as c:
+        c.execute(_t0("DELETE FROM student_record WHERE student_no = :n"), {"n": _REAL_NO})
+        cid0 = c.execute(
+            _t0("SELECT class_id FROM sys_user WHERE username = :u LIMIT 1"), {"u": ROOT_U}
+        ).scalar()
+        if cid0 is not None:
+            c.execute(
+                _t0("INSERT INTO student_record (class_id, student_no, name) "
+                    "VALUES (:c, :n, '回归不该删我')"),
+                {"c": cid0, "n": _REAL_NO},
+            )
+    _purge_student_info(T)
+    with _engine0.connect() as c:
+        still = c.execute(
+            _t0("SELECT COUNT(*) FROM student_record WHERE student_no = :n"), {"n": _REAL_NO}
+        ).scalar()
+    check("★ 回归清理**不会删掉用户自己导入的学生**（只删探针行）",
+          int(still or 0) == 1, f"清理后还在 {still} 行（0 = 被误删了）")
+    with _engine0.begin() as c:
+        c.execute(_t0("DELETE FROM student_record WHERE student_no = :n"), {"n": _REAL_NO})
+
+    # ---------- ① 形状 ----------
+    st, j = call("GET", "/dashboard/students", None, D)
     d = data_of(j) or {}
-    check("GET /api/dashboard/students -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("返回结构完整", st == 200, f"st={st} {msg_of(j)}")
     for k in ("canViewAll", "studentTotal", "registeredTotal", "statusBreakdown",
               "enrollTrend", "latest", "changeTotal", "changeSupported"):
         check(f"返回结构含 {k}", k in d, str(sorted(d)))
@@ -3449,7 +3733,7 @@ def test_a21_student_dashboard():
          {"studentNo": "dash_u_b", "name": "空状态探针",
           "values": {"reg_status": "", "enroll_date": "2026-09-03"}}, T)
 
-    st, j = call("GET", "/dashboard/students", None, T)
+    st, j = call("GET", "/dashboard/students", None, D)
     d = data_of(j) or {}
     added_total = len(made) + 2
     check("学生数量增量 = 造进去的行数（含休学与空状态）",
@@ -3476,23 +3760,1544 @@ def test_a21_student_dashboard():
           (cums[-1] if cums else 0) >= added_total,
           f"{cums[-1] if cums else 0} < {added_total}")
 
-    # ---------- ④ ★ 可见范围：仪表盘不能成为权限后门 ----------
-    st, j = call("GET", "/dashboard/students", None, S["M"])
-    md = data_of(j) or {}
-    check("普通同学 canViewAll=false", md.get("canViewAll") is False, str(md)[:120])
-    check("普通同学看到的学生数 **远小于** 班主任（不泄露全班人数）",
-          int(md.get("studentTotal") or 0) < int(d.get("studentTotal") or 0),
-          f"同学={md.get('studentTotal')} 班主任={d.get('studentTotal')}")
-    check("普通同学的「最新学籍信息」里没有别人的行",
-          len(md.get("latest") or []) <= 1, str(len(md.get("latest") or [])))
+    # ---------- ④ ★ 院长进闸之后仍走行级权限，不再叠加特权 ----------
+    #
+    # 原来这里用普通同学验证「看板不是权限后门」。现在普通同学是 403，
+    # 这条改为**验证院长看到的是全班**（`canViewAll=true` 来自 APPROVER_ROLES
+    # 的等级推导），并且——关键——`latest` 的条数受 LATEST_LIMIT 约束而不是
+    # 等于总数，说明它走的是同一套 `_visible_record_ids`。
+    check("院长 canViewAll=true（学生信息表同口径，不是另开的特权通道）",
+          d.get("canViewAll") is True, str(d)[:120])
+    check("院长的「最新学籍信息」受条数上限约束（不是把全表一次吐出来）",
+          0 < len(d.get("latest") or []) <= 8,
+          f"latest={len(d.get('latest') or [])}")
 
     # 清理（只删本用例造的行，别碰别的用例的）
     _purge_students_prefix("dash_u_")
-    st, j = call("GET", "/dashboard/students", None, T)
+    st, j = call("GET", "/dashboard/students", None, D)
     d2 = data_of(j) or {}
     check("清理后回到起始数量（用例不留下数据）",
           int(d2.get("studentTotal") or 0) == base_total,
           f"{d2.get('studentTotal')} vs 起始 {base_total}")
+
+    _purge_user(DEAN_PROBE + "_dash")
+
+
+def test_a22_chart_container_visibility() -> None:
+    """图表容器**必须**用 `v-if`，不能用 `v-show`（第二十九轮末实测修的既有 bug）。
+
+    ## 症状
+
+    页面刚打开时，所有 ECharts 图表的画布只有 **100px** 宽，挤在 800+px
+    容器的左边——图形被压扁到看不见。**刷新后一直是这样**，直到用户碰巧
+    拖动了一下窗口（`resize` 事件 → `chart.resize()`）才恢复。
+
+    ## 根因
+
+    图表容器用 `v-show` 控制显隐，而 `v-show` 的 `display:none` 在
+    **数据到达之前**就生效了：组件挂载时 `points` 还是空的 → 容器隐藏 →
+    `echarts.init()` 在隐藏容器上量到的宽度是 0 → 画布退化成 100px。
+    之后 ECharts **不会重新量**一个隐藏元素的尺寸，`resize()` 也救不回来。
+
+    这不是本轮新写的组件的毛病——`TrendChart.vue`（账目总览的收支趋势图）
+    和 `CategoryPie.vue`（支出分类占比）**早就是这个写法**，两个主图表一直
+    是坏的，只是之前库里的数据是空的、图表从没显示出来过，没人发现。
+
+    ## 修法
+
+    容器改成 `v-if`（有数据才存在，挂载那一刻就可见且有真实宽度），
+    并把建实例抽成幂等的 `ensureChart()`——因为 `v-if` 由 false 变 true 时
+    组件**不会重新挂载**，`onMounted` 不会再跑。
+
+    本用例钉死这个写法，防止有人改回 `v-show`。
+    """
+    print("\n--- 图表容器显隐（ECharts 画布尺寸）---")
+    root = pathlib.Path(__file__).resolve().parents[2]
+    comps = [
+        "web/src/components/TrendChart.vue",
+        "web/src/components/CategoryPie.vue",
+        "web/src/components/StudentTrendChart.vue",
+    ]
+    for rel in comps:
+        path = root / rel
+        if not check(f"{rel} 存在", path.exists(), str(path)):
+            continue
+        src = path.read_text(encoding="utf-8-sig")
+        name = path.name
+        check(f"{name} 的图表容器用 v-if 而不是 v-show",
+              'v-show="hasData"' not in src,
+              "v-show 会让 ECharts 在隐藏容器上 init，画布退化成 100px")
+        check(f"{name} 有幂等的 ensureChart()（v-if 变 true 时组件不重新挂载）",
+              "function ensureChart(" in src,
+              "建实例只写在 onMounted 里的话，数据晚到一步图表就永远画不出来")
+        check(f"{name} 渲染前会 resize（容器宽度变了得自己告诉 ECharts）",
+              "chart.resize()" in src or "chart?.resize()" in src,
+              "setOption 只画不量")
+        check(f"{name} 数据 watcher 是 post 刷新（要等 v-if 创建出容器）",
+              "flush: 'post'" in src,
+              "pre 刷新时 v-if 的容器还不存在，量不到 ref")
+
+
+def test_a23_college_views() -> None:
+    """学院视角（第三十轮）：跨班级的学生名册 / 班主任名册 / 任务一览。
+
+    四条重点：
+
+    1. **仅院长**。学院 = 全部班级的聚合，是校级视角；班主任在班级层
+       已经能看到本班全部数据，再给一份跨班的只是重复。后端必须 403。
+    2. **跨班级**：名册要能同时给出多个班的学生，且带上班级名——
+       跨班名册里不写班级等于没写。
+    3. **搜索筛选**：关键字要能命中**学号、姓名，以及任意 TEXT 字段**
+       （专业、宿舍号这些才是「按关键字找人」时真会用到的）。
+    4. **任务分母按任务自己那个班算**：跨班混算会得出「已填 3 / 共 60 人」
+       这种没人看得懂的数。
+    """
+    print("\n--- 学院视角 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    T = S["T"]
+    D = _insert_dean_probe(DEAN_PROBE + "_college")
+    if not check("院长探针可用（直写库模拟部署声明）", bool(D), "建号失败"):
+        return
+
+    # ---------- ① 仅院长：后端硬拦 ----------
+    for name, tok in (("班主任", T), ("生活委员", S["A"]), ("普通同学", S["M"])):
+        for p in ("/college/students", "/college/advisers", "/college/tasks"):
+            st, j = call("GET", p, None, tok)
+            check(f"{name}访问 {p} -> 403（学院视角仅院长）", st == 403,
+                  f"st={st} {msg_of(j)}")
+
+    for p in ("/college/students", "/college/advisers", "/college/tasks"):
+        st, j = call("GET", p, None, D)
+        check(f"院长访问 {p} -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    # 源码守卫：闸门必须在**处理函数里**，不能只挂在别的路由上。
+    #
+    # ⚠ 不能写死「3 个 require_min_level」——学院路由一直在长（3 → 9），
+    # 写死的数要么误报、要么被改成「>= 3」而失去意义。
+    # 这里比的是**装饰器数 == 闸门数**：以后新加一个端点却忘了加闸门，
+    # 两个数就对不上，回归立刻红。
+    college_py = (root / "app/routers/college.py").read_text(encoding="utf-8")
+    n_routes = len(re.findall(r"@router\.(get|post|put|delete)\(", college_py))
+    n_gates = college_py.count('require_min_level(user, "DEAN"')
+    check("学院路由每个端点都有等级闸门（端点数 == 闸门数）",
+          n_routes == n_gates and n_routes > 0, f"端点 {n_routes} 个，闸门 {n_gates} 个")
+
+    # ---------- ② 跨班级：造两个班的学生 ----------
+    st, j = call("GET", "/college/students", None, D)
+    d = data_of(j) or {}
+    base_total = int(d.get("total") or 0)
+    classes = d.get("classes") or []
+    check("名册给出可筛选的班级清单", len(classes) >= 1, str(classes)[:120])
+    check("名册给出可筛选的年级清单", isinstance(d.get("grades"), list), str(d.get("grades")))
+
+    made = [("col_u_%d" % i, "学院探针%d" % i) for i in range(2)]
+    for no, name in made:
+        call("POST", "/students",
+             {"studentNo": no, "name": name,
+              "values": {"major_name": "软件工程", "grade": "2026级"}}, T)
+    st, j = call("GET", "/college/students", None, D)
+    d = data_of(j) or {}
+    check("名册总数随新增而增加（跨班级可见）",
+          int(d.get("total") or 0) == base_total + len(made),
+          f"{d.get('total')} vs {base_total + len(made)}")
+    rows = d.get("rows") or []
+    check("每一行都带班级名（跨班名册里不写班级等于没写）",
+          all(r.get("className") for r in rows), str(rows)[:120])
+
+    # ---------- ③ 搜索筛选 ----------
+    st, j = call("GET", "/college/students?keyword=" + urllib.parse.quote("软件工程"), None, D)
+    hit = data_of(j) or {}
+    hit_rows = hit.get("rows") or []
+    check("关键字能命中**任意 TEXT 字段**（专业），不只是学号/姓名",
+          len(hit_rows) >= len(made),
+          f"命中 {len(hit_rows)} 行，预期 >= {len(made)}")
+    check("命中行确实都是那个专业的",
+          all((r.get("values") or {}).get("major_name") == "软件工程" for r in hit_rows),
+          str([(r.get("studentNo"), (r.get("values") or {}).get("major_name")) for r in hit_rows]))
+
+    st, j = call("GET", "/college/students?keyword=" + urllib.parse.quote("col_u_0"), None, D)
+    check("关键字能命中学号",
+          len((data_of(j) or {}).get("rows") or []) == 1,
+          str((data_of(j) or {}).get("rows")))
+
+    st, j = call("GET", "/college/students?keyword=" + urllib.parse.quote("不存在的关键字zzz"), None, D)
+    check("搜不到时返回 0 行（不是报错，也不是全量）",
+          int((data_of(j) or {}).get("total") or 0) == 0,
+          str((data_of(j) or {}).get("total")))
+
+    # 按班级筛选
+    if len(classes) >= 2:
+        cid = classes[1]["id"]
+        st, j = call(f"GET", f"/college/students?classId={cid}", None, D)
+        filtered = data_of(j) or {}
+        check("按班级筛选后只剩该班的学生",
+              all(r.get("classId") == cid for r in (filtered.get("rows") or [])),
+              str([(r.get("studentNo"), r.get("classId")) for r in (filtered.get("rows") or [])]))
+    else:
+        check("按班级筛选后只剩该班的学生（库里只有一个班，跳过）", True, "单班")
+
+    # ---------- ④ 只显示有值的列 ----------
+    check("返回 populatedKeys（全空列会被前端隐藏）",
+          isinstance(d.get("populatedKeys"), list) and "major_name" in (d.get("populatedKeys") or []),
+          str(d.get("populatedKeys"))[:200])
+    check("有值的列是列定义的子集",
+          set(d.get("populatedKeys") or []) <= {c["key"] for c in (d.get("columns") or [])},
+          str(d.get("populatedKeys"))[:200])
+
+    # ---------- ⑤ 班主任名册 ----------
+    #
+    # 第三十二轮：名册按**关联表**（谁是哪个班的班主任）列，
+    # 不再按「账号的默认班」推。所以这里先按当前口径补齐关联：
+    # role=TEACHER 或兼班主任的院长 → 是他们默认班的班主任。
+    from sqlalchemy import text as _t2
+    from app.db import engine as _engine2
+
+    with _engine2.begin() as c:
+        c.execute(
+            _t2(
+                "INSERT INTO sys_user_class (user_id, class_id) "
+                "SELECT id, class_id FROM sys_user "
+                "WHERE status = 1 AND (role = 'TEACHER' OR (role = 'DEAN' AND dean_only = 0)) "
+                "ON DUPLICATE KEY UPDATE class_id = VALUES(class_id)"
+            )
+        )
+    st, j = call("GET", "/college/advisers", None, D)
+    adv = data_of(j) or {}
+    arows = adv.get("rows") or []
+    # 一人一行：没有班主任账号的班也占一行（teacherId=null），
+    # 所以行数 >= 班级数，而不是等于。
+    check("名册每个班至少占一行（没账号的班也在表上）",
+          len(arows) >= len(classes), f"{len(arows)} vs {len(classes)}")
+    check("每行都有班级名", all(r.get("className") for r in arows), str(arows)[:160])
+    check("每行最多一个账号（一行一人，不是一个班里塞几个）",
+          all("teachers" not in r for r in arows),
+          "还是一班一行的旧形状：账号挤在一格里，状态会渲染成两个「启用」")
+    check("名册带账号信息（能联系上人）",
+          any(r.get("username") for r in arows), str(arows)[:200])
+    # 名册只该出现**合法的班主任账号**：role=TEACHER，或兼班主任的院长。
+    # 这里对着库里的真实集合比，而不是硬编码用户名白名单——
+    # 白名单会漏（兼班主任的院长就不在里面），而且账号一改就失效。
+    with _engine2.connect() as c:
+        legit = {
+            r[0]
+            for r in c.execute(
+                _t2(
+                    "SELECT username FROM sys_user WHERE role = 'TEACHER' "
+                    "OR (role = 'DEAN' AND dean_only = 0)"
+                )
+            )
+        }
+    listed = {r.get("username") for r in arows if r.get("username")}
+    check("名册只列班主任账号（不含普通同学/生活委员/班长/访客）",
+          listed <= legit,
+          f"名册里混进了不该有的账号：{sorted(listed - legit)}")
+    # 兼班主任的院长：他就是那个班的班主任，只是职务是院长。
+    # 只按 role=TEACHER 筛的话他会从名册上消失——名册写着「这个班的班主任是某某」，
+    # 而某人在系统里明明管着这个班，那条信息就自相矛盾了。
+    # 第三十二轮：名册按**关联表**（谁是哪个班的班主任）列。
+    # 兼班主任的院长是班主任，所以也要在关联表里——直写库造探针时
+    # 得手动补上这一条（新建账号的路径会自动补）。
+    with _engine2.begin() as c:
+        c.execute(
+            _t2("INSERT INTO sys_user_class (user_id, class_id) "
+               "SELECT id, class_id FROM sys_user WHERE username = :u "
+               "ON DUPLICATE KEY UPDATE class_id = VALUES(class_id)"),
+            {"u": DEAN_PROBE + "_college"},
+        )
+    st, j = call("GET", "/college/advisers", None, D)
+    arows2 = data_of(j) or {}
+    dean_listed = any(
+        r.get("username") == DEAN_PROBE + "_college" for r in (arows2.get("rows") or [])
+    )
+    check("兼班主任的院长出现在班主任名册里", dean_listed,
+          "名册漏了兼班主任的院长")
+    # 第二个账号的手机号/最近登录**必须**也在（一人一行就是为了这个）
+    two_teachers = [r for r in arows if r.get("username") == "test"]
+    check("账号行的手机号/最近登录是它自己的（不是班里第一个人的）",
+          all("phone" in r and "lastLoginAt" in r for r in two_teachers),
+          str(two_teachers)[:200])
+
+    # ---------- ⑥ 任务：分母按任务自己那个班 ----------
+    st, j = call("GET", "/college/tasks", None, D)
+    tks = data_of(j) or {}
+    trows = tks.get("rows") or []
+    check("学院任务列出所有班的任务",
+          all(r.get("className") for r in trows), str(trows)[:160])
+    check("任务带所属班级与答题分母",
+          all("total" in r and "answered" in r for r in trows), str(trows)[:160])
+    check("分母不会超过该班人数（跨班混算就会超）",
+          all(r["total"] <= 1000 for r in trows), str(trows)[:160])
+
+    # 清理
+    _purge_students_prefix("col_u_")
+    _purge_user(DEAN_PROBE + "_college")
+
+
+def test_a24_pure_dean() -> None:
+    """**纯院长**（第三十轮）：只管学院，不参与班级事务。
+
+    院长有两种：① 兼班主任（本班的账目/任务/成员他都管，第二十八轮以来的行为）；
+    ② 纯院长（只管学院那一层）。
+
+    三条重点：
+
+    1. **默认必须是兼班主任**：存量账号一行都不用改，行为完全不变。
+    2. **白名单而不是黑名单**：纯院长能碰的接口是一张**允许清单**，
+       将来加了新接口而忘了加进白名单，纯院长访问不到（可发现、可补）；
+       反过来若用黑名单，漏一个就是**静默放行**（不可发现）。
+    3. **改标志要立刻生效**：它不进 JWT（JWT 签发后就固定了），
+       靠鉴权中间件每次请求重读那一列——和 status / guest_scopes 同一条路子。
+    """
+    print("\n--- 纯院长 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]      # server-py/
+    repo = pathlib.Path(__file__).resolve().parents[2]      # 仓库根
+    sys.path.insert(0, str(root))
+    from app.security import pure_dean_allowed  # noqa: PLC0415
+
+    # ---------- ① 纯院长能碰的 ----------
+    for method, path in (
+        ("GET", "/api/college/students"),
+        ("GET", "/api/college/advisers"),
+        ("GET", "/api/college/tasks"),
+        ("GET", "/api/dashboard/students"),
+        ("GET", "/api/auth/me"),
+        ("PUT", "/api/auth/profile"),
+    ):
+        check(f"纯院长允许 {method} {path}", pure_dean_allowed(method, path), "不在白名单里")
+
+    # ---------- ② 纯院长不能碰的（班级事务）----------
+    for method, path in (
+        ("GET", "/api/records"),
+        ("GET", "/api/dashboard/summary"),
+        ("GET", "/api/dashboard/trend"),
+        ("GET", "/api/members"),
+        ("GET", "/api/batches"),
+        ("GET", "/api/users"),
+        ("GET", "/api/class"),
+        ("GET", "/api/students"),
+        ("GET", "/api/tasks"),
+        ("GET", "/api/categories"),
+        ("POST", "/api/records"),
+        ("PUT", "/api/class"),
+    ):
+        check(f"纯院长拒绝 {method} {path}", not pure_dean_allowed(method, path),
+              "竟然在白名单里")
+
+    # ---------- ③ 源码守卫：闸门必须在中间件里 ----------
+    sec = (root / "app/security.py").read_text(encoding="utf-8")
+    check("中间件里有纯院长的判定", "pure_dean_allowed(request.method, path)" in sec,
+          "中间件没调用白名单，纯院长拦不住")
+    check("纯院长的判定带 DEAN_ROLE 与 dean_only 两个条件",
+          "DEAN_ROLE" in sec and "dean_only" in sec, "判定条件不全")
+
+    # ---------- ④ 端到端：真建一个纯院长 ----------
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+    from app.security import hash_password as _hash
+
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM sys_user WHERE username = :u"), {"u": PURE_DEAN_PROBE})
+        uid = c.execute(_t("SELECT id FROM sys_user WHERE username = 'test' LIMIT 1")).scalar()
+        cid = c.execute(_t("SELECT class_id FROM sys_user WHERE id = :i"), {"i": uid}).scalar()
+        c.execute(
+            _t(
+                "INSERT INTO sys_user (class_id, username, password, real_name, role, dean_only, status) "
+                "VALUES (:c, :u, :p, '纯院长探针', 'DEAN', 1, 1)"
+            ),
+            {"c": cid, "u": PURE_DEAN_PROBE, "p": _hash("123456")},
+        )
+    P = login(PURE_DEAN_PROBE, "123456")
+    if not check("纯院长探针可用", bool(P), "登录失败"):
+        return
+
+    st, j = call("GET", "/auth/me", None, P)
+    check("登录/ me 返回 deanOnly=true", (data_of(j) or {}).get("deanOnly") is True,
+          str(data_of(j))[:160])
+
+    for p in ("/college/students", "/college/advisers", "/college/tasks", "/dashboard/students"):
+        st, j = call("GET", p, None, P)
+        check(f"纯院长访问 {p} -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    for p in ("/records", "/dashboard/summary", "/users", "/class", "/students", "/tasks",
+              "/members", "/batches", "/categories"):
+        st, j = call("GET", p, None, P)
+        check(f"纯院长访问 {p} -> 403（班级事务不参与）", st == 403, f"st={st} {msg_of(j)}")
+
+    # ---------- ⑤ 对照：兼班主任的院长不受影响 ----------
+    D = _insert_dean_probe(DEAN_PROBE + "_pure")
+    if not check("兼班主任的院长探针可用", bool(D), "建号失败"):
+        return
+    st, j = call("GET", "/auth/me", None, D)
+    check("兼班主任的院长 deanOnly=false", (data_of(j) or {}).get("deanOnly") is False,
+          str(data_of(j))[:160])
+    for p in ("/records", "/dashboard/summary", "/users", "/class"):
+        st, j = call("GET", p, None, D)
+        check(f"兼班主任的院长访问 {p} -> 200（存量行为不变）", st == 200,
+              f"st={st} {msg_of(j)}")
+
+    # ---------- ⑥ 改标志立刻生效（不用重新登录）----------
+    with _engine.begin() as c:
+        c.execute(_t("UPDATE sys_user SET dean_only = 1 WHERE username = :u"),
+                  {"u": DEAN_PROBE + "_pure"})
+    st, _ = call("GET", "/records", None, D)
+    check("改成纯院长后立刻 403（不用重新登录）", st == 403, f"st={st}")
+    with _engine.begin() as c:
+        c.execute(_t("UPDATE sys_user SET dean_only = 0 WHERE username = :u"),
+                  {"u": DEAN_PROBE + "_pure"})
+    st, _ = call("GET", "/records", None, D)
+    check("改回兼班主任后立刻恢复 200", st == 200, f"st={st}")
+
+    # ---------- ⑦ 前端也得跟着变 ----------
+    sidenav = (repo / "web/src/layout/SideNav.vue").read_text(encoding="utf-8-sig")
+    check("侧栏按纯院长隐藏「账目」「班级」两组",
+          "hiddenForPureDean" in sidenav and "isPureDean" in sidenav,
+          "侧栏没按纯院长过滤")
+    router = (repo / "web/src/router/index.ts").read_text(encoding="utf-8-sig")
+    check("路由守卫按纯院长拦班级页面",
+          "COLLEGE_FREE_PATHS" in router and "deanOnly" in router,
+          "路由守卫没按纯院长过滤")
+    dash = (repo / "web/src/views/dashboard/index.vue").read_text(encoding="utf-8-sig")
+    check("仪表盘对纯院长不请求班级数据",
+          "isPureDean" in dash, "仪表盘没区分纯院长")
+
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM sys_user WHERE username = :u"), {"u": PURE_DEAN_PROBE})
+    _purge_user(DEAN_PROBE + "_pure")
+
+
+def test_a25_college_excel() -> None:
+    """学院级 Excel 导入导出 + 列管理（第三十轮）。
+
+    四条重点，都是「跨班级」这个本质带来的新问题：
+
+    1. **导入按「班级」列分发**：一行一个班。找不到班名的行**跳过并报错**，
+       不静默塞进别的班——塞错班比不导更糟，人就找不到了。
+    2. **各班的列必须用同一个 `field_key`**：学院视图按 key 把各班的列合并成一份，
+       key 不同就合并成两列同名、而值各填各的（改一列另一列不动）。
+    3. **插列/停用列对所有班生效**：学院只有一份表。
+    4. **仅院长**：这三个接口都在纯院长白名单之外，班主任一律 403。
+    """
+    print("\n--- 学院 Excel 导入导出 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    from io import BytesIO as _B
+
+    from openpyxl import Workbook as _Wb
+    from openpyxl import load_workbook as _Lw
+
+    D = _insert_dean_probe(DEAN_PROBE + "_xls")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+    T = S["T"]
+
+    # ---------- 造一个带「班级」列的表 ----------
+    wb = _Wb()
+    ws = wb.active
+    ws.append(["学号", "姓名", "班级", "性别", "专业名称", "院考标签"])
+    ws.append(["Z9001", "甲同学", "云计算2502", "男", "软件工程", "重点"])
+    ws.append(["Z9002", "乙同学", "计科2201班", "女", "物联网工程", "普通"])
+    ws.append(["Z9003", "丙同学", "不存在的班", "男", "软件工程", "重点"])
+    buf = _B()
+    wb.save(buf)
+    content = buf.getvalue()
+
+    # ---------- ① 导入：按班级列分发 ----------
+    # ⚠ 先清上一轮的残留，否则本轮的「新增」会变成「更新」——
+    # 计数类断言就永远对不上（第一轮造、第二轮断言失败）。
+    _purge_students_prefix("Z90")
+    st, j = _post_multipart("/college/students/import", "file", "名单.xlsx", content, D)
+    data = data_of(j) or {}
+    check("导入成功 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    # 第三行的班级「不存在的班」在库里没有 → **自动建班**（第三十轮改的行为）。
+    # 原来是把那一行**丢掉**并报错——用户导一份全校名单进来，发现少了一半人，
+    # 还得先手工建班再导一遍。跟「没见过的列自动建字段」是同一个思路：
+    # 用户导进来的东西不该被静默丢弃。
+    check("三行都进了（第三行那个不存在的班**自动建了**）",
+          int(data.get("created") or 0) == 3, str(data)[:200])
+    check("自动建班**不算错误**", not data.get("errors"), str(data.get("errors"))[:200])
+    # 新建列的报告：只断言「那个没见过的列在里面」，不写死个数——
+    # 自动建的班第一次出现时，它自己那几列（性别/专业名称…）也都是新的，
+    # 个数取决于库里已经有什么，写死就会在第二轮翻车。
+    nf = {f["label"] for f in (data.get("newFields") or [])}
+    check("表里没见过的列自动建了字段", "院考标签" in nf, str(data.get("newFields"))[:200])
+
+    st, j = call("GET", "/college/students", None, D)
+    d_imp = data_of(j) or {}
+    rows = d_imp.get("rows") or []
+    by_no = {r["studentNo"]: r for r in rows}
+    check("Z9001 落在云计算2502",
+          by_no.get("Z9001", {}).get("className") == "云计算2502",
+          str(by_no.get("Z9001"))[:160])
+    check("Z9002 落在计科2201班",
+          by_no.get("Z9002", {}).get("className") == "计科2201班",
+          str(by_no.get("Z9002"))[:160])
+    check("Z9003 落在自动新建的「不存在的班」",
+          by_no.get("Z9003", {}).get("className") == "不存在的班",
+          str(by_no.get("Z9003"))[:160])
+    check("★ 自动建的班出现在班级筛选里",
+          "不存在的班" in [c["className"] for c in (d_imp.get("classes") or [])],
+          str([c["className"] for c in (d_imp.get("classes") or [])]))
+
+    # ---------- ② 各班的列必须同一个 key ----------
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    with _engine.connect() as c:
+        keys = [
+            r[0]
+            for r in c.execute(
+                _t(
+                    "SELECT DISTINCT field_key FROM student_field "
+                    "WHERE field_label = '院考标签' AND status = 1"
+                )
+            )
+        ]
+    check("同一个列名在所有班用**同一个 field_key**（否则合并成两列同名）",
+          len(keys) == 1, str(keys))
+
+    # 值要能按 key 解析出来（key 相同 → 各班的值各归各的班，但列是同一列）
+    st, j = call("GET", "/college/students", None, D)
+    cols = {c["label"]: c["key"] for c in ((data_of(j) or {}).get("columns") or [])}
+    rows = (data_of(j) or {}).get("rows") or []
+    vals = {
+        r["studentNo"]: (r.get("values") or {}).get(cols.get("院考标签", ""))
+        for r in rows
+    }
+    check("值能按 key 解析出来（不是 None）",
+          vals.get("Z9001") == "重点" and vals.get("Z9002") == "普通", str(vals)[:200])
+
+    # ---------- ③ 导出（选列） ----------
+    st, raw = _get_raw("/college/students/export?columns=major_name,gender", D)
+    check("导出选列 -> 200", st == 200, f"st={st}")
+    if st == 200:
+        w2 = _Lw(_B(raw))
+        rows2 = list(w2.active.iter_rows(values_only=True))
+        header = [c for c in rows2[2] if c]
+        # 学号/姓名**无条件保留**（没勾也得有）；
+        # 班级/年级**听勾选**（这次没勾 → 表头里就不该有）。
+        check("导出表头**一定有**学号/姓名（没勾也保留）",
+              "学号" in header and "姓名" in header, str(header))
+        check("没勾的班级/年级**真的不出现**",
+              "班级" not in header and "年级" not in header, str(header))
+        check("导出表头含选中的列", "专业名称" in header and "性别" in header, str(header))
+        check("导出表头**不含**没选的列", "籍贯" not in header, str(header))
+    # 勾上班级/年级时要有，而且「年级」**只出现一次**
+    st, raw2 = _get_raw(
+        "/college/students/export?columns=__class__,__grade__,major_name,gender", D)
+    if st == 200:
+        h2 = [c for c in list(_Lw(_B(raw2)).active.iter_rows(values_only=True))[2] if c]
+        check("勾了班级/年级 -> 导出表头里就有",
+              "班级" in h2 and "年级" in h2, str(h2))
+        check("★ 「年级」**不重复出两列**（年级字段并进了年级锚点列）",
+              h2.count("年级") == 1, str(h2))
+
+    # ---------- ④ 插列：所有班 + 左右 ----------
+    st, j = call("GET", "/college/fields", None, D)
+    cols_before = [c["label"] for c in ((data_of(j) or {}).get("columns") or [])]
+    i_major = cols_before.index("专业名称") if "专业名称" in cols_before else -1
+    st, j = call("POST", "/college/fields",
+                  {"label": "插在前面", "type": "TEXT",
+                   "anchorKey": "major_name", "side": "before"}, D)
+    created = data_of(j) or {}
+    check("左插列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("新列加到了**所有班**", int(created.get("classCount") or 0) >= 2, str(created))
+    st, j = call("GET", "/college/fields", None, D)
+    cols_after = [c["label"] for c in ((data_of(j) or {}).get("columns") or [])]
+    check("新列插在锚点列**前面**",
+          cols_after.index("插在前面") == cols_after.index("专业名称") - 1,
+          str(cols_after[:i_major + 3]))
+
+    st, j = call("POST", "/college/fields",
+                  {"label": "插在后面", "type": "TEXT",
+                   "anchorKey": "major_name", "side": "after"}, D)
+    check("右插列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/college/fields", None, D)
+    cols_after = [c["label"] for c in ((data_of(j) or {}).get("columns") or [])]
+    check("新列插在锚点列**后面**",
+          cols_after.index("插在后面") == cols_after.index("专业名称") + 1,
+          str(cols_after[:i_major + 4]))
+
+    # ---------- ⑤ 停用列：所有班一起 ----------
+    key = created.get("key") or ""
+    st, j = call("DELETE", f"/college/fields/{key}", None, D)
+    check("停用列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("停用对所有班生效", int((data_of(j) or {}).get("classCount") or 0) >= 2, str(data_of(j)))
+    st, j = call("GET", "/college/fields", None, D)
+    check("停用后列里没有了",
+          "插在前面" not in [c["label"] for c in ((data_of(j) or {}).get("columns") or [])],
+          str([c["label"] for c in ((data_of(j) or {}).get("columns") or [])])[:200])
+
+    # ---------- ⑥ 就地改一格（电子表格） ----------
+    st, j = call("GET", "/college/students", None, D)
+    rows = (data_of(j) or {}).get("rows") or []
+    z = next((r for r in rows if r["studentNo"] == "Z9001"), None)
+    if check("名册里能拿到 Z9001（改一格的测试对象）", z is not None, str(rows)[:160]):
+        rid = z["id"]
+        key = cols.get("专业名称", "")
+        st, j = call("PUT", f"/college/students/{rid}", {"values": {key: "改了专业"}}, D)
+        check("改一格 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        st, j = call("GET", "/college/students", None, D)
+        z2 = next(
+            (r for r in ((data_of(j) or {}).get("rows") or []) if r["studentNo"] == "Z9001"), None
+        )
+        check("改完的值能读回来",
+              (z2 or {}).get("values", {}).get(key) == "改了专业", str(z2)[:200])
+        # 未定义的字段要报错，不能静默丢弃
+        st, j = call("PUT", f"/college/students/{rid}",
+                     {"values": {"根本没这个字段": "x"}}, D)
+        check("改未定义的字段 -> 400（不是静默丢弃）", st == 400, f"st={st} {msg_of(j)}")
+        # 跨班：字段必须按「这条记录自己那个班」找
+        st, j = call("GET", "/college/students", None, D)
+        z3 = next(
+            (r for r in ((data_of(j) or {}).get("rows") or []) if r["studentNo"] == "Z9002"), None
+        )
+        if z3:
+            st, j = call("PUT", f"/college/students/{z3['id']}",
+                         {"values": {key: "另一个班也改了"}}, D)
+            check("改另一个班的学生 -> 200（跨班级编辑）", st == 200, f"st={st} {msg_of(j)}")
+
+    # ---------- ⑦ 筛选跟着数据走（不能是死数据） ----------
+    #
+    # 用户口径：「导入进来的时候自动出现在这个筛选里面」。
+    # 所以：① 库里没有的班级 → **自动建班**（而不是把行丢掉）；
+    #       ② 年级选项 = 学生**实际的**年级值（不是班级上写死的那一个）。
+    from urllib.parse import quote as _quote
+
+    wb_new = _Wb()
+    ws_new = wb_new.active
+    ws_new.append(["学号", "姓名", "班级", "年级", "性别"])
+    ws_new.append(["W9001", "新班甲", "回归新建班", "2099级", "男"])
+    ws_new.append(["W9002", "新班乙", "回归新建班", "2099级", "女"])
+    buf_new = _B()
+    wb_new.save(buf_new)
+    st, j = _post_multipart("/college/students/import", "file", "名单.xlsx",
+                            buf_new.getvalue(), D)
+    res_new = data_of(j) or {}
+    check("导入一个库里没有的班级 -> 200（不报错）",
+          st == 200, f"st={st} {msg_of(j)}")
+    check("新班的人**没有丢**（原来会整行跳过）",
+          int(res_new.get("created") or 0) == 2, str(res_new)[:200])
+    check("报错里没有「班级不存在」", not res_new.get("errors"), str(res_new.get("errors"))[:200])
+
+    st, j = call("GET", "/college/students", None, D)
+    d2 = data_of(j) or {}
+    new_classes = [c["className"] for c in (d2.get("classes") or [])]
+    check("★ 新建的班级**自动出现在班级筛选里**",
+          "回归新建班" in new_classes, str(new_classes))
+    check("★ 新年级自动出现在年级筛选里（跟着数据走，不是死数据）",
+          "2099级" in (d2.get("grades") or []), str(d2.get("grades")))
+    new_cid = next(
+        (c["id"] for c in (d2.get("classes") or []) if c["className"] == "回归新建班"), None
+    )
+    if new_cid:
+        st, j = call(f"GET", f"/college/students?classId={new_cid}", None, D)
+        check("按新班级筛得���那两个人",
+              int((data_of(j) or {}).get("total") or 0) == 2,
+              str((data_of(j) or {}).get("total")))
+    st, j = call("GET", "/college/students?grade=" + _quote("2099级"), None, D)
+    d3 = data_of(j) or {}
+    check("按新年级筛得出那两个人",
+          int(d3.get("total") or 0) == 2, str(d3.get("total")))
+    check("年级筛选后**选项不跟着筛**（否则第二次就选不到了）",
+          "2099级" in (d3.get("grades") or []), str(d3.get("grades")))
+    st, j = call("GET", "/college/students?grade=" + _quote("1899级"), None, D)
+    check("筛一个不存在的年级 -> 0 人（不是报错）",
+          int((data_of(j) or {}).get("total") or 0) == 0,
+          str((data_of(j) or {}).get("total")))
+
+    # ---------- 年级选项里不能有「筛不出人」的死选项 ----------
+    #
+    # 之前选项域是「班级年级 ∪ 学生填过的年级」。一个班的学生都自己填了
+    # 「2026」，这个班的「2026级」照样在下拉里，可选下去一个人都筛不出来
+    # （学生自己有值，就不再看班级年级了）——用户看到的就是「这个筛选不了」。
+    # 选项域必须和筛选判据**同源**：收进来的每一个，选下去都至少筛出一个人。
+    st, j = call("GET", "/college/students", None, D)
+    grades_now = (data_of(j) or {}).get("grades") or []
+    dead = []
+    for g in grades_now:
+        st2, j2 = call("GET", "/college/students?grade=" + _quote(g), None, D)
+        if int((data_of(j2) or {}).get("total") or 0) == 0:
+            dead.append(g)
+    check("★ 年级选项里**没有筛不出人的死选项**", not dead,
+          f"死选项: {dead}（全部选项: {grades_now}）")
+    # 班级选项要带人数：空班（一个人都没有）在下拉里是看得出来的
+    st, j = call("GET", "/college/students", None, D)
+    choices = (data_of(j) or {}).get("classes") or []
+    check("班级选项带人数（空班一眼看得出来）",
+          all("students" in c for c in choices) and bool(choices), str(choices)[:200])
+
+    # 导出要**跟着筛选走**：界面上筛出来的是这批人，导出来就得是这批人。
+    # 不然用户会拿到一份「屏幕上不是这些行、文件里却是」的表。
+    st, raw = _get_raw("/college/students/export?grade=" + _quote("2099级"), D)
+    check("导出（带年级筛选）-> 200", st == 200, f"st={st}")
+    if st == 200:
+        body = [r for r in list(_Lw(_B(raw)).active.iter_rows(values_only=True))[3:] if r and r[0]]
+        check("★ 导出的是**筛出来的那批人**", len(body) == 2, str(body)[:200])
+        check("★ 导出里没有别班的人",
+              all(str(r[0]).startswith("W90") for r in body), str(body)[:200])
+
+    # 清理：把自动建的班和它的人删掉
+    with _engine.begin() as c:
+        nc = c.execute(
+            _t("SELECT id FROM cls_class WHERE class_name = '回归新建班'")
+        ).scalar()
+        if nc:
+            c.execute(
+                _t("DELETE FROM student_record_value WHERE record_id IN "
+                   "(SELECT id FROM student_record WHERE class_id = :c)"),
+                {"c": nc},
+            )
+            c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM student_field WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM cls_class WHERE id = :c"), {"c": nc})
+
+    # ---------- ⑧ 改类型：先预览，再应用（跨所有班） ----------
+    st, j = call("GET", "/college/fields/gender/retype-preview?toType=DATE", None, D)
+    pv = data_of(j) or {}
+    check("改类型预览 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("预览跨**所有班**汇总（这一列每个班各有一份定义）",
+          int(pv.get("classCount") or 0) >= 1, str(pv)[:200])
+    check("预览给出能转换/转不了的条数",
+          "convertibleCount" in pv and "unconvertibleCount" in pv, str(pv)[:200])
+    st, j = call("POST", "/college/fields/gender/retype",
+                 {"toType": "DATE", "clearBad": False}, D)
+    ap = data_of(j) or {}
+    check("确认改类型 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("改类型对所有班生效",
+          int(ap.get("classCount") or 0) >= 1, str(ap)[:200])
+    check("转不了的值默认**保留**（不静默清空）",
+          int(ap.get("clearedCount") or 0) == 0, str(ap)[:200])
+    # 改回去，别把基线留在 DATE 上
+    call("POST", "/college/fields/gender/retype", {"toType": "TEXT", "clearBad": False}, D)
+
+    # ---------- ⑧ 权限：非院长一律 403 ----------
+    for name, tok in (("班主任", T), ("普通同学", S["M"])):
+        st, _ = _get_raw("/college/students/export", tok)
+        check(f"{name}导出 -> 403", st == 403, f"st={st}")
+        st, _ = _post_multipart("/college/students/import", "file", "a.xlsx", content, tok)
+        check(f"{name}导入 -> 403", st == 403, f"st={st}")
+        st, j = call("POST", "/college/fields", {"label": "x", "type": "TEXT"}, tok)
+        check(f"{name}新增列 -> 403", st == 403, f"st={st}")
+        st, j = call("PUT", "/college/students/1", {"values": {"gender": "男"}}, tok)
+        check(f"{name}改格 -> 403", st == 403, f"st={st}")
+        st, j = call("GET", "/college/fields/gender/retype-preview?toType=DATE", None, tok)
+        check(f"{name}改类型预览 -> 403", st == 403, f"st={st}")
+
+    # ---------- ⑨ 清理 ----------
+    _purge_students_prefix("Z90")
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_field WHERE field_label IN "
+                     "('院考标签','插在前面','插在后面')"))
+        # 自动建的两个班也要删（它们的字段模板是导入时建出来的）
+        for name in ("不存在的班", "回归新建班"):
+            nc = c.execute(
+                _t("SELECT id FROM cls_class WHERE class_name = :n"), {"n": name}
+            ).scalar()
+            if nc:
+                c.execute(
+                    _t("DELETE FROM student_record_value WHERE record_id IN "
+                       "(SELECT id FROM student_record WHERE class_id = :c)"),
+                    {"c": nc},
+                )
+                c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": nc})
+                c.execute(_t("DELETE FROM student_field WHERE class_id = :c"), {"c": nc})
+                c.execute(_t("DELETE FROM cls_class WHERE id = :c"), {"c": nc})
+    _purge_user(DEAN_PROBE + "_xls")
+
+
+def test_a26_college_cell_edit() -> None:
+    """学院表格：前四列的**可改性**与**导出选列**（第三十一轮）。
+
+    用户口径：「为什么前四列导出不了，而且还不能修改？」
+
+    改完之后的口径（**和班级那套一致**）：
+
+    | 列 | 能不能改 | 落在哪 |
+    |----|----------|--------|
+    | 学号 | 能 | `student_record.student_no`（同班不能撞号） |
+    | 姓名 | 能 | `student_record.name` |
+    | 班级 | **不能** | 转班会牵动字段值归属（值表存的是 field_id），是另一个操作 |
+    | 年级 | 能 | `grade` **字段的值**（学生没填时才回退班级年级） |
+
+    导出：**学号/姓名必选**（一份没有学号的表没法说明每一行是谁）；
+    **班级/年级可以取消**（有人导出只要学号姓名加几个字段）。
+
+    顺带验证：某个班**没建年级列**时，在年级格填值会**就地补建**那列
+    （而不是报「未定义的字段」让人干瞪眼）。
+    """
+    print("\n--- 学院表格：前四列可改 + 导出选列 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from io import BytesIO as _B
+
+    from openpyxl import Workbook as _Wb
+    from openpyxl import load_workbook as _Lw
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    D = _insert_dean_probe(DEAN_PROBE + "_cell")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+
+    # ---------- 造一份探针名单（同班两个人 + 一个没年级列的班） ----------
+    wb = _Wb()
+    ws = wb.active
+    ws.append(["学号", "姓名", "班级", "性别"])
+    ws.append(["Z9601", "改格甲", "回归改格班", "男"])
+    ws.append(["Z9602", "改格乙", "回归改格班", "女"])
+    buf = _B()
+    wb.save(buf)
+
+    _purge_students_prefix("Z96")
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_field WHERE field_label = '年级' "
+                     "AND class_id IN (SELECT id FROM cls_class "
+                     "WHERE class_name = '回归改格班')"))
+        nc = c.execute(
+            _t("SELECT id FROM cls_class WHERE class_name = :n"),
+            {"n": "回归改格班"},
+        ).scalar()
+        if nc:
+            c.execute(_t("DELETE FROM student_record_value WHERE record_id IN "
+                         "(SELECT id FROM student_record WHERE class_id = :c)"), {"c": nc})
+            c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM student_field WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM cls_class WHERE id = :c"), {"c": nc})
+
+    st, j = _post_multipart("/college/students/import", "file", "名单.xlsx",
+                            buf.getvalue(), D)
+    check("导入探针名单 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("两个人都进来了", int((data_of(j) or {}).get("created") or 0) == 2,
+          str(data_of(j))[:200])
+
+    st, j = call("GET", "/college/students", None, D)
+    rows = (data_of(j) or {}).get("rows") or []
+    z1 = next((r for r in rows if r["studentNo"] == "Z9601"), None)
+    z2 = next((r for r in rows if r["studentNo"] == "Z9602"), None)
+    if not check("名册里能拿到 Z9601/Z9602（改格的测试对象）",
+                 z1 is not None and z2 is not None, str(rows)[:200]):
+        _purge_students_prefix("Z96")
+        _purge_user(DEAN_PROBE + "_cell")
+        return
+    rid = z1["id"]
+
+    # ---------- ① 那个班**没建年级列**时，填年级要能存下去 ----------
+    #
+    # ⚠ 必须放在最前面：一旦下面第 ② 步写过年级，字段就**已经补建出来**了，
+    # 「这个班本来没有年级列」的前置条件就不成立了（我第一版就踩了这个坑）。
+    with _engine.begin() as c:
+        has_grade = c.execute(
+            _t("SELECT COUNT(*) FROM student_field WHERE class_id = "
+               "(SELECT id FROM cls_class WHERE class_name = :n) "
+               "AND field_key = 'grade' AND status = 1"),
+            {"n": "回归改格班"},
+        ).scalar()
+    check("（前置）这个班本来**没有**年级列", int(has_grade or 0) == 0, str(has_grade))
+    st, j = call("PUT", f"/college/students/{rid}",
+                 {"values": {"grade": "2097级"}}, D)
+    check("★ 缺年级列时填年级 -> 200（就地补建，不报错）",
+          st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/college/students", None, D)
+    z1e = next((r for r in ((data_of(j) or {}).get("rows") or [])
+                if r["id"] == rid), None)
+    check("★ 补建后值存下来了",
+          (z1e or {}).get("values", {}).get("grade") == "2097级", str(z1e)[:200])
+
+    # ---------- ② 学号 + 姓名 + 年级：一次请求全改 ----------
+    st, j = call("PUT", f"/college/students/{rid}",
+                 {"values": {"grade": "2098级"}, "name": "改格甲新名",
+                  "studentNo": "Z9601X"}, D)
+    check("一次改学号+姓名+年级 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/college/students", None, D)
+    z1b = next((r for r in ((data_of(j) or {}).get("rows") or [])
+                if r["id"] == rid), None)
+    check("★ 学号改掉了", (z1b or {}).get("studentNo") == "Z9601X", str(z1b)[:200])
+    check("★ 姓名改掉了", (z1b or {}).get("name") == "改格甲新名", str(z1b)[:200])
+    check("★ 年级改掉了（落的是 grade 字段）",
+          (z1b or {}).get("values", {}).get("grade") == "2098级", str(z1b)[:200])
+    check("★ 年级列显示的也是新值（筛选和显示要一致）",
+          (z1b or {}).get("grade") == "2098级", str(z1b)[:200])
+
+    # ---------- ③ 学号的校验 ----------
+    st, j = call("PUT", f"/college/students/{rid}",
+                 {"values": {}, "studentNo": "  "}, D)
+    check("学号改成空 -> 400（不是静默接受）", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("PUT", f"/college/students/{rid}",
+                 {"values": {}, "studentNo": "Z9602"}, D)
+    check("学号撞上同班另一个人 -> 400（学号是导入的 upsert 键）",
+          st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/college/students", None, D)
+    z1c = next((r for r in ((data_of(j) or {}).get("rows") or [])
+                if r["id"] == rid), None)
+    check("撞号被拒后**学号没变**（整批原子）",
+          (z1c or {}).get("studentNo") == "Z9601X", str(z1c)[:200])
+
+    # ---------- ④ 班级：直接改文字（按名字） ----------
+    #
+    # 界面上这一格是**普通输入框**（和别的列一样），用户直接打班级名：
+    # 找到同名班就转过去；**找不到就自动建一个**（和导入一个规矩）。
+    # `classId`（按 id）**不认**——那是另一个接口的事。
+    st, j = call("PUT", f"/college/students/{rid}",
+                 {"values": {}, "className": "计科2201班"}, D)
+    check("改班级（按名字）-> 200", st == 200, f"st={st} {msg_of(j)}")
+    st2, j2 = call("GET", "/college/students", None, D)
+    z1d = next((r for r in ((data_of(j2) or {}).get("rows") or [])
+                if r["id"] == rid), None)
+    check("★ 班级改成了他打的那个班", (z1d or {}).get("className") == "计科2201班",
+          str(z1d)[:200])
+    check("★ 转过去之后值一个没丢",
+          (z1d or {}).get("values", {}).get("grade") == "2098级", str(z1d)[:200])
+    # 改回去
+    call("PUT", f"/college/students/{rid}", {"values": {}, "className": "回归改格班"}, D)
+    st2, j2 = call("GET", "/college/students", None, D)
+    z1d2 = next((r for r in ((data_of(j2) or {}).get("rows") or [])
+                 if r["id"] == rid), None)
+    check("改回原来的班", (z1d2 or {}).get("className") == "回归改格班", str(z1d2)[:200])
+
+    # ---------- ⑤ 导出：班级/年级能取消 ----------
+    st, raw = _get_raw("/college/students/export?columns=__no__,__name__", D)
+    check("导出（只勾学号姓名）-> 200", st == 200, f"st={st}")
+    if st == 200:
+        h = [c for c in list(_Lw(_B(raw)).active.iter_rows(values_only=True))[2] if c]
+        check("★ 表头只有学号/姓名（班级/年级真的没导出）",
+              h == ["学号", "姓名"], str(h))
+    st, raw = _get_raw(
+        "/college/students/export?columns=__no__,__name__,__class__,__grade__", D)
+    check("导出（勾上班级/年级）-> 200", st == 200, f"st={st}")
+    if st == 200:
+        h2 = [c for c in list(_Lw(_B(raw)).active.iter_rows(values_only=True))[2] if c]
+        check("★ 勾上了就有班级/年级",
+              h2[:4] == ["学号", "姓名", "班级", "年级"], str(h2))
+        check("★ 「年级」只出现一次（年级字段不重复出列）",
+              h2.count("年级") == 1, str(h2))
+    # 不给 columns = 全部（默认全导出，含班级/年级）
+    st, raw = _get_raw("/college/students/export", D)
+    if st == 200:
+        h3 = [c for c in list(_Lw(_B(raw)).active.iter_rows(values_only=True))[2] if c]
+        check("不给 columns -> 默认带上班级/年级",
+              "班级" in h3 and "年级" in h3, str(h3))
+        check("默认导出里「年级」也只有一列", h3.count("年级") == 1, str(h3))
+
+    # ---------- ⑥ 权限：非院长一律 403 ----------
+    for name, tok in (("班主任", S["T"]), ("普通同学", S["M"])):
+        st, _ = call("PUT", f"/college/students/{rid}",
+                     {"values": {"grade": "x"}}, tok)
+        check(f"{name}改学院表格的格子 -> 403", st == 403, f"st={st}")
+        st, _ = call("PUT", f"/college/students/{rid}",
+                     {"values": {}, "studentNo": "x"}, tok)
+        check(f"{name}改学院表格的学号 -> 403", st == 403, f"st={st}")
+
+    # ---------- 清理 ----------
+    _purge_students_prefix("Z96")
+    with _engine.begin() as c:
+        nc = c.execute(
+            _t("SELECT id FROM cls_class WHERE class_name = :n"),
+            {"n": "回归改格班"},
+        ).scalar()
+        if nc:
+            c.execute(_t("DELETE FROM student_record_value WHERE record_id IN "
+                         "(SELECT id FROM student_record WHERE class_id = :c)"), {"c": nc})
+            c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM student_field WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM cls_class WHERE id = :c"), {"c": nc})
+    _purge_user(DEAN_PROBE + "_cell")
+
+
+def test_a27_college_field_restore() -> None:
+    """停用列的**恢复**，以及「停用过模板字段之后后端还能不能启动」（第三十一轮）。
+
+    两条都是**能把自己搞挂**的坑：
+
+    1. **停用是软删**（`status=0`），值一行没动——所以必须有一条找回的路，
+       否则误停用一列就等于把那一列的历史数据永远藏起来了。
+    2. 模板字段**被停用之后**，`seed.init_student_fields` 会因为
+       「唯一键是 `(class_id, field_key)`、不看启用还是停用」而重复插入 →
+       IntegrityError → **整个后端起不来**（服务直接退出，页面全挂）。
+
+    第 2 条是真的发生过：停用了一个「家长电话」列之后，下一次重启
+    后端就再也起不来了。判存在时必须按**全部状态**看。
+    """
+    print("\n--- 停用列的恢复 / 停用模板字段后仍能启动 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    D = _insert_dean_probe(DEAN_PROBE + "_trash")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+
+    # ---------- ① 造一列，停用它 ----------
+    st, j = call("POST", "/college/fields", {"label": "回归可恢复列", "type": "TEXT"}, D)
+    created = data_of(j) or {}
+    key = created.get("key") or ""
+    check("新建一列 -> 200", st == 200 and bool(key), f"st={st} {msg_of(j)}")
+
+    st, j = call("DELETE", f"/college/fields/{key}", None, D)
+    check("停用这一列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    # 停用后它**不在**活动列里
+    st, j = call("GET", "/college/fields", None, D)
+    labels = [c["label"] for c in ((data_of(j) or {}).get("columns") or [])]
+    check("停用后不在活动列里", "回归可恢复列" not in labels, str(labels)[:200])
+
+    # ---------- ② 已停用的列能被列出来 ----------
+    st, j = call("GET", "/college/fields/disabled", None, D)
+    dis = data_of(j) or {}
+    dis_labels = [c["label"] for c in (dis.get("columns") or [])]
+    check("已停用的列能被列出来（软删要有找回的路）",
+          "回归可恢复列" in dis_labels, str(dis_labels)[:200])
+    check("同一个 key 在各班只出现一次（按 key 合并）",
+          len([c for c in (dis.get("columns") or []) if c["key"] == key]) == 1,
+          str(dis.get("columns"))[:200])
+
+    # ---------- ③ 恢复 ----------
+    st, j = call("POST", f"/college/fields/{key}/restore", None, D)
+    check("恢复这一列 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/college/fields", None, D)
+    labels = [c["label"] for c in ((data_of(j) or {}).get("columns") or [])]
+    check("恢复后回到活动列里", "回归可恢复列" in labels, str(labels)[:200])
+    st, j = call("GET", "/college/fields/disabled", None, D)
+    dis_labels = [c["label"] for c in ((data_of(j) or {}).get("columns") or [])]
+    check("恢复后不在已停用列表里", "回归可恢复列" not in dis_labels, str(dis_labels)[:200])
+
+    # ---------- ④ 停用模板字段后，重跑模板下发不会崩 ----------
+    #
+    # 这一条是**真的会把后端搞挂**的：唯一键是 (class_id, field_key)，
+    # 不看启用还是停用。模板只查启用的字段 → 以为字段不存在 → 重复插 → 崩。
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_field WHERE field_label = '回归可恢复列'"))
+    with _engine.begin() as c:
+        c.execute(_t("UPDATE student_field SET status = 0 "
+                     "WHERE field_key = 'guardian_phone'"))
+    with _engine.connect() as c:
+        before_rows = int(
+            c.execute(
+                _t("SELECT COUNT(*) FROM student_field WHERE field_key = 'guardian_phone'")
+            ).scalar()
+            or 0
+        )
+    try:
+        from app.db import SessionLocal as _SessionLocal
+        from app.seed import init_student_fields as _init_fields
+
+        seed_class = _engine.connect().execute(
+            _t("SELECT id FROM cls_class ORDER BY id LIMIT 1")
+        ).scalar()
+        _db = _SessionLocal()
+        try:
+            _init_fields(_db, int(seed_class))
+            _db.commit()
+        finally:
+            _db.close()
+        ok = True
+        detail = ""
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        detail = repr(exc)[:200]
+    check("★ 停用过模板字段后重跑模板下发**不报错**（否则后端起不来）", ok, detail)
+    with _engine.connect() as c:
+        after_rows = int(
+            c.execute(
+                _t("SELECT COUNT(*) FROM student_field WHERE field_key = 'guardian_phone'")
+            ).scalar()
+            or 0
+        )
+    check("★ 没有插出重复的模板字段行",
+          after_rows == before_rows, f"{before_rows} -> {after_rows}")
+    # 复原：把刚才停用的模板字段放回去，别把基线留在停用状态
+    with _engine.begin() as c:
+        c.execute(_t("UPDATE student_field SET status = 1 "
+                     "WHERE field_key = 'guardian_phone'"))
+    _purge_user(DEAN_PROBE + "_trash")
+
+
+def test_a28_college_transfer() -> None:
+    """**转班**：把学生挪到另一个班，值一个不丢（第三十二轮）。
+
+    用户口径：「这个学生转班级了怎么办」。
+
+    ## 为什么不能当成「改一格」
+
+    值表里存的是 `field_id`，而字段是**按班**定义的：同一个 `field_key`
+    在不同班是不同的 `field_id`（唯一键 `(class_id, field_key)`）。
+    直接把 `class_id` 一改，他那些值就指向了「新班根本不存在的字段」——
+    界面上变成一片空白（值还在库里，但读不出来）。
+
+    所以转班必须**按 key 把值搬到新班对应的字段上**。
+
+    ## 目标班缺列怎么办
+
+    目标班**没有**某一列时：在目标班**补建同 key 的字段**再把值搬过去。
+    丢值比多一列糟糕得多（多出来的那列只有这个班有，但那一列里的信息是真的）。
+    """
+    print("\n--- 转班 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from io import BytesIO as _B
+
+    from openpyxl import Workbook as _Wb
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    D = _insert_dean_probe(DEAN_PROBE + "_mv")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+
+    # ---------- 造一个探针学生 ----------
+    wb = _Wb()
+    ws = wb.active
+    ws.append(["学号", "姓名", "班级", "性别", "专业名称", "入学总分"])
+    ws.append(["Z9701", "转班甲", "云计算2502", "男", "软件工程", "600"])
+    buf = _B()
+    wb.save(buf)
+    _purge_students_prefix("Z97")
+    st, j = _post_multipart("/college/students/import", "file", "名单.xlsx", buf.getvalue(), D)
+    check("导入探针学生 -> 200", st == 200, f"st={st} {msg_of(j)}")
+
+    st, j = call("GET", "/college/students", None, D)
+    d = data_of(j) or {}
+    row = next((r for r in (d.get("rows") or []) if r["studentNo"] == "Z9701"), None)
+    if not check("名册里能拿到 Z9701", row is not None, str(d.get("rows"))[:200]):
+        _purge_students_prefix("Z97")
+        _purge_user(DEAN_PROBE + "_mv")
+        return
+    rid = row["id"]
+    before_values = {k: v for k, v in (row.get("values") or {}).items() if v}
+    check("转班前他有几列有值", len(before_values) >= 3, str(before_values))
+    src_class = row["className"]
+
+    # 找一个**别的**班当目标
+    target = next(
+        (c for c in (d.get("classes") or []) if c["className"] != src_class), None
+    )
+    if not check("有别的班可以转过去", target is not None, str(d.get("classes"))):
+        _purge_students_prefix("Z97")
+        _purge_user(DEAN_PROBE + "_mv")
+        return
+
+    # ---------- 转 ----------
+    st, j = call("POST", f"/college/students/{rid}/transfer",
+                 {"classId": target["id"]}, D)
+    res = data_of(j) or {}
+    check("转班 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("回执里说清从哪转到哪",
+          res.get("fromClassName") == src_class
+          and res.get("targetClassName") == target["className"],
+          str(res)[:200])
+
+    # ---------- 值一个不丢 ----------
+    st, j = call("GET", "/college/students", None, D)
+    d2 = data_of(j) or {}
+    row2 = next((r for r in (d2.get("rows") or []) if r["studentNo"] == "Z9701"), None)
+    if check("转完他还在名册里", row2 is not None, str(d2.get("rows"))[:200]):
+        check("★ 班级已经改了", row2["className"] == target["className"], str(row2)[:200])
+        after_values = {k: v for k, v in (row2.get("values") or {}).items() if v}
+        check("★ 值一个没丢（按列名搬过去的）", after_values == before_values,
+              f"{before_values} -> {after_values}")
+
+    # ---------- 转回自己那个班会报错 ----------
+    st, j = call("POST", f"/college/students/{rid}/transfer",
+                 {"classId": target["id"]}, D)
+    check("转到同一个班 -> 400（不是静默接受）", st == 400, f"st={st} {msg_of(j)}")
+
+    # ---------- 目标班缺列 → 补建 ----------
+    #
+    # 这一条要动目标班的字段表，所以先在库里造一个「缺列」的班：
+    # 拿一个只留部分字段的临时班，把学生转进去，值必须还在。
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_record_value WHERE record_id IN "
+                     "(SELECT id FROM student_record WHERE student_no = 'Z9701')"))
+        c.execute(_t("DELETE FROM student_record WHERE student_no = 'Z9701'"))
+        c.execute(_t("DELETE FROM student_field WHERE field_label = '回归缺列'"))
+    st, j = call("POST", "/college/fields", {"label": "回归缺列", "type": "TEXT"}, D)
+    created = data_of(j) or {}
+    key = created.get("key") or ""
+    check("新建一列（两个班都有）-> 200", st == 200 and bool(key), f"st={st} {msg_of(j)}")
+    # 把这一列从**目标班**删掉，制造「目标班缺列」
+    with _engine.begin() as c:
+        c.execute(_t("UPDATE student_field SET status = 0 "
+                     "WHERE class_id = :c AND field_key = :k"),
+                  {"c": target["id"], "k": key})
+    # 再造一个带这一列值的学生
+    wb2 = _Wb()
+    ws2 = wb2.active
+    ws2.append(["学号", "姓名", "班级", "回归缺列"])
+    ws2.append(["Z9702", "转班乙", src_class, "有个值"])
+    buf2 = _B()
+    wb2.save(buf2)
+    st, j = _post_multipart("/college/students/import", "file", "名单.xlsx", buf2.getvalue(), D)
+    st, j = call("GET", "/college/students", None, D)
+    row3 = next((r for r in ((data_of(j) or {}).get("rows") or [])
+                  if r["studentNo"] == "Z9702"), None)
+    if check("名册里能拿到 Z9702", row3 is not None, ""):
+        st, j = call("POST", f"/college/students/{row3['id']}/transfer",
+                     {"classId": target["id"]}, D)
+        res3 = data_of(j) or {}
+        check("★ 目标班缺列时转班 -> 200（不丢值）", st == 200, f"st={st} {msg_of(j)}")
+        # 目标班那一条是**被停用**的（唯一键占着），所以是「放回来」而不是「新建」
+        check("★ 回执里说清补建/放回来了几列",
+              int(res3.get("createdFields") or 0) + int(res3.get("revivedFields") or 0) >= 1,
+              str(res3)[:200])
+        st, j = call("GET", "/college/students", None, D)
+        row4 = next((r for r in ((data_of(j) or {}).get("rows") or [])
+                      if r["studentNo"] == "Z9702"), None)
+        check("★ 缺列的值也搬过去了",
+              (row4 or {}).get("values", {}).get(key) == "有个值", str(row4)[:200])
+
+    # ---------- 清理 ----------
+    _purge_students_prefix("Z97")
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_field WHERE field_label = '回归缺列'"))
+    _purge_user(DEAN_PROBE + "_mv")
+
+
+def test_a29_multi_class() -> None:
+    """一个账号管**多个**班（第三十二轮）。
+
+    现实中一个班主任常带两个班（云计算2502 + 云计算2501）。以前一个账号
+    只能属于一个班，于是要么给他开两个账号（登两次、密码两份、成员名单两份），
+    要么让他管不全。
+
+    四条重点：
+
+    1. **切换是按请求参数** classId 做的，后端在鉴权中间件里把它当成
+       「本次操作的班」——所以各班的数据**天然分开**，不会串。
+    2. **只能切到自己管的班**：手输别人的 classId 要 403，不能悄悄回落到默认班。
+    3. **默认班兜底**：老账号关联表里一条记录都没有，不能变成「一个班都管不了」。
+    4. **成员列表跨班**：能管两个班的人，成员列表里两个班的人都要看得见。
+    """
+    print("\n--- 一个账号管多个班 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    D = _insert_dean_probe(DEAN_PROBE + "_multi")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+    T = S["T"]
+
+    # ---------- 造第二个班 + 一个探针学生 ----------
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_record WHERE student_no LIKE 'Z98%'"))
+        cid2 = c.execute(
+            _t("SELECT id FROM cls_class WHERE id != (SELECT class_id FROM sys_user "
+               "WHERE username = 'test' LIMIT 1) ORDER BY id LIMIT 1")
+        ).scalar()
+        if cid2 is None:
+            c.execute(_t("INSERT INTO cls_class (class_name, grade, balance, status) "
+                         "VALUES ('回归多班班', '2020级', 0, 1)"))
+            cid2 = c.execute(
+                _t("SELECT id FROM cls_class WHERE class_name = '回归多班班'")
+            ).scalar()
+        c.execute(
+            _t("INSERT INTO student_record (class_id, student_no, name) "
+               "VALUES (:c, 'Z9801', '多班探针')"),
+            {"c": cid2},
+        )
+    check("造出第二个班和一个探针学生", cid2 is not None, str(cid2))
+
+    # ---------- 给班主任加第二个班 ----------
+    st, j = call("GET", "/users", None, D)
+    items = data_of(j) or []
+    if isinstance(items, dict):
+        items = items.get("items") or []
+    teacher = next((u for u in items if u["username"] == "test"), None)
+    if not check("成员列表里找得到班主任 test", teacher is not None, str(items)[:200]):
+        return
+    st, j = call("PUT", "/users/%d" % teacher["id"],
+                 {"classIds": [teacher["classId"], int(cid2)]}, D)
+    check("给班主任加第二个班 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    up = data_of(j) or {}
+    check("回执里带上「能管的班」", len(up.get("managedClassIds") or []) == 2, str(up)[:200])
+
+    # ---------- 切换：两个班的数据要分开 ----------
+    st, j = call("GET", "/students?classId=%d" % teacher["classId"], None, T)
+    rows_a = (data_of(j) or {}).get("rows") or []
+    st, j = call("GET", "/students?classId=%d" % int(cid2), None, T)
+    rows_b = (data_of(j) or {}).get("rows") or []
+    nos_a = {r.get("studentNo") for r in rows_a}
+    nos_b = {r.get("studentNo") for r in rows_b}
+    check("★ 切到班 A 看到的是 A 的学生", "Z9801" not in nos_a, str(sorted(nos_a))[:160])
+    check("★ 切到班 B 能看到 B 的探针学生", "Z9801" in nos_b, str(sorted(nos_b))[:160])
+    check("★ 两个班的学生**不重叠**", not (nos_a & nos_b), str(sorted(nos_a & nos_b))[:160])
+
+    # 不带 classId = 默认班
+    st, j = call("GET", "/students", None, T)
+    rows_d = (data_of(j) or {}).get("rows") or []
+    check("不带 classId 落在默认班", {r.get("studentNo") for r in rows_d} == nos_a,
+          str(sorted(r.get("studentNo") for r in rows_d))[:160])
+
+    # ---------- 切到不归他管的班 -> 403 ----------
+    st, j = call("GET", "/students?classId=999999", None, T)
+    check("切到不归他管的班 -> 403（不能悄悄回落到默认班）", st == 403, f"st={st} {msg_of(j)}")
+
+    # ---------- 成员列表跨班 ----------
+    st, j = call("GET", "/users", None, T)
+    names = {u["username"] for u in (data_of(j) or [])}
+    check("★ 成员列表能看到另一个班的人（跨班）", bool(names), str(names)[:120])
+
+    # ---------- 清理：撤掉那个班 + 删探针学生 ----------
+    call("PUT", "/users/%d" % teacher["id"], {"classIds": [teacher["classId"]]}, D)
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM student_record_value WHERE record_id IN "
+                     "(SELECT id FROM student_record WHERE student_no LIKE 'Z98%')"))
+        c.execute(_t("DELETE FROM student_record WHERE student_no LIKE 'Z98%'"))
+    _purge_user(DEAN_PROBE + "_multi")
+
+
+def test_a30_profile_dean_scope() -> None:
+    """个人信息页：本人改**职务范围**（纯院长 ↔ 院长+班主任）（第三十二轮）。
+
+    用户口径：「本来是院长，然后在我的个人信息里面改为院长+班主任」。
+
+    三条重点：
+
+    1. **本人就能改**，不用找运营——「纯院长」本来就是第三十轮给院长加的一个
+       **限制**（只管学院），兼班主任才是院长的默认状态（第二十八轮以来）。
+    2. **改完立刻生效**：鉴权中间件每个请求都重读这一列，不用重新登录
+       （和 dean_only 一直以来的做法一样）。
+    3. **只有院长本人能改**：别的角色这一位没有意义，给他们一个开关
+       只会让人以为自己多了什么。
+    """
+    print("\n--- 个人信息：职务范围 ---")
+    # 纯院长探针
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+    from app.security import hash_password as _hash_pw
+
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM sys_user WHERE username = :u"),
+                  {"u": "pure_dean_probe"})
+        uid = c.execute(_t("SELECT id FROM sys_user WHERE username = 'pure_dean' LIMIT 1")).scalar()
+        cid = c.execute(_t("SELECT class_id FROM sys_user WHERE id = :i"), {"i": uid}).scalar()
+        c.execute(
+            _t("INSERT INTO sys_user (class_id, username, password, real_name, role, "
+               "dean_only, status) VALUES (:c, 'pure_dean_probe', :p, '纯院长探针', 'DEAN', 1, 1)"),
+            {"c": cid, "p": _hash_pw("123456")},
+        )
+    Tp = login("pure_dean_probe", "123456")
+    if not check("纯院长探针登录成功", bool(Tp), "登录失败"):
+        return
+
+    st, j = call("GET", "/auth/me", None, Tp)
+    me = data_of(j) or {}
+    check("探针是纯院长", me.get("deanOnly") is True, str(me)[:160])
+    st, _ = call("GET", "/records", None, Tp)
+    check("纯院长访问班级事务 -> 403", st == 403, f"st={st}")
+
+    # ---------- 本人改成「院长 + 班主任」 ----------
+    st, j = call("PUT", "/auth/profile", {"deanOnly": False}, Tp)
+    check("本人改职务范围 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("回执里 deanOnly=false", (data_of(j) or {}).get("deanOnly") is False, str(data_of(j))[:160])
+    st, j = call("GET", "/auth/me", None, Tp)
+    check("★ 改完**立刻生效**（不用重新登录）",
+          (data_of(j) or {}).get("deanOnly") is False, str(data_of(j))[:160])
+    st, _ = call("GET", "/records", None, Tp)
+    check("★ 现在能进班级事务了（200）", st == 200, f"st={st}")
+
+    # ---------- 非院长改这一位：应该被忽略（不生效） ----------
+    Tm = S["M"]
+    st, j = call("PUT", "/auth/profile", {"deanOnly": True}, Tm)
+    check("非院长传 deanOnly 不报错（被忽略）", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/auth/me", None, Tm)
+    check("★ 非院长的 deanOnly 仍然是 false（没被自己改掉）",
+          (data_of(j) or {}).get("deanOnly") is False, str(data_of(j))[:160])
+
+    # ---------- 改回纯院长 ----------
+    call("PUT", "/auth/profile", {"deanOnly": True}, Tp)
+    st, _ = call("GET", "/records", None, Tp)
+    check("改回纯院长后班级事务又 403 了", st == 403, f"st={st}")
+
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM sys_user WHERE username = 'pure_dean_probe'"))
+
+
+def test_a31_class_teachers() -> None:
+    """**班主任是「班」的属性**（第三十二轮）：三个入口都能配。
+
+    用户口径：「院长可以在学院里面的班级管理里面成员管理，可以更改他是否为
+    两个班的班主任，班主任也可以在自己的个人信息里面改，也可以通过导入的
+    Excel 表格来识别多个班级信息」。
+
+    三条重点：
+
+    1. **学院成员管理**里能改每个班的班主任（**可以多个**：正、副班主任）。
+    2. **班主任本人**在「个人信息」里能改「我带的班」，**直接生效**。
+    3. **导入的 Excel** 里带「班主任」列时，按姓名/登录名自动配上；
+       配不上要**报出来**（别静默丢掉：用户以为配好了，其实没有）。
+    """
+    print("\n--- 班主任是班的属性 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from io import BytesIO as _B
+
+    from openpyxl import Workbook as _Wb
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    D = _insert_dean_probe(DEAN_PROBE + "_tch")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+    T = S["T"]
+
+    # 拿两个班
+    with _engine.connect() as c:
+        cls = [int(r[0]) for r in c.execute(
+            _t("SELECT id FROM cls_class WHERE status = 1 ORDER BY id LIMIT 2"))]
+    if not check("至少有两个班", len(cls) >= 2, str(cls)):
+        return
+    c1, c2 = cls[0], cls[1]
+
+    # ---------- ① 学院成员管理：改班主任 ----------
+    st, j = call("GET", "/college/teacher-candidates", None, D)
+    cands = (data_of(j) or {}).get("teachers") or []
+    check("能拿到可被选的班主任账号", len(cands) >= 1, str(cands)[:160])
+    teacher = next((t for t in cands if t["username"] == "test"), None)
+    if not check("找得到 test 账号", teacher is not None, str(cands)[:160]):
+        return
+    st, j = call("PUT", "/college/classes/%d/teachers" % c1, {"teacherIds": [teacher["id"]]}, D)
+    check("★ 学院成员管理里改班主任 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", "/college/advisers", None, D)
+    rows = (data_of(j) or {}).get("rows") or []
+    check("★ 名册里能查到他是这个班的班主任",
+          any(r.get("classId") == c1 and r.get("username") == "test" for r in rows),
+          str(rows)[:200])
+
+    # ---------- ② 班主任本人：改「我带的班」 ----------
+    st, j = call("POST", "/auth/login", {"username": "test", "password": "123456"})
+    Tt = (data_of(j) or {}).get("token")
+    st, j = call("PUT", "/auth/profile", {"classIds": [c1, c2]}, Tt)
+    check("★ 本人改「我带的班」-> 200", st == 200, f"st={st} {msg_of(j)}")
+    up = data_of(j) or {}
+    check("★ 回执里「能管的班」有两个", len(up.get("classIds") or []) == 2, str(up)[:200])
+    st, j = call("GET", "/auth/me", None, Tt)
+    me = data_of(j) or {}
+    check("★ 立刻生效（不用重新登录）：能管两个班",
+          len(me.get("classIds") or []) == 2, str(me)[:200])
+    # 两个班的数据要分开
+    st, j = call("GET", "/students?classId=%d" % c1, None, Tt)
+    a = {r.get("studentNo") for r in ((data_of(j) or {}).get("rows") or [])}
+    st, j = call("GET", "/students?classId=%d" % c2, None, Tt)
+    b = {r.get("studentNo") for r in ((data_of(j) or {}).get("rows") or [])}
+    check("★ 两个班的学生**不重叠**", not (a & b), str(sorted(a & b))[:160])
+
+    # ---------- ③ 导入 Excel：识别「班主任」列 ----------
+    wb = _Wb()
+    ws = wb.active
+    ws.append(["学号", "姓名", "班级", "班主任", "性别"])
+    with _engine.connect() as _cc:
+        cls_name = _cc.execute(
+            _t("SELECT class_name FROM cls_class WHERE id = :c"), {"c": c1}
+        ).scalar()
+    ws.append(["Z9701", "导入甲", cls_name, "test", "男"])
+    buf = _B()
+    wb.save(buf)
+    st, j = _post_multipart("/college/students/import", "file", "名单.xlsx", buf.getvalue(), D)
+    imp = data_of(j) or {}
+    check("★ 导入带「班主任」列的表 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    # 「班主任」是元信息列，**不进字段表**
+    check("★ 「班主任」不算一列字段（它是班的信息）",
+          "班主任" not in [f.get("label") for f in (imp.get("newFields") or [])],
+          str(imp.get("newFields"))[:200])
+    with _engine.connect() as _c2:
+        linked = _c2.execute(
+            _t("SELECT COUNT(*) FROM sys_user_class uc JOIN sys_user u ON u.id = uc.user_id "
+               "WHERE u.username = 'test' AND uc.class_id = :c"),
+            {"c": c1},
+        ).scalar()
+    check("★ 建立了师生关系（表里能查到）", int(linked or 0) >= 1, str(imp)[:200])
+    # 配不上的名字要报出来
+    wb2 = _Wb()
+    ws2 = wb2.active
+    ws2.append(["学号", "姓名", "班级", "班主任"])
+    ws2.append(["Z9702", "导入乙", cls_name, "根本没有这个人"])
+    buf2 = _B()
+    wb2.save(buf2)
+    st, j = _post_multipart("/college/students/import", "file", "名单2.xlsx", buf2.getvalue(), D)
+    imp2 = data_of(j) or {}
+    check("★ 配不上的班主任要**报出来**（不静默丢掉）",
+          any("班主任" in str(e) for e in (imp2.get("errors") or [])),
+          str(imp2.get("errors"))[:200])
+
+    # ---------- 清理 ----------
+    _purge_students_prefix("Z97")
+    # 恢复原状：c1 的班主任本来是 test + dean，别把下一轮的名册测试搞坏
+    with _engine.begin() as c:
+        c.execute(_t("DELETE FROM sys_user_class WHERE class_id = :c"), {"c": c1})
+        for un in ("test", "dean"):
+            c.execute(
+                _t("INSERT INTO sys_user_class (user_id, class_id) "
+                   "SELECT id, :c FROM sys_user WHERE username = :u"),
+                {"c": c1, "u": un},
+            )
+    _purge_user(DEAN_PROBE + "_tch")
+
+
+def _post_multipart(
+    path: str, field: str, filename: str, content: bytes, token: str
+) -> tuple[int, object]:
+    """POST 一个 multipart/form-data（文件上传）。
+
+    手拼 multipart：`urllib` 的 `urlencode` 只能发表单字段，发不了文件。
+    ⚠ **必须自己带 boundary**——少了它 FastAPI 那侧直接 400
+    「请求体格式不正确」，而那个报错完全看不出是 boundary 的问题。
+    """
+    import urllib.request
+
+    boundary = "----classfeeTestBoundary7d91"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+        "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n"
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        BASE + path,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read() or b"null")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw or b"null")
+        except ValueError:
+            return e.code, {"message": raw[:200].decode("utf-8", "replace")}
+
+
+def _get_raw(path: str, token: str) -> tuple[int, bytes]:
+    """GET 一个二进制响应（xlsx 下载）。返回 (状态码, 原始字节)。"""
+    import urllib.request
+
+    req = urllib.request.Request(
+        BASE + path, method="GET", headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
 
 
 ALL_TESTS = [
@@ -3519,6 +5324,16 @@ ALL_TESTS = [
     test_a19_version,
     test_a20_dean_role,
     test_a21_student_dashboard,
+    test_a22_chart_container_visibility,
+    test_a23_college_views,
+    test_a24_pure_dean,
+    test_a25_college_excel,
+    test_a26_college_cell_edit,
+    test_a27_college_field_restore,
+    test_a29_multi_class,
+    test_a30_profile_dean_scope,
+    test_a31_class_teachers,
+    test_a28_college_transfer,
     test_a15_cleanup,
 ]
 

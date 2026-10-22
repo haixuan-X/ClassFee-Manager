@@ -48,8 +48,14 @@ export function cssVar(name: string): string {
 export interface ChartColors {
   income: string
   expense: string
-  /** 主强调色：人数类图表（学生总览）的柱/线用它，和「收入绿」区分开 */
-  accent: string
+  /**
+   * 人数类图表的第二序列色（学生总览的「当月入校」柱）。
+   *
+   * ⚠ **不能用 `income` 代替**：`--chart-income` 和 `--color-accent` 是同一个
+   * 值 `#22c55e`，拿来做柱色的话「当月入校」和「累计在校」会画成同一种绿，
+   * 只能靠柱/线形状区分——那不是自明。蓝绿对撞才一眼分得开。
+   */
+  count: string
   slices: string[]
   axis: string
   splitLine: string
@@ -61,7 +67,7 @@ export function chartColors(): ChartColors {
   return {
     income: cssVar('--chart-income'),
     expense: cssVar('--chart-expense'),
-    accent: cssVar('--color-accent'),
+    count: cssVar('--chart-count'),
     slices: [1, 2, 3, 4, 5, 6].map((i) => cssVar(`--chart-slice-${i}`)),
     axis: cssVar('--color-muted-fg'),
     splitLine: cssVar('--color-border'),

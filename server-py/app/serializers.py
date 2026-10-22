@@ -25,11 +25,18 @@ def fmt_d(v: date | None) -> str | None:
     return v.strftime("%Y-%m-%d") if isinstance(v, date) else None
 
 
-def user_vo(u: SysUser, class_name: str | None) -> dict[str, Any]:
+def user_vo(
+    u: SysUser,
+    class_name: str | None,
+    managed_classes: list[tuple[int, str]] | None = None,
+) -> dict[str, Any]:
     # 函数内导入：`security` 在模块顶层导入过 `responses`，这里再顶层导入
     # serializers 就绕回去了。放函数内是因为它只在访客那条分支才用得上。
-    from .security import GUEST_ROLE, parse_guest_scopes
+    from .security import DEAN_ROLE, GUEST_ROLE, parse_guest_scopes
 
+    managed = managed_classes or [(u.class_id, class_name or "")]
+    managed_ids = [cid for cid, _ in managed]
+    managed_names = [name for _, name in managed]
     return {
         "id": u.id,
         "username": u.username,
@@ -39,8 +46,17 @@ def user_vo(u: SysUser, class_name: str | None) -> dict[str, Any]:
         # 所以前端登录完立刻就能按它过滤侧栏和路由，不必再发一次请求。
         # 非访客一律 null——「他看不见什么」这个问题对其他角色不存在。
         "guestScopes": parse_guest_scopes(u.guest_scopes) if u.role == GUEST_ROLE else None,
+        # 第三十轮：是不是纯院长。登录响应和 /auth/me 共用这一个序列化器，
+        # 前端登录完立刻就能按它决定侧栏给不给「账目」「班级」两组。
+        "deanOnly": u.role == DEAN_ROLE and bool(u.dean_only),
         "classId": u.class_id,
         "className": class_name,
+        # 第三十二轮：这个人**能管哪些班**。
+        #
+        # 一个班主任常带好几个班；前端靠这两个字段渲染「班级切换器」，
+        # 切换后所有请求都带上 `classId`（后端在鉴权中间件里校验它可不可管）。
+        "classIds": managed_ids or [u.class_id],
+        "classNames": managed_names or ([class_name] if class_name else []),
     }
 
 

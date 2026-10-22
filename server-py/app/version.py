@@ -66,7 +66,17 @@ def parse_version(raw: str = VERSION) -> tuple[int, int, int, str | None, str | 
 
 
 def version_info() -> dict:
-    """给 `GET /api/version` 用的结构。"""
+    """给 `GET /api/version` 用的结构。
+
+    ## 为什么这里还带一个「学院名」
+
+    这个端点实际上就是**应用信息**端点：前端在侧栏顶部要显示
+    「你这个人的管辖范围」——对院长来说是**学院**，不是某个班。
+    学院名是**部署时声明**的（`.env` 的 `CLASSFEE_COLLEGE_NAME`），
+    和应用名一样属于「这台机器跑的是什么」的常量，所以跟着这个端点走。
+    """
+    from .config import settings
+
     major, minor, patch, pre, build = parse_version()
     return {
         "appName": APP_NAME,
@@ -76,4 +86,6 @@ def version_info() -> dict:
         "patch": patch,
         "preRelease": pre,
         "build": build,
+        # 学院名（部署时声明）。没配置就是空串，前端退回写「学院」。
+        "collegeName": settings()["college_name"],
     }

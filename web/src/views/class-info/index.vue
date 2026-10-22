@@ -7,6 +7,7 @@ import { getErrorMessage } from '@/api/request'
 import { useModal } from '@/composables/useModal'
 import { useUserStore } from '@/stores/user'
 import type { ClassInfo } from '@/types'
+import { TEACHER_MIN_LEVEL, roleLevel } from '@/types'
 
 /**
  * 班级信息（M4）：全员可读；班级名称 / 年级 / 班主任 仅运营角色（ADMIN/MONITOR/TEACHER）可编辑，
@@ -21,7 +22,20 @@ import type { ClassInfo } from '@/types'
  */
 const userStore = useUserStore()
 const canWrite = computed(() => userStore.isStaff)
-const canEditHeadTeacher = computed(() => userStore.user?.role === 'TEACHER')
+/**
+ * 班主任姓名谁能改 —— **按等级**判，不按角色名。
+ *
+ * ⚠ 原先写的是 `role === 'TEACHER'`，而**后端** `class_service` 判的是
+ * `role_level(user.role) >= ROLE_LEVEL["TEACHER"]`。两端不一致的后果是
+ * 「按角色名」那端更严：院长（等级 4，比班主任高）**看不到输入框**，
+ * 改不了自己班级的班主任姓名——比他的班主任身份还低。
+ *
+ * 这正是「既是院长又是班主任」那类场景的老毛病：写死角色名时，
+ * 更高的等级反而更受限。
+ */
+const canEditHeadTeacher = computed(
+  () => roleLevel(userStore.user?.role) >= TEACHER_MIN_LEVEL,
+)
 
 const loading = ref(true)
 const loadError = ref(false)

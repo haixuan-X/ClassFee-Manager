@@ -16,6 +16,19 @@ service.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  // 第三十二轮：**当前班**。
+  //
+  // 一个班主任可能管好几个班（云计算2502 + 云计算2501），侧栏顶上能切。
+  // 切完之后所有请求都带上 `classId`，后端在鉴权中间件里把它当成
+  // 「本次操作的是哪个班」——所以页面里每个接口都不用自己记这件事。
+  //
+  // ⚠ **学院口径的接口不带**：学院名册、仪表盘总览那些是全校的，
+  // 带上 classId 反而会把口径搞乱（后端会把它当成「当前班」）。
+  const store = useUserStore()
+  const cid = store.currentClassId
+  if (cid && !config.url?.includes('/college/') && !config.url?.includes('/dashboard/students')) {
+    config.params = { ...(config.params ?? {}), classId: cid }
+  }
   return config
 })
 
@@ -75,3 +88,11 @@ export function getErrorMessage(error: unknown, fallback = '操作失败'): stri
 }
 
 export default service
+
+/**
+ * axios 实例本身。
+ *
+ * 给**二进制下载**用：xlsx 响应没有 `{code,message,data}` 信封，
+ * 走 `request()` 会被误判成失败（`data.code` 是 undefined）。
+ */
+export { service }

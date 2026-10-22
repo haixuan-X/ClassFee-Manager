@@ -12,6 +12,16 @@ DEFAULT_JWT_SECRET = "classfee-m1-dev-secret-please-change-me-0123456789"
 DEFAULT_DB_URL = "mysql+pymysql://localhost:3306/classfee?charset=utf8mb4"
 
 
+#: 布尔型环境变量的「真」值写法。`.env` 里人们爱写 1/true/yes/on，
+#: 也有人写「是」——都认。但空串和乱七八糟的值一律当**假**，
+#: 宁可按默认走也不要因为一个错别字把权限模式切了。
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _truthy(raw: str) -> bool:
+    return raw.strip().lower() in _TRUTHY
+
+
 def _normalize_db_url(url: str) -> str:
     """统一成 SQLAlchemy 原生连接串。
 
@@ -57,6 +67,28 @@ def settings() -> dict:
         "teacher_role": (
             os.environ.get("CLASSFEE_TEACHER_ROLE", "TEACHER").strip().upper() or "TEACHER"
         ),
+        # 第三十轮：**这个账号是不是纯院长**。
+        #
+        # 院长有两种：① 兼班主任（本班的账目/任务/成员他都管）；
+        # ② 只是院长（纯院级管理员，只管学院那一层，班级事务一概不参与）。
+        # 部署时在这里声明——安装服务的人最清楚这个账号要干什么。
+        #
+        # 只在 `CLASSFEE_TEACHER_ROLE=DEAN` 时才有意义（别的角色忽略它）。
+        # 取值：1/true/yes/on = 纯院长；0/false/no/off/空 = 兼班主任（默认）。
+        #
+        # ⚠ 默认 0 = 与第二十八轮的行为**完全一致**，存量部署升级后不受影响。
+        "dean_only": _truthy(
+            os.environ.get("CLASSFEE_DEAN_ONLY", "").strip().lower()
+        ),
+        # 学院名称（第三十二轮）。
+        #
+        # 显示在侧栏顶部：**院长的权限范围是「学院」而不是某个班**，
+        # 所以顶头那行不能只写班级名。兼班主任的院长显示
+        # 「学院名 班级名」（例如「智能汽车学院 云计算2502」），
+        # 纯院长只显示「学院名」。
+        #
+        # 留空 = 界面上退回写「学院」两个字。
+        "college_name": os.environ.get("CLASSFEE_COLLEGE_NAME", "").strip(),
         # 空库建班信息：旧 CLASSFEE_INIT_CLASS_* 仍兼容（第九轮改名，新名优先）
         "class_name": os.environ.get("CLASSFEE_CLASS_NAME")
         or os.environ.get("CLASSFEE_INIT_CLASS_NAME", "计科2201班"),

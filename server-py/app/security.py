@@ -31,6 +31,13 @@ class LoginUser:
     username: str
     role: str  # MEMBER(普通成员) / GUEST(访客·只读) / ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任) / DEAN(院长·系统管理员)
     class_id: int
+    # 第三十轮：**只有 DEAN 用得上**。1 = 纯院长（只管学院，不参与班级事务）。
+    #
+    # ⚠ 它**不进 JWT**：JWT 是无状态的，签发后就固定了。而这个标志要能
+    # **即时生效**（把一个人从「兼班主任」改成「纯院长」后立刻生效），
+    # 靠的是鉴权中间件里那次本来就有的主键查询（见 `_account_active`）——
+    # 和 `status`（停用）、`guest_scopes`（访客范围）同一条路子。
+    dean_only: bool = False
 
 
 # ---------------- 密码 ----------------
@@ -149,6 +156,13 @@ GUEST_SCOPE_KEYS: tuple[str, ...] = ("DASHBOARD", "RECORDS", "STUDENTS", "TASKS"
 #: 访客角色名。刻意提成常量：这个字面量现在同时出现在中间件守卫、scope 解析
 #: 和 user_service 三处，写错一个字母就会变成「访客绕过范围检查」而没有任何报错。
 GUEST_ROLE = "GUEST"
+
+#: 院长角色名（第三十轮起被中间件直接引用）。
+#:
+#: 提成常量和 `GUEST_ROLE` 同一个理由：这个字面量现在出现在等级表、
+#: 访客判定、纯院长判定多处，写错一个字母就是「某道权限闸门整体失效」，
+#: 而且**不报错**。
+DEAN_ROLE = "DEAN"
 
 #: `required_guest_scope` 的哨兵值：**访客一律看不到**，不管勾了什么。
 #:
@@ -365,8 +379,51 @@ _STAFF_ROUTES: list[tuple[str, str]] = [
 _STAFF_COMPILED = [(m, re.compile(p)) for m, p in _STAFF_ROUTES]
 
 
-def _account_active(user_id: int) -> tuple[bool, str | None]:
-    """(账号是否仍可登录, 访客可见范围原文)。
+# ==================== 纯院长（第三十轮） ====================
+#
+# 院长有两种：
+#   ① **兼班主任**：本班的账目、任务、成员、班级信息他都管（第二十八轮以来的行为）
+#   ② **纯院长**：只管**学院**这一层，班级事务一概不参与
+#
+# 纯院长的能力 = 学院学生名册 + 班主任名册 + 学院任务 + 学生情况总览 + 自己的个人信息。
+# 班级那一套（记账、缴费、批次、类别、班级任务、班级信息、班级学生信息、班级账号）
+# 归班主任和班委。
+#
+# ## 为什么用**白名单**而不是黑名单
+#
+# 白名单的默认方向是「关」：将来加了新接口而忘了把它加进白名单，纯院长就访问不到
+# （症状是「页面没数据」，可发现、可补）。反过来若用黑名单，漏一个就是**静默放行**
+# （不可发现）。权限边界宁可严一档。
+#
+# 同样的道理在访客范围那道闸门上已经吃过亏：写成「没命中 = 不受限 = 放行」之后，
+# 访客侧栏立刻冒出收入登记、成员管理，而他真正该看、也确实勾了的仪表盘反被限掉。
+
+#: 纯院长**可以**访问的接口（方法 + 路径正则）。
+#:
+#: - `/api/auth/**`：登录、/me、改自己的密码与资料——那是他自己的账号
+#: - `/api/college/**`：学院三块（学生名册 / 班主任名册 / 学院任务）
+#: - `/api/dashboard/students`：学生情况总览（学院级看板）
+#:
+#: 刻意**不包含** `/api/dashboard/summary|trend|category-pie`：那是班级账目总览的
+#: 数据源。纯院长没有班级账目可言——侧栏里也不给他「账目」这一组。
+_PURE_DEAN_ALLOWED: list[tuple[str, str]] = [
+    ("GET", r"^/api/auth/"),
+    ("POST", r"^/api/auth/"),
+    ("PUT", r"^/api/auth/"),
+    ("GET", r"^/api/college/"),
+    ("GET", r"^/api/dashboard/students$"),
+]
+
+_PURE_DEAN_COMPILED = [(m, re.compile(p)) for m, p in _PURE_DEAN_ALLOWED]
+
+
+def pure_dean_allowed(method: str, path: str) -> bool:
+    """纯院长能不能碰这个接口。"""
+    return any(m == method and p.match(path) for m, p in _PURE_DEAN_COMPILED)
+
+
+def _account_active(user_id: int) -> tuple[bool, str | None, bool]:
+    """(账号是否仍可登录, 访客可见范围原文, 是否纯院长)。
 
     JWT 是无状态的，只带 id/role/username/class_id，不含 status，也不含 token 版本号，
     所以「停用账号」「删账号」都无法让已签发的令牌立刻失效。这里在鉴权中间件里
@@ -376,6 +433,9 @@ def _account_active(user_id: int) -> tuple[bool, str | None]:
     **不用等对方重新登录**就生效——这正是「创建时选、编辑时也能改」的前提。
     塞进 JWT 做不到这一点（令牌一签发就固定，除非再引入 token 版本号，
     那会让「改密码」也连带把别处踢下线，代价反而更大）。
+
+    第三十轮再顺路把 `dean_only` 带出来：把一个院长从「兼班主任」改成
+    「纯院长」后应当**立刻生效**，同样不能等令牌过期。
 
     代价是每个 /api 请求多一次主键查询（走聚簇索引，量级微秒级）；换来的是
     「停用」这个管理动作真的有意义。查库失败时**放行**（fail-open）：
@@ -389,26 +449,95 @@ def _account_active(user_id: int) -> tuple[bool, str | None]:
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                text("SELECT status, guest_scopes FROM sys_user WHERE id = :i"),
+                text("SELECT status, guest_scopes, dean_only FROM sys_user WHERE id = :i"),
                 {"i": user_id},
             ).first()
     except Exception:  # noqa: BLE001
-        return True, None
+        return True, None, False
     if row is None:
-        return False, None
-    return row[0] == 1, row[1]
+        return False, None, False
+    return row[0] == 1, row[1], bool(row[2])
 
 
-async def _account_active_async(user_id: int) -> tuple[bool, str | None]:
+async def _account_active_async(user_id: int) -> tuple[bool, str | None, bool]:
     """`_account_active` 的线程池包装。
 
     鉴权中间件是 **async** 的，直接在里面跑同步的 pymysql 查询会阻塞整个事件循环
     （一个慢查询会卡住所有并发请求）。丢给 anyio 的线程池执行，与其它同步
     endpoint 走的是同一套机制。
     """
+    return await _anyio_thread(_account_active, user_id)
+
+
+async def _anyio_thread(fn, *args):
+    """在线程池里跑一个同步函数（中间件里查库不能阻塞事件循环）。"""
     import anyio.to_thread
 
-    return await anyio.to_thread.run_sync(_account_active, user_id)
+    return await anyio.to_thread.run_sync(fn, *args)
+
+
+def managed_class_ids(user_id: int, default_class_id: int, role: str) -> list[int]:
+    """这个账号**能管的班**（第三十二轮）。
+
+    - **院长 = 所有启用班**。他是校级的（管的就是全校），
+      不然会出现死锁：谁都没法给一个老师加班——因为**只能给自己
+      已经能管的班加**，而没有人的默认班是别人要加的那个班。
+    - **其他人 = 默认班 ∪ `sys_user_class` 里关联的班**。
+
+    ⚠ **默认班永远在里面**：关联表是后加的，老账号一条关联记录都没有——
+    要是只看关联表，所有存量账号都会变成「一个班都管不了」。
+    """
+    from sqlalchemy import text
+
+    from .db import engine
+
+    if role == DEAN_ROLE:
+        try:
+            with engine.connect() as conn:
+                return [
+                    int(cid)
+                    for (cid,) in conn.execute(
+                        text("SELECT id FROM cls_class WHERE status = 1 ORDER BY id")
+                    )
+                ]
+        except Exception:  # noqa: BLE001
+            return [default_class_id]
+
+    ids: list[int] = [default_class_id]
+    try:
+        with engine.connect() as conn:
+            for (cid,) in conn.execute(
+                text("SELECT class_id FROM sys_user_class WHERE user_id = :i"),
+                {"i": user_id},
+            ):
+                c = int(cid)
+                if c not in ids:
+                    ids.append(c)
+    except Exception:  # noqa: BLE001
+        # 查不到就按「只管默认班」处理：宁可少一个班，也不能让他多看一个班的账
+        pass
+    return ids
+
+
+def resolve_current_class(
+    user: LoginUser, raw: str | None, managed: list[int]
+) -> int:
+    """本次请求的「当前班」。
+
+    - 没带 `classId` → 默认班（`user.class_id`）
+    - 带了且在「他能管的班」里 → 那个班
+    - 带了但**不在** → 拒绝（403）。这是权限边界，不能悄悄回落到默认班：
+      那会让「手输别人的 classId」看起来像生效了，其实数据还是自己班的。
+    """
+    if raw is None or str(raw).strip() == "":
+        return user.class_id
+    try:
+        cid = int(raw)
+    except (TypeError, ValueError):
+        raise BizException.bad_request("班级参数不对")
+    if cid not in managed:
+        raise BizException.forbidden("你不管理这个班")
+    return cid
 
 
 def require_ownership(actor_id: int, created_by: int | None, *, what: str) -> None:
@@ -475,9 +604,40 @@ def install_auth_middleware(app: FastAPI) -> None:
                 # 这里补一次主键查询（线程池执行，不阻塞事件循环），停用/删除即刻生效。
                 # 第二十六轮：同一次查询把访客的可见范围也带出来（见 `_account_active`），
                 # 不额外加查询——老师改完范围访客立刻生效，不用等重新登录。
-                active, guest_scopes_raw = await _account_active_async(user.id)
+                active, guest_scopes_raw, dean_only = await _account_active_async(user.id)
                 if not active:
                     return fail(403, "账号已被停用，请联系班主任", None, status=403)
+                # 把「是否纯院长」贴到本次请求的用户对象上。
+                # 它不进 JWT（JWT 签发后就固定了，而这个标志要能即时生效），
+                # 所以每次请求都按主键查一次——和 status / guest_scopes 同一条路子。
+                user.dean_only = dean_only
+                # 第三十二轮：**当前班**。
+                #
+                # 一个班主任可能管好几个班（云计算2502 + 云计算2501）。
+                # 请求里带 `classId` 就切到那个班——只允许切到**他能管的班**。
+                #
+                # ⚠ 这一步把 `user.class_id` 改成「本次请求操作的班」，
+                # 后面所有 service 用的都是它——所以那 80 多处 `user.class_id`
+                # 一行都不用改，语义自动跟着当前班走。
+                managed = await _anyio_thread(
+                    managed_class_ids, user.id, user.class_id, user.role
+                )
+                try:
+                    user.class_id = resolve_current_class(
+                        user, request.query_params.get("classId"), managed
+                    )
+                except BizException as e:
+                    return fail(e.code, e.message, None, status=e.status)
+                # 纯院长（第三十轮）：只管学院，班级事务一概不参与。
+                # 后端硬拦——前端隐藏的只是**入口**，手输 URL 或直接调接口都能绕过去。
+                if user.role == DEAN_ROLE and dean_only:
+                    if not pure_dean_allowed(request.method, path):
+                        return fail(
+                            403,
+                            "纯院长只负责学院事务；班级事务请由班主任（或班委）处理",
+                            None,
+                            status=403,
+                        )
                 # 访客范围：后端硬拦。前端隐藏的只是**入口**，手输 URL 或直接调接口
                 # 都能绕过去——权限必须在服务端收口。
                 if user.role == GUEST_ROLE:

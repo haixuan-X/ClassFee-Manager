@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchMe } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
@@ -31,6 +31,26 @@ onMounted(async () => {
     }
   }
 })
+
+/**
+ * **跨标签页同步**：别的标签页改了账号（比如在「个人信息」里把职务范围
+ * 从「纯院长」改成「院长+班主任」，或者运营在「成员管理」里改了「能管的班」），
+ * 这边的侧栏还按**旧状态**渲染——用户会看到「我明明改过了，怎么这边还是老样子」。
+ *
+ * `storage` 事件只在**其它标签页**改 localStorage 时触发（本标签页改不会），
+ * 正合用：自己改的地方自己已经更新了，其它标签页才需要跟着拉。
+ */
+function onStorage(e: StorageEvent) {
+  if (e.key !== 'classfee.user' || !userStore.isLogin) return
+  fetchMe()
+    .then((u) => userStore.setUser(u))
+    .catch(() => {
+      /* 401 交给拦截器统一处理 */
+    })
+}
+
+onMounted(() => window.addEventListener('storage', onStorage))
+onBeforeUnmount(() => window.removeEventListener('storage', onStorage))
 
 function onCommand(command: string | number | object) {
   if (command === 'password') {

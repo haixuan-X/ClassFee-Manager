@@ -46,12 +46,40 @@ class SysUser(Base):
     # 不需要任何数据迁移就保持原样；而且"一项都没勾"在前端会被归一成全开，
     # 所以库里永远不会出现空数组——空数组和"全开"就没法混为一谈了。
     guest_scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 第三十轮：**只有 DEAN 用得上**。1 = 纯院长。
+    #
+    # 院长有两种：① 兼班主任（本班的账目、任务、成员他都管）；
+    # ② 只是院长（纯院级管理员，只管学院那一层：全校学生名册、班主任名册、
+    # 学院任务、学生情况总览），班级事务一概不参与。
+    #
+    # 为什么不用 role 表达：`sys_user.role` 是单值 ENUM，一个账号只能有一个角色，
+    # 表达不了「院长」和「兼班主任」两件事。硬塞成新角色（DEAN_ONLY）会让等级表
+    # 多一档、且和「班主任」这个正交维度搅在一起。
+    #
+    # 0 = 兼班主任（默认，与第二十八轮的行为完全一致，存量账号不用动）。
+    dean_only: Mapped[int] = mapped_column(Integer, default=0)
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[int] = mapped_column(Integer, default=1)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
     )
+
+
+class SysUserClass(Base):
+    """账号**可管理的班级**（第三十二轮，多对多）。
+
+    现实中一个班主任常带两个班。`sys_user.class_id` 只能记一个，
+    于是要么给他开两个账号（要登两次、密码两份、成员名单两份），
+    要么让他管不全。这张表就是「一个账号管哪些班」的正解。
+
+    `sys_user.class_id` 保留 = **默认班**（登录后先落在哪个班）。
+    """
+
+    __tablename__ = "sys_user_class"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    class_id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
 
 class FeeCategory(Base):
@@ -274,6 +302,14 @@ class ClsTask(Base):
     # 任务发出去后同学未必会专门去班级任务页翻，置顶是唯一能自动冒出来的入口。
     # 只有发布人能改（和改标题、关闭一样），因为置顶是把全班人的仪表盘占了。
     pinned: Mapped[int] = mapped_column(Integer, default=0)
+    # 第三十二轮：**这条任务是「本班」的还是「全学院」的**。
+    #
+    # - `CLASS`（默认）：班主任/班长发给自己班的，**同学**应答。
+    # - `COLLEGE`：院长发到**全学院**的，**各班班主任**应答
+    #   （「各班统计一下本班返校情况，交上来」）。
+    #
+    # DEFAULT 'CLASS' = 存量任务全是班内任务，升级后行为一行都不用改。
+    scope: Mapped[str] = mapped_column(String(8), default="CLASS")
     created_by: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")

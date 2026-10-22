@@ -50,6 +50,23 @@ const GUEST_PAGE_SCOPE: Record<string, GuestScope> = {
   'student-info': 'STUDENTS',
   tasks: 'TASKS',
 }
+
+/**
+ * 纯院长（第三十轮）能进的页面。
+ *
+ * 纯院长只管学院，班级事务一概不参与。侧栏里不给他「账目」「班级」两组，
+ * 这里再堵上「手输 URL」这一路——两条腿都要走。
+ *
+ * ⚠ 与后端 `security._PURE_DEAN_ALLOWED` 是**同一个口径**的两端：
+ * 后端按路径前缀放行，这里按路由名放行。改任何一边都要看另一边。
+ */
+const COLLEGE_FREE_PATHS = new Set([
+  'dashboard',
+  'college-students',
+  'college-advisers',
+  'college-tasks',
+  'profile',
+])
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
@@ -147,6 +164,33 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '班级信息' },
       },
       {
+        // 学院（第三十轮）：**仅院长**。
+        // 学院 = 全部班级的聚合视图：跨班级的学生名册、各班班主任名册、
+        // 跨班级的任务一览。放在「总览」和「账目」之间的「学院」分组里，
+        // 「班级管理」和「任务」是可展开/收起的抽拉式子分组。
+        //
+        // ⚠ meta.roles 只是**入口层**的闸门，真正的边界在后端
+        // （`require_min_level(user, "DEAN", ...)` → 403）。两条腿都要走：
+        // 只做后端，班主任会看到一排点进去就报「无权」的入口；
+        // 只做前端，手输 URL 就穿透了。
+        path: 'college/students',
+        name: 'college-students',
+        component: () => import('@/views/college/students/index.vue'),
+        meta: { title: '学院学生信息', roles: ['DEAN'] },
+      },
+      {
+        path: 'college/advisers',
+        name: 'college-advisers',
+        component: () => import('@/views/college/advisers/index.vue'),
+        meta: { title: '班主任名册', roles: ['DEAN'] },
+      },
+      {
+        path: 'college/tasks',
+        name: 'college-tasks',
+        component: () => import('@/views/college/tasks/index.vue'),
+        meta: { title: '学院任务', roles: ['DEAN'] },
+      },
+      {
         // 个人信息：全员可访问（普通成员也能改自己的姓名/学号/手机号）。
         // 不声明 meta.roles = 任何登录角色都能进；后端 /auth/profile 同样不进 _STAFF_ROUTES。
         path: 'profile',
@@ -204,6 +248,14 @@ router.beforeEach(async (to) => {
   }
   if (roles && userStore.user && !roles.includes(userStore.user.role)) {
     return { path: '/dashboard' }
+  }
+  // 纯院长（第三十轮）：不参与班级事务，班级那几个页面连入口都不给。
+  // 后端也会 403（`security` 中间件的纯院长白名单），这里是把「手输 URL」
+  // 这一路也堵上——两条腿都要走。
+  if (userStore.user?.role === 'DEAN' && userStore.user.deanOnly === true) {
+    if (!COLLEGE_FREE_PATHS.has(String(to.name ?? ''))) {
+      return { path: '/dashboard' }
+    }
   }
   // 访客范围（第二十六轮）：meta.roles 拦不住「不设 roles 的全员可读页」
   // （学生信息、班级任务、班级信息），所以对 GUEST 按**他自己账号的范围**判断。

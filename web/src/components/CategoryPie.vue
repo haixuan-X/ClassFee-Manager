@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echarts, { chartColors, cssVar, prefersReducedMotion, type ECOption } from '@/utils/echarts'
 import type { ECharts } from 'echarts/core'
 import type { PieItem } from '@/types'
@@ -88,14 +88,45 @@ function resize() {
   chart?.resize()
 }
 
-onMounted(() => {
-  if (!el.value) return
+/**
+ * 需要时创建 ECharts 实例（幂等）。
+ *
+ * ⚠ 为什么不能只写在 `onMounted` 里：图表容器用 `v-if`（有数据才存在），
+ * 组件挂载那一刻数据还没到，容器**根本不存在**，`el.value` 是 null。
+ * 而 `v-if` 从 false 变 true 时组件**不会重新挂载**，`onMounted` 不会再跑——
+ * 所以建实例必须做成幂等的，两处都调，否则图表永远画不出来。
+ *
+ * 另一头：容器用 `v-show`（隐藏但存在）时，ECharts 在 `display:none`
+ * 的容器上 init 量到的宽度是 0，画布会退化成 100px 挤在左边
+ * （实测复现），且 `resize()` 救不回来——ECharts 不会重新量一个隐藏元素的尺寸。
+ * 所以容器必须是 `v-if`：有数据才存在，挂载那一刻就是可见且有真实宽度的。
+ */
+function ensureChart() {
+  if (chart || !el.value) return
   chart = echarts.init(el.value)
-  render()
   window.addEventListener('resize', resize)
+  render()
+}
+
+onMounted(() => {
+  ensureChart()
 })
 
-watch(() => props.items, render, { deep: true })
+/**
+ * 数据到达后重画。
+ *
+ * `flush: 'post'`：在 DOM 更新之后再跑——`v-if` 刚创建出来的容器，
+ * 早于 DOM 更新执行是拿不到 ref 的。
+ */
+watch(
+  () => props.items,
+  async () => {
+    await nextTick()
+    ensureChart()
+    render()
+  },
+  { deep: true, flush: 'post' },
+)
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resize)
@@ -106,8 +137,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
+    <!-- v-if 而非 v-show：容器必须在**可见时**才存在，理由见 ensureChart 的注释 -->
     <div
-      v-show="hasData"
+      v-if="hasData"
       ref="el"
       class="chart"
       role="img"

@@ -43,6 +43,11 @@
   --chart-income: #22c55e;
   --chart-expense: #ef4444;
   --chart-balance: #2563eb;
+  /* 人数类图表的第二序列色（第二十九轮「学生情况总览」）。
+     ⚠ 不能复用 `--chart-income`：它和 `--color-accent` 是**同一个值**，
+     拿来做柱状色会让「当月入校」和「累计在校」画成同一种绿，
+     只能靠形状区分——那不是自明。蓝/绿对撞，一眼分得开。 */
+  --chart-count: #2563eb;
   --chart-slice-1: #2563eb;
   --chart-slice-2: #22c55e;
   --chart-slice-3: #f59e0b;

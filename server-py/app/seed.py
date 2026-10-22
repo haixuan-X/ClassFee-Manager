@@ -14,13 +14,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, or_
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import SessionLocal, engine
-from .models import ClsClass, FeeCategory, StudentField, SysUser
+from .models import ClsClass, FeeCategory, StudentField, SysUser, SysUserClass
 from .security import hash_password
 
 log = logging.getLogger("classfee")
@@ -169,14 +169,18 @@ def _init_teacher_account(db: Session, cfg: dict, class_id: int) -> None:
         real_name=cfg["teacher_name"] or username,
         student_no=None,
         role=role,
+        # 第三十轮：部署时声明「这个院长是不是纯院长」。
+        # 只在 role=DEAN 时才有意义；别的角色一律 0（不留死数据）。
+        dean_only=1 if (role == "DEAN" and cfg["dean_only"]) else 0,
         status=1,
     )
     db.add(account)
     # 只记用户名不记口令：口令以部署配置为准，且日志不该留明文密码
     log.warning(
-        "已按部署配置创建班主任账号：%s（role=%s）——首次登录后请立即在「个人中心」修改密码",
+        "已按部署配置创建班主任账号：%s（role=%s%s）——首次登录后请立即在「个人中心」修改密码",
         username,
         role,
+        "，纯院长：只管学院事务" if cfg["dean_only"] and role == "DEAN" else "",
     )
 
 
@@ -295,6 +299,14 @@ def add_audit_columns() -> None:
         # NULL = 全部可见，正好等于这批账号升级前后的行为，不用改任何存量值。
         ("sys_user", "guest_scopes", "TEXT NULL "
                                      "COMMENT '仅访客用：可见范围 JSON 数组；NULL=全部'"),
+        # 第三十轮：`sys_user.dean_only` —— 1 = 纯院长（只管学院，不参与班级事务）。
+        # DEFAULT 0 = 兼班主任，与第二十八轮的行为完全一致，存量账号一行都不用改。
+        ("sys_user", "dean_only", "TINYINT(1) NOT NULL DEFAULT 0 "
+                                  "COMMENT '仅院长用：1=纯院长（只管学院，不参与班级事务）'"),
+        # 第三十二轮：`cls_task.scope` —— 这条任务是**班内**的还是**全学院**的。
+        # DEFAULT 'CLASS' = 存量任务全是班内任务，行为一行都不用改。
+        ("cls_task", "scope", "VARCHAR(8) NOT NULL DEFAULT 'CLASS' "
+                             "COMMENT 'CLASS=本班任务；COLLEGE=学院任务（全学院可见，班主任应答）'"),
     ]
     added: list[str] = []
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
@@ -431,6 +443,14 @@ def init_student_fields(db: Session, class_id: int) -> int:
 
     已有的字段一律不动——班主任/班长可能改过标签或停用过字段，
     启动时被模板覆盖回去是不可接受的。
+
+    ⚠ **判存在时不能只看 `status=1`**。
+    唯一键是 `(class_id, field_key)`，**不管启用还是停用**都占着这个键。
+    之前只查启用的字段，于是「停用过一个模板字段」之后启动会：
+    模板认为这个字段不存在 → 重新插一条 → 撞唯一键 → IntegrityError
+    → **整个后端起不来**（服务直接退出，页面全挂）。
+    现在按**全部状态**判存在：停用的字段不再被模板重新启用（那是对用户
+    操作的覆盖），但也绝不会去插重复行。
     """
     class_ids = [class_id]
     for (cid,) in db.execute(select(ClsClass.id).where(ClsClass.id != class_id)):
@@ -441,9 +461,7 @@ def init_student_fields(db: Session, class_id: int) -> int:
         existing = {
             k
             for (k,) in db.execute(
-                select(StudentField.field_key).where(
-                    StudentField.class_id == cid, StudentField.status == 1
-                )
+                select(StudentField.field_key).where(StudentField.class_id == cid)
             )
         }
         todo = [f for f in TEMPLATE_FIELDS if f[0] not in existing]
@@ -465,10 +483,51 @@ def init_student_fields(db: Session, class_id: int) -> int:
     return added
 
 
+def backfill_user_classes() -> int:
+    """把每个账号的**默认班**写进 sys_user_class（第三十二轮）。
+
+    关联表是新加的，存量账号一条记录都没有。虽然后端查「可管理的班」时
+    会把 sys_user.class_id 兜底进去（老账号不会突然变成「一个班都管不了」），
+    但**回填**能让「可管理的班级」在界面上一眼看到全，不用去猜默认班算不算。
+
+    幂等：先查再插。
+    """
+    with SessionLocal() as db:
+        with db.begin():
+            # 只回填**运营角色**（班主任 / 生活委员 / 班长 / 兼班主任的院长）。
+            #
+            # ⚠ 普通同学和访客**不是班主任**——把他们的默认班也写进关联表，
+            # 名册上就会变成「这个班的班主任是全班同学」（实测过，很怪）。
+            rows = db.execute(
+                select(SysUser.id, SysUser.class_id).where(
+                    SysUser.status == 1,
+                    or_(
+                        SysUser.role == "TEACHER",
+                        (SysUser.role == "DEAN") & (SysUser.dean_only == 0),
+                    ),
+                )
+            ).all()
+            added = 0
+            for uid, cid in rows:
+                exists = db.scalar(
+                    select(SysUserClass.user_id).where(
+                        SysUserClass.user_id == uid, SysUserClass.class_id == cid
+                    )
+                )
+                if exists is None:
+                    db.add(SysUserClass(user_id=int(uid), class_id=int(cid)))
+                    added += 1
+            db.flush()
+    if added:
+        log.info("已回填 %d 个账号的默认班到「可管理班级」", added)
+    return added
+
+
 def bootstrap() -> None:
     run_schema()
     migrate_role_enum()
     add_audit_columns()
     backfill_payable_roster()
+    backfill_user_classes()
     # 基础数据（班级/类别）总是幂等补齐；班主任账号按部署配置声明（存在即跳过）
     init_data()

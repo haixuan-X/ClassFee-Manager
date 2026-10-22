@@ -609,6 +609,16 @@ class UserCreateRequest(_BodyModel):
     phone: str | None = None
     role: str | None = None
     guestScopes: list[str] | None = None
+    # 第三十轮：**仅 role=DEAN 有效**。1 = 纯院长（只管学院，不参与班级事务）。
+    #
+    # 不传 = 兼班主任（与第二十八轮的行为完全一致）。
+    # 给别的角色传了会被忽略（服务端存 0），不留死数据。
+    deanOnly: bool | None = None
+    # 第三十二轮：这个账号**能管哪些班**。
+    #
+    # 不传 = 只有当前班（与既有行为一致）。传了就把关联表按它重写，
+    # **当前班永远包含在内**（`sys_user.class_id` 是默认班，不能被摘掉）。
+    classIds: list[int] | None = None
 
     @field_validator("username")
     @classmethod
@@ -666,6 +676,9 @@ class UserUpdateRequest(_BodyModel):
     guestScopes（第二十六轮，**仅访客有效**）：传了就改、不传=None=不改。
     传空数组 = 什么都看不到（只剩自己的「个人信息」）；四项全传 = 全部可见
     （`dump_guest_scopes` 归一成 NULL，和老账号同一个表示）。
+
+    deanOnly（第三十轮，**仅院长有效**）：1 = 纯院长（只管学院，不参与班级事务），
+    0 = 兼班主任。不传=None=不改；改完**立刻生效**（中间件每个请求重读这一列）。
     """
 
     realName: str | None = None
@@ -674,6 +687,10 @@ class UserUpdateRequest(_BodyModel):
     status: int | None = None
     password: str | None = None
     guestScopes: list[str] | None = None
+    deanOnly: bool | None = None
+    # 第三十二轮：改成「这个账号能管哪些班」。不传=None=不改；
+    # 传了就把关联表按它重写（当前班永远包含在内）。
+    classIds: list[int] | None = None
 
     @field_validator("realName")
     @classmethod
@@ -738,6 +755,20 @@ class ProfileUpdateRequest(_BodyModel):
     realName: str | None = None
     studentNo: str | None = None
     phone: str | None = None
+    # 第三十二轮：**职务范围**（纯院长 ↔ 兼班主任）。
+    #
+    # 「纯院长」是第三十轮给院长加的一个**限制**（只管学院、不参与班级事务），
+    # 而「兼班主任」才是院长的**默认状态**（第二十八轮以来的行为）。
+    # 所以从纯院长切回兼班主任 = 解除限制、恢复默认，不是获得新权力。
+    #
+    # 只有**院长本人**能改（别的角色这一位没有意义）；改完**立刻生效**
+    # （鉴权中间件每个请求都重读这一列）。
+    deanOnly: bool | None = None
+    # 第三十二轮：**我带的班**（班主任是班的多对多属性）。
+    #
+    # 传了就重写「我带的班」：**只动我自己那些行**，同班别的老师不受影响。
+    # 默认班自动包含在内（登录落在哪个班，得是我带的班才对）。
+    classIds: list[int] | None = None
 
     @field_validator("realName")
     @classmethod

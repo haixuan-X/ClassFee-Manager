@@ -48,7 +48,7 @@ from ..models import (
     StudentRecordValue,
     SysUser,
 )
-from ..security import ROLE_LEVEL, LoginUser, role_level
+from ..security import DEAN_ROLE, ROLE_LEVEL, LoginUser, role_level
 from ..serializers import fmt_dt
 
 # ---------------- scope 常量（唯一的语义来源） ----------------
@@ -498,7 +498,7 @@ def _get_field(db: Session, user: LoginUser, field_key: str) -> StudentField:
     return f
 
 
-def _plan_retype(
+def plan_retype(
     db: Session, f: StudentField, new_type: str
 ) -> tuple[list[tuple[int, str, str]], list[tuple[int, str, str]], int]:
     """算出改类型之后每个存量值会变成什么。
@@ -552,7 +552,7 @@ def preview_field_retype(db: Session, user: LoginUser, field_key: str, new_type:
         f = _get_field(db, user, field_key)
         if f.field_type == new_type:
             raise BizException.bad_request("新类型和当前一样，不用改")
-        ok, bad, empty = _plan_retype(db, f, new_type)
+        ok, bad, empty = plan_retype(db, f, new_type)
         return {
             "key": f.field_key,
             "label": f.field_label,
@@ -597,7 +597,7 @@ def apply_field_retype(
         old_type = f.field_type
         if old_type == new_type:
             raise BizException.bad_request("新类型和当前一样，不用改")
-        ok, bad, _empty = _plan_retype(db, f, new_type)
+        ok, bad, _empty = plan_retype(db, f, new_type)
 
         for vid, _before, after in ok:
             v = db.get(StudentRecordValue, vid)
@@ -741,6 +741,16 @@ def _is_registered(status: str | None) -> bool:
 def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND_MONTHS) -> dict:
     """仪表盘「学生情况总览」的聚合数据。
 
+    ## 院长的口径 = **全校**（不只是他那个班）
+
+    这个总览**只有院长能看**（第二十九轮末收紧），看板的身份是「校级看板」——
+    给院长看「我这一班」的学生情况，等于把「班级的学生信息表」换个皮摆给他，
+    那他为什么不直接去「学院学生信息」看？
+
+    之前这里一直用的是 `user.class_id`（本班口径），于是全校名册里填了 7 个人，
+    仪表盘上却只有他那个班的 4 个——数字对不上，看板也没法当校级看板用。
+    现在院长看到的是**所有启用班级**的学生。
+
     ## 可见范围 = 学生信息表的同一套口径
 
     走 `_visible_record_ids`，而不是「无条件 COUNT 全班」。普通同学默认只看得到
@@ -750,6 +760,13 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
     所以 `canViewAll=false` 时返回的是**他自己那一行**的统计（通常 studentTotal=1），
     界面必须把这一点说出来，不能让「1 人」看起来像「班里只有 1 个人」。
 
+    ## 字段是**按班**定义的
+
+    同一个 `field_key` 在不同班是不同的 `field_id`（唯一键 `(class_id, field_key)`）。
+    所以取值必须按「这条记录自己那个班」的字段 id 来读——跟学院名册
+    `_field_ids_by_key` 同一个道理。拿全校的某一个班的字段 id 去读别的班，
+    读出来的是完全不相干的列。
+
     ## 学籍变化：**还没有数据源**
 
     全库没有任何历史/快照/异动表（`student_record_value` 只存当前值）。
@@ -757,15 +774,46 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
     界面上如实显示「暂无异动记录」而不是画一条假的零线——
     一条全零的折线会被读成「本年零异动」，那是**撒谎**。
     """
-    vis = visibility(db, user)
-    ids = _visible_record_ids(db, user)
-    fields = _field_map(db, user.class_id)
-    values = _load_values(db, ids)
+    # 统计范围：院长 = 所有启用班；其他人 = 自己那个班
+    is_college = user.role == DEAN_ROLE
+    if is_college:
+        classes = list(
+            db.scalars(
+                select(ClsClass).where(ClsClass.status == 1).order_by(ClsClass.id.asc())
+            )
+        )
+    else:
+        classes = [c for c in [db.get(ClsClass, user.class_id)] if c is not None]
+    class_ids = [c.id for c in classes]
+    class_by_id = {c.id: c for c in classes}
 
-    reg_field = fields.get("reg_status")
-    enroll_field = fields.get("enroll_date")
-    grade_field = fields.get("grade")
-    major_field = fields.get("major_name")
+    vis = visibility(db, user)
+    if is_college:
+        # 院长看全校：可见行 = 所有启用班的学生
+        ids = (
+            [
+                int(i)
+                for i in db.scalars(
+                    select(StudentRecord.id).where(StudentRecord.class_id.in_(class_ids))
+                )
+            ]
+            if class_ids
+            else []
+        )
+    else:
+        ids = _visible_record_ids(db, user)
+
+    # 字段 id 按 (班, 字段标识) 映射（各班各有一份定义）
+    field_ids: dict[tuple[int, str], int] = {}
+    if class_ids:
+        for f in db.scalars(
+            select(StudentField).where(
+                StudentField.class_id.in_(class_ids), StudentField.status == 1
+            )
+        ):
+            field_ids[(f.class_id, f.field_key)] = f.id
+
+    values = _load_values(db, ids)
 
     records: dict[int, StudentRecord] = {}
     if ids:
@@ -776,10 +824,15 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
             )
         }
 
-    def val(rid: int, field: StudentField | None) -> str | None:
-        if field is None:
+    def val(rid: int, key: str) -> str | None:
+        """这一行某一列的值（按**它自己那个班**的字段 id 取）。"""
+        rec = records.get(rid)
+        if rec is None:
             return None
-        v = values.get((rid, field.id))
+        fid = field_ids.get((rec.class_id, key))
+        if fid is None:
+            return None
+        v = values.get((rid, fid))
         return (v or "").strip() or None
 
     total = len(records)
@@ -789,7 +842,7 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
     latest_rows: list[dict] = []
 
     for rid, rec in records.items():
-        status = val(rid, reg_field)
+        status = val(rid, "reg_status")
         # 空状态归到「未填写」而不是「在籍」——分母里算在籍，但分布图上
         # 让老师看得见「有 N 个人这项是空的」，否则模板空列永远是隐形的。
         label = status or "未填写"
@@ -797,7 +850,7 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
         if _is_registered(status):
             registered += 1
 
-        ed = val(rid, enroll_field)
+        ed = val(rid, "enroll_date")
         if ed and len(ed) >= 7:
             ym = ed[:7]  # YYYY-MM
             enroll_months[ym] = enroll_months.get(ym, 0) + 1
@@ -811,10 +864,16 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
             # is not JSON serializable）。项目里所有时间出参都走这个函数。
             "updatedAt": fmt_dt(rec.updated_at),
             "regStatus": status,
-            "grade": val(rid, grade_field),
-            "majorName": val(rid, major_field),
+            "grade": val(rid, "grade"),
+            "majorName": val(rid, "major_name"),
             "enrollDate": ed,
             "registered": _is_registered(status),
+            # 学院口径下让人看得出这一行是哪个班的
+            "className": (
+                class_by_id[rec.class_id].class_name
+                if rec.class_id in class_by_id
+                else ""
+            ),
         })
 
     # 累计在校人数曲线：按入校月份累加，末值 = 有入校日期的学生总数。
@@ -830,7 +889,10 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
     clazz = db.get(ClsClass, user.class_id)
     return {
         "canViewAll": bool(vis["canViewAll"]),
-        "classGrade": (clazz.grade if clazz else "") or "",
+        # 学院口径下「本班年级」没有意义（全校好几个年级）
+        "classGrade": "" if is_college else ((clazz.grade if clazz else "") or ""),
+        "classCount": len(class_ids),
+        "collegeScope": is_college,
         "studentTotal": total,
         "registeredTotal": registered,
         "statusBreakdown": [

@@ -20,8 +20,28 @@ export interface UserInfo {
    * 真正的边界在后端（`security` 中间件），手输 URL 也绕不过去。
    */
   guestScopes?: GuestScope[] | null
+  /**
+   * 是不是**纯院长**（第三十轮）。只有院长会有 true。
+   *
+   * 院长有两种：① 兼班主任（本班的账目、任务、成员他都管）；
+   * ② 纯院长（只管学院那一层，班级事务一概不参与）。
+   *
+   * 纯院长的侧栏**不出现**「账目」和「班级」两组，仪表盘也只有
+   * 「学生情况总览」——但那只是**入口**层面的过滤，
+   * 真正的边界在后端（`security` 中间件的纯院长白名单），手输 URL 也绕不过去。
+   */
+  deanOnly?: boolean
   classId: number
   className: string | null
+  /**
+   * 这个人**能管哪些班**（第三十二轮）。
+   *
+   * 一个班主任常带好几个班（云计算2502 + 云计算2501）。侧栏顶上据此
+   * 渲染「班级切换器」，切换后所有请求都带上 `classId`。
+   */
+  classIds?: number[]
+  /** 与 `classIds` 一一对应的班级名 */
+  classNames?: string[]
 }
 
 /** 登录返回 */
@@ -171,8 +191,17 @@ export interface DashboardSummary {
 export interface StudentDashboard {
   /** false = 只统计到「你有权看的那几行」，数字不代表全班 */
   canViewAll: boolean
-  /** 班级年级，来自 `cls_class.grade`；没填时为空串 */
+  /** 班级年级，来自 `cls_class.grade`；没填时为空串。学院口径下为空串 */
   classGrade: string
+  /** 统计范围里的班级数 */
+  classCount: number
+  /**
+   * true = **全校口径**（院长的看板统计所有启用班）。
+   *
+   * 这个总览只有院长能看，看板的身份是「校级看板」——给院长看
+   * 「我这一班」的学生情况，等于把班级的学生信息表换个皮摆给他。
+   */
+  collegeScope: boolean
   /** 可见范围内的学生记录数 */
   studentTotal: number
   /** 其中「在籍」的人数（休学/退学/毕业等不计入，空值算在籍） */
@@ -193,6 +222,8 @@ export interface StudentDashboard {
     majorName: string | null
     enrollDate: string | null
     registered: boolean
+    /** 学院口径下这一行是哪个班的 */
+    className?: string
   }[]
   /**
    * 学籍异动人次。**目前恒为 `null`**——库里没有异动表、没有历史快照，
@@ -245,6 +276,222 @@ export const ROLE_TEXT: Record<Role, string> = {
  * 回归里有断言盯着它与后端一致（`test_a20_dean_role`）。
  */
 export const STAFF_ROLES: Role[] = ['ADMIN', 'MONITOR', 'TEACHER', 'DEAN']
+
+/**
+ * 角色等级（与后端 `security.ROLE_LEVEL` 同口径）。
+ *
+ * 第二十九轮从 `member-manage/index.vue` 提到这里：仪表盘也要判「是不是院长」，
+ * 而**两张手写等级表必然漂**——加角色时只改一边，界面上就会出现
+ * 「成员管理里能管、仪表盘里看不见」这种自相矛盾。收成唯一一份之后，
+ * 回归只需盯住它和后端一致（`test_a20_dean_role`）。
+ *
+ * ⚠ 权限判断一律用 `roleLevel()` 比较，**不要写 `role === 'DEAN'`**：
+ * 写死角色名等于把「院长之上再加一档」这件事变成一次静默降权，
+ * 症状是「新角色登录后该看的东西全看不见」，且不报错。
+ */
+export const ROLE_LEVEL: Record<Role, number> = {
+  MEMBER: 0,
+  GUEST: 0, // 访客（只读，给领导看）
+  ADMIN: 1, // 生活委员
+  MONITOR: 2, // 班长
+  TEACHER: 3, // 班主任
+  DEAN: 4, // 院长（系统管理员，等级最高）
+}
+
+/** 取等级；未知角色按最低档处理（**不抛错**，界面降级总比白屏好）。 */
+export function roleLevel(role: Role | null | undefined): number {
+  return role ? (ROLE_LEVEL[role] ?? 0) : 0
+}
+
+/** 「班主任及以上」= 够格管理访客 / 建访客 / 按学生建号的最低档。 */
+export const TEACHER_MIN_LEVEL = ROLE_LEVEL.TEACHER
+
+/** 「院长及以上」= 管理级看板（如仪表盘的「学生情况总览」）的最低档。 */
+export const DEAN_MIN_LEVEL = ROLE_LEVEL.DEAN
+
+/* ============================ 学院（第三十轮） ============================ */
+
+/**
+ * 学院 = **全部班级**的聚合视图，**仅院长可见**。
+ *
+ * 库里没有「学院」这一层（数据模型是 class → 学生/账号/任务/字段），
+ * 学院视角就是院长的权限范围。见 `server-py/app/services/college_service.py`。
+ */
+
+/** 学院筛选用的班级选项 */
+export interface CollegeClassChoice {
+  id: number
+  className: string
+  grade: string
+  /** 这个班有几个人（0 = 名单还没导进去） */
+  students: number
+}
+
+/** 学生名册的一列。`key` 是字段机器名，跨班一致 */
+export interface CollegeStudentColumn {
+  key: string
+  label: string
+  type: 'TEXT' | 'NUMBER' | 'DATE' | 'BOOL'
+  system: boolean
+}
+
+/** 学院名册的一行：跨班级的同一个学生 */
+export interface CollegeStudentRow {
+  id: number
+  classId: number
+  className: string
+  grade: string
+  studentNo: string
+  name: string
+  values: Record<string, string | null>
+}
+
+/** 学院学生名册（含搜索筛选所需的选项） */
+export interface CollegeStudentList {
+  columns: CollegeStudentColumn[]
+  /**
+   * 筛选结果里**至少有一行有值**的字段 key。
+   *
+   * 只显示这些列——模板有 34 个字段，全摆出来是一屏空格子。
+   * ⚠ 按**整个筛选结果**算，不是当前页，所以翻页时列不会增减。
+   */
+  populatedKeys: string[]
+  rows: CollegeStudentRow[]
+  total: number
+  page: number
+  size: number
+  classes: CollegeClassChoice[]
+  grades: string[]
+}
+
+/** 班主任账号 */
+export interface CollegeTeacher {
+  id: number
+  username: string
+  realName: string
+  phone: string
+  /** 1=启用 0=停用 */
+  status: number
+  lastLoginAt: string | null
+}
+
+/**
+ * 名册的一行 = **一个班主任账号**。
+ *
+ * ⚠ 不是「一班一行」：有的班有**两个**班主任（班主任本人 + 兼班主任的院长）。
+ * 一班一行就得把两个账号塞进一格，「账号状态」那列只能渲染两个「启用」，
+ * 看不出哪个配哪个；手机号、最近登录这类属于某个账号的属性也只能取第一个
+ * ——第二个人的手机号就永远不显示。
+ *
+ * 一人一行：每行一个账号、一个状态、一个手机号。一个班有几个人就占几行
+ * （班级那列重复），这是名册的正常样子。
+ *
+ * 还没建班主任账号的班**也占一行**（`teacherId` 为 null）——
+ * 「哪个班还没人管」是这份名册最该被看见的信息。
+ */
+export interface CollegeAdviserRow {
+  classId: number
+  className: string
+  grade: string
+  /** 班级信息里登记的班主任姓名（可能与账号不一致，两边都给出） */
+  headTeacher: string
+  /** null = 这个班还没有班主任账号 */
+  teacherId: number | null
+  username: string
+  realName: string
+  phone: string
+  /** null = 没有账号；1=启用 0=停用 */
+  status: number | null
+  lastLoginAt: string | null
+}
+
+/** 班主任（导员）名册 */
+export interface CollegeAdviserList {
+  rows: CollegeAdviserRow[]
+  total: number
+}
+
+/** 学院任务一览的一行 */
+export interface CollegeTaskRow {
+  id: number
+  classId: number
+  className: string
+  grade: string
+  title: string
+  question: string
+  /** 1=开放 0=已关闭（过了截止时间也算关） */
+  open: boolean
+  pinned: boolean
+  deadline: string | null
+  createdAt: string | null
+  /** 已答人数 */
+  answered: number
+  /** 应答总人数（**按该任务自己那个班**算） */
+  total: number
+  unanswered: number
+}
+
+/** 学院任务一览 */
+export interface CollegeTaskList {
+  rows: CollegeTaskRow[]
+  total: number
+  classes: CollegeClassChoice[]
+}
+
+/**
+ * 改一列的类型之前，先看会发生什么（**不写库**）。
+ *
+ * 跨**所有班**汇总：这一列在每个班各有一份定义、各有各的存量值，
+ * 只报一个班的数会骗人。
+ */
+export interface CollegeRetypePreview {
+  key: string
+  label: string
+  fromType: string
+  fromTypeText: string
+  toType: string
+  toTypeText: string
+  /** 这一列在几个班里各有一份定义 */
+  classCount: number
+  /** 这一列共有多少个值（跨所有班汇总） */
+  total: number
+  /** 能转换的值的条数 */
+  convertibleCount: number
+  /** 能转换的样例：改前 → 改后 */
+  convertibleSamples: { before: string; after: string }[]
+  /** 样例之外还有多少个能转换的 */
+  convertibleTruncated: number
+  /** 转不了的（比如把「待缴」转成日期） */
+  unconvertibleCount: number
+  unconvertibleSamples: { before: string }[]
+  unconvertibleTruncated: number
+  /** 空值（未填就是未填，不用管） */
+  emptyCount: number
+}
+
+/** 学院列定义（各班的字段按 field_key 合并成一份） */
+export interface CollegeFieldList {
+  columns: CollegeStudentColumn[]
+  classes: CollegeClassChoice[]
+}
+
+/**
+ * 导入学院学生信息的结果。
+ *
+ * `newFields` 是**自动新建**的列（文件里有、库里没有的列名）——
+ * 和班级版一样：用户不必先去界面上手工加一遍列。
+ */
+export interface CollegeImportResult {
+  created: number
+  updated: number
+  rows: number
+  skippedEmptyCells: number
+  newFields: { label: string; type: string; typeText: string }[]
+  duplicateRows: number
+  unmatchedColumns: string[]
+  errors: string[]
+  errorCount: number
+}
 
 /* ============================ M4 班级信息 ============================ */
 
@@ -418,6 +665,20 @@ export interface ProfileUpdateRequest {
   studentNo?: string
   /** 手机号（空串=清空、不传=不改） */
   phone?: string
+  /**
+   * 职务范围（第三十二轮）：true = 纯院长（只管学院）、false = 院长 + 班主任。
+   *
+   * 只有**院长本人**能改（别的角色这一位没有意义，后端会忽略）。
+   */
+  deanOnly?: boolean
+  /**
+   * **我带的班**（第三十二轮）。
+   *
+   * 班主任是**班**的归属（多对多）：一个老师可以带好几个班。
+   * 传了就重写「我带的班」（**直接生效**）；不传 = 不改。
+   * 只有运营角色以上能改（普通同学不是班主任）。
+   */
+  classIds?: number[]
 }
 
 /**
@@ -454,6 +715,13 @@ export interface AppVersion {
   preRelease: string | null
   /** 构建后缀（`1.2.0+20261019` 里的日期）；一般没用 */
   build: string | null
+  /**
+   * 学院名（部署时在 `.env` 里声明 `CLASSFEE_COLLEGE_NAME`）。
+   *
+   * 侧栏顶部那行显示的是「你这个人的管辖范围」：对院长来说是**学院**，
+   * 不是某个班。没配置就是空串，界面上退回写「学院」两个字。
+   */
+  collegeName: string
 }
 
 /* ============================ 第七轮 账号管理（老师建班） ============================ */
@@ -497,7 +765,15 @@ export interface UserAccount {
    * 这样第二十四轮那批访客账号不需要任何数据迁移，行为保持原样。
    */
   guestScopes?: GuestScope[] | null
+  /** 是不是纯院长（只管学院，不参与班级事务）。非院长恒为 false。 */
+  deanOnly?: boolean
   classId: number
+  /**
+   * 这个账号**能管哪些班**（第三十二轮）。
+   *
+   * 一个班主任常带好几个班（云计算2502 + 云计算2501），这里列出全部。
+   */
+  managedClassIds?: number[]
   /** 1 启用 / 0 停用 */
   status: number
   /** yyyy-MM-dd HH:mm:ss */
@@ -522,6 +798,19 @@ export interface UserCreateRequest {
    * （只剩自己的「个人信息」）。不传 = 全部可见。
    */
   guestScopes?: GuestScope[]
+  /**
+   * 是不是纯院长（第三十轮）。**只有 `role='DEAN'` 时有意义**，
+   * 其他角色传了会被后端忽略。
+   *
+   * 不传 = 兼班主任（与第二十八轮的行为完全一致）。
+   */
+  deanOnly?: boolean
+  /**
+   * 这个账号**能管哪些班**（第三十二轮）。
+   *
+   * 不传 = 只有当前班。只能给**你自己也管的班**（后端会过滤掉别的）。
+   */
+  classIds?: number[]
 }
 
 /** 编辑账号入参（字段均可选；password=重置密码；phone/studentNo 传空串=清空） */
@@ -538,6 +827,16 @@ export interface UserUpdateRequest {
    * 改完**立刻生效**，访客不用重新登录（后端中间件每个请求都重读这一列）。
    */
   guestScopes?: GuestScope[]
+  /**
+   * 是不是纯院长（第三十轮）。传了就改、**不传=不改**；只有院长有效。
+   * 改完**立刻生效**（后端中间件每个请求都重读这一列）。
+   */
+  deanOnly?: boolean
+  /**
+   * 改成「这个账号能管哪些班」（第三十二轮）。不传=不改。
+   * 只能给**你自己也管的班**（后端会过滤掉别的）。
+   */
+  classIds?: number[]
 }
 
 // ==================== 第二十三轮：学生信息 ====================

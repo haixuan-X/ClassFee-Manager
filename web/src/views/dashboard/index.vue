@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
 import {
@@ -16,15 +16,17 @@ import StudentTrendChart from '@/components/StudentTrendChart.vue'
 import PinnedTasksPanel from '@/components/PinnedTasksPanel.vue'
 import SliderTabs from '@/components/SliderTabs.vue'
 import type { DashboardSummary, PieItem, StudentDashboard, Task, TrendPoint } from '@/types'
-import { CHANNEL_TEXT, ROLE_TEXT } from '@/types'
+import { CHANNEL_TEXT, DEAN_MIN_LEVEL, ROLE_TEXT, roleLevel } from '@/types'
 
 const userStore = useUserStore()
 const router = useRouter()
 
-/**
- * 顶部滑动切换器：两个总览互斥。默认先看「班级账目总览」——老用户第一眼要的还是余额。
- *
+/*
  * ## 「学生情况总览」**仅院长可见**
+ *
+ * 判据用**等级**（`roleLevel(role) >= DEAN_MIN_LEVEL`）而不是 `role === 'DEAN'`：
+ * 写死角色名等于把「院长之上再加一档」变成一次静默降权，症状是新角色登录后
+ * 该看的看板全看不见，而且不报错。
  *
  * 非院长时整条切换器都不渲染，只剩一个总览——切换器要给两个以上选项才有意义，
  * 一个选项的切换器是纯噪音。
@@ -33,16 +35,47 @@ const router = useRouter()
  * 也拦了一道，两边都要：只做后端的话班主任会看到一个点进去就报「无权」的标签；
  * 只做前端的话手输接口照样拿得到数据。
  */
-const isDean = computed(() => userStore.user?.role === 'DEAN')
-const view = ref<'fee' | 'student'>('fee')
-const VIEWS = computed(() =>
-  isDean.value
+const isDean = computed(() => roleLevel(userStore.user?.role) >= DEAN_MIN_LEVEL)
+
+/**
+ * 院长的两个总览，**学院在前、班级在后**。
+ *
+ * 院长的主职是管学院（全校名册、班主任名册、学院任务），班级账目是
+ * 「兼班主任」时才有份的事。所以「学生情况总览」排在第一个，且**默认落在它上面**。
+ *
+ * 非院长只有「班级账目总览」一个选项——切换器要给两个以上选项才有意义，
+ * 一个选项的切换器是纯噪音。
+ *
+ * ## 纯院长（第三十轮）只有**一个**总览
+ *
+ * 纯院长不参与班级事务，连班级的账都没有——给他摆一个「班级账目总览」
+ * 就是摆一个点进去就报 403 的入口。所以切换器整个不渲染。
+ */
+const VIEWS = computed(() => {
+  if (userStore.isPureDean) return []
+  return isDean.value
     ? [
-        { value: 'fee', label: '班级账目总览' },
         { value: 'student', label: '学生情况总览' },
+        { value: 'fee', label: '班级账目总览' },
       ]
-    : [{ value: 'fee', label: '班级账目总览' }],
-)
+    : [{ value: 'fee', label: '班级账目总览' }]
+})
+
+/** 当前总览。院长默认落在「学生情况总览」（列表里的第一项）。 */
+const view = ref<'fee' | 'student'>(isDean.value ? 'student' : 'fee')
+
+/**
+ * 用户手动切过没有。
+ *
+ * 冷启动时本地缓存里可能只有 token 没有用户信息，`isDean` 要等
+ * `/auth/me` 回来才为真。院长身份姗姗来迟时把总览切到学院那个——
+ * 但**用户自己切过就别动他**，否则他正在看的东西会被抢走。
+ */
+const userPickedView = ref(false)
+
+watch(isDean, (dean) => {
+  if (dean && !userPickedView.value) view.value = 'student'
+})
 
 const summary = ref<DashboardSummary | null>(null)
 const trend = ref<TrendPoint[]>([])
@@ -73,7 +106,11 @@ const stuStats = computed(() => {
       value: d ? String(d.studentTotal) : '--',
       hint: d
         ? d.canViewAll
-          ? `本班全部登记学生${d.classGrade ? ` · ${d.classGrade}` : ''}`
+          ? // 院长看的是**全校**（不只是他那个班）——口径写在卡片上，
+            // 不然「7 人」会被读成「班里就这 7 个人」
+            d.collegeScope
+            ? `全校 ${d.classCount} 个班 · ${d.studentTotal} 名学生`
+            : `本班全部登记学生${d.classGrade ? ` · ${d.classGrade}` : ''}`
           : '你只能看到自己有权限的那几行，不代表全班'
         : '加载中',
       tone: '' as '' | 'out',
@@ -222,30 +259,41 @@ function switchView(v: string) {
   // 双保险：切换器本来就只给院长渲染，这里再挡一次——
   // 组件有值不代表调用方就有权用（将来可能从别处调它）
   if (v === 'student' && !isDean.value) return
+  userPickedView.value = true
   view.value = v as 'fee' | 'student'
   if (v === 'student') void loadStudentPanel()
 }
 
 onMounted(async () => {
-  try {
-    // 置顶任务单独兜住：它挂掉不该让账目总览整块变成占位符
-    const [s, t, p, pinned] = await Promise.all([
-      fetchSummary(),
-      fetchTrend(6),
-      fetchCategoryPie(6),
-      fetchPinnedTasks()
-        .then((r) => r.rows)
-        .catch(() => [] as Task[]),
-    ])
-    summary.value = s
-    trend.value = t
-    pie.value = p
-    pinnedTasks.value = pinned
-  } catch {
-    /* 拦截器已统一提示；summary 缺失时卡片显示占位文案 */
-  } finally {
+  // 纯院长（第三十轮）不参与班级事务：`/dashboard/summary|trend|category-pie`
+  // 全是班级账目的数据源，对纯院长一律 403。**不能去请求**——
+  // 弹一个「无权执行该操作」的红条，比什么都不显示更糟。
+  if (!userStore.isPureDean) {
+    try {
+      // 置顶任务单独兜住：它挂掉不该让账目总览整块变成占位符
+      const [s, t, p, pinned] = await Promise.all([
+        fetchSummary(),
+        fetchTrend(6),
+        fetchCategoryPie(6),
+        fetchPinnedTasks()
+          .then((r) => r.rows)
+          .catch(() => [] as Task[]),
+      ])
+      summary.value = s
+      trend.value = t
+      pie.value = p
+      pinnedTasks.value = pinned
+    } catch {
+      /* 拦截器已统一提示；summary 缺失时卡片显示占位文案 */
+    } finally {
+      loading.value = false
+    }
+  } else {
     loading.value = false
   }
+  // 院长默认落在「学生情况总览」，所以学生数据要**一开始就拉**：
+  // 面板是按 `view` 挂载的，挂着的时候 stu 还是 null，界面上会先闪一帧空态。
+  if (view.value === 'student') void loadStudentPanel()
 })
 </script>
 
@@ -256,7 +304,20 @@ onMounted(async () => {
         <h2>{{ view === 'fee' ? '班级账目总览' : '学生情况总览' }}</h2>
         <p>
           欢迎回来，{{ userStore.displayName }} ·
-          {{ userStore.user?.className ?? '未加入班级' }}
+          <!--
+            口径跟着当前总览走：
+            「学生情况总览」是**学院口径**（全部班级），「班级账目总览」才是本班。
+            混着写会把「全校 7 人」读成「班里就这 7 个人」。
+          -->
+          <template v-if="view === 'fee'">
+            {{ userStore.user?.className ?? '未加入班级' }}
+          </template>
+          <template v-else-if="stu?.collegeScope">
+            全校 {{ stu.classCount }} 个班
+          </template>
+          <template v-else>
+            {{ userStore.user?.className ?? '未加入班级' }}
+          </template>
         </p>
       </div>
       <div class="head-tools">
@@ -271,8 +332,13 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- ============ 总览一：班级账目（内容与改造前完全一致） ============ -->
-    <template v-if="view === 'fee'">
+    <!--
+      总览一：班级账目（内容与改造前完全一致）
+
+      ⚠ 纯院长（第三十轮）**不渲染**：他不参与班级事务，连班级的账都没有。
+      摆着它就是摆一个点进去就撞 403 的入口。
+    -->
+    <template v-if="view === 'fee' && !userStore.isPureDean">
 
     <!-- 统计卡 -->
     <section class="stats" aria-label="关键指标" :aria-busy="loading">
@@ -439,7 +505,16 @@ onMounted(async () => {
         <article class="glass-card panel">
           <div class="panel-head">
             <h3>最新学籍信息</h3>
-            <router-link to="/student-info" class="panel-link">查看全部</router-link>
+            <!--
+              学院口径下，「查看全部」要指向**学院名册**（全部班级）——
+              指向班级页的话，点进去只看到本班，和这个面板的数字对不上。
+            -->
+            <router-link
+              :to="stu?.collegeScope ? '/college/students' : '/student-info'"
+              class="panel-link"
+            >
+              查看全部
+            </router-link>
           </div>
           <ul v-if="(stu?.latest ?? []).length > 0" class="latest">
             <li v-for="row in stu?.latest ?? []" :key="row.id">
@@ -447,6 +522,7 @@ onMounted(async () => {
                 <div class="latest-title">{{ row.name }}</div>
                 <div class="latest-meta">
                   学号 {{ row.studentNo }}
+                  <span v-if="row.className"> · {{ row.className }}</span>
                   <span v-if="row.majorName"> · {{ row.majorName }}</span>
                   <span v-if="row.enrollDate"> · 入校 {{ row.enrollDate }}</span>
                 </div>
@@ -467,7 +543,16 @@ onMounted(async () => {
           />
         </article>
 
-        <PinnedTasksPanel :tasks="pinnedTasks" :loading="loading" />
+        <!--
+          置顶任务（第三十轮起纯院长不渲染）：置顶任务属于**班级**事务
+          （谁发的题、谁没填），纯院长不参与班级事务，`/api/tasks` 对他 403。
+          摆一个永远空的置顶任务面板只会让人以为「全班都还没填」。
+        -->
+        <PinnedTasksPanel
+          v-if="!userStore.isPureDean"
+          :tasks="pinnedTasks"
+          :loading="loading"
+        />
       </section>
     </template>
   </div>
@@ -481,6 +566,25 @@ onMounted(async () => {
   gap: 12px;
   flex-wrap: wrap;
   margin-left: auto;
+}
+
+/* ==================== 页面骨架 ==================== */
+
+/**
+ * 仪表盘的纵向节奏。
+ *
+ * ⚠ 之前这里没有规则，于是各段是**普通块级元素、上下贴着**（段间距 0px），
+ * 而卡片之间有 16px（`.stats` 的 `gap`）。结果是节奏不统一：
+ * 卡片之间有明显空隙，行与行之间两块白底直接连成一片，只靠 1px 边框线区分，
+ * 看着像「粘在一起」而不是「分了段」。
+ *
+ * 现在统一成 `var(--space-md)`（16px）——**和卡片之间的间距一样**。
+ * 这也是「间隙和上面卡片差不多」的字面意思：全页只有一种纵向间距。
+ */
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }
 
 .page-head {
@@ -854,7 +958,20 @@ onMounted(async () => {
   .stats-3 {
     grid-template-columns: repeat(3, 1fr);
   }
+}
 
+/**
+ * 两栏面板（收支趋势 + 支出分类占比、最新流水 + 置顶任务）塌成单列的断点。
+ *
+ * ⚠ 之前这个规则挂在 `max-width: 1180px` 那一档里，和 `.stats` 混在一起。
+ * 结果在 **1165px 宽的窗口**上（侧栏 220 + 内容边距 32 = 内容区 858px，
+ * 放两栏绰绰有余）面板却被强制堆成上下两个全宽块——「最新流水」和
+ * 「置顶任务」不再并排，看着像布局塌了。
+ *
+ * 断点按**内容区**算：侧栏 220 + 边距 32 = 252，窗口 ≥ 1024px 时内容区
+ * 还能剩 772px，两栏各 378px，图表放得下；再窄就真的放不下了，塌一栏。
+ */
+@media (max-width: 1024px) {
   .grid-2 {
     grid-template-columns: 1fr;
   }

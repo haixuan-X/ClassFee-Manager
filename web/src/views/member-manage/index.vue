@@ -6,7 +6,13 @@ import { createUser, deleteUser, fetchUsers, updateUser } from '@/api/users'
 import { useModal } from '@/composables/useModal'
 import { useUserStore } from '@/stores/user'
 import type { GuestScope, Role, UserAccount } from '@/types'
-import { GUEST_SCOPE_OPTIONS, ROLE_TEXT } from '@/types'
+import {
+  GUEST_SCOPE_OPTIONS,
+  ROLE_LEVEL,
+  ROLE_TEXT,
+  TEACHER_MIN_LEVEL,
+  roleLevel,
+} from '@/types'
 
 /** 全部四项。后端 NULL 会被解析成这个，所以「全开」只有一个表示法。 */
 const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
@@ -75,6 +81,8 @@ const createForm = reactive({
   role: 'MEMBER' as Role,
   /** 访客的可见范围（第二十六轮）。默认全选——和第二十四轮那批访客行为一致 */
   guestScopes: [...ALL_GUEST_SCOPES] as GuestScope[],
+  /** 第三十轮：是不是纯院长。只在角色选了「院长」时才有意义 */
+  deanOnly: false,
 })
 
 /**
@@ -84,6 +92,13 @@ const createForm = reactive({
  * 所以界面上根本不给出现——摆一个对当前选择无效的控件同样是噪音。
  */
 const createIsGuest = computed(() => createForm.role === 'GUEST')
+
+/**
+ * 角色选了「院长」才出现「纯院长」勾选（第三十轮）。
+ *
+ * 同样是「对当前选择无效的控件不渲染」：非院长传了 deanOnly 会被后端忽略。
+ */
+const createIsDean = computed(() => createForm.role === 'DEAN')
 
 const createRules: FormRules = {
   username: [
@@ -119,6 +134,7 @@ function openCreate() {
   createForm.role = 'MEMBER'
   // 每次打开都恢复全选：上次留下的勾选不该悄悄带到下一个新账号上
   createForm.guestScopes = [...ALL_GUEST_SCOPES]
+  createForm.deanOnly = false
   alertMessage.value = ''
   createVisible.value = true
 }
@@ -143,6 +159,8 @@ async function submitCreate() {
       role: createForm.role,
       // 第二十六轮：只给访客传。一项都没勾 = 全开（后端归一成 NULL）
       guestScopes: createIsGuest.value ? createForm.guestScopes : undefined,
+      // 第三十轮：只给院长传
+      deanOnly: createIsDean.value ? createForm.deanOnly : undefined,
     })
     ElMessage.success(
       `已创建「${created.realName}」，登录名 ${created.username}，初始密码 ${createForm.password.trim() || '123456'}，请转告本人登录后修改`,
@@ -170,10 +188,15 @@ const editForm = reactive({
   phone: '',
   /** 访客可见范围（第二十六轮）。只有访客账号用得上 */
   guestScopes: [...ALL_GUEST_SCOPES] as GuestScope[],
+  /** 第三十轮：是不是纯院长。只有院长账号用得上 */
+  deanOnly: false,
 })
 
 /** 编辑的这条是不是访客。范围勾选框只在这种情况下出现 */
 const editIsGuest = computed(() => editTarget.value?.role === 'GUEST')
+
+/** 编辑的这条是不是院长。「纯院长」勾选只在这种情况下出现 */
+const editIsDean = computed(() => editTarget.value?.role === 'DEAN')
 
 const editRules: FormRules = {
   realName: [
@@ -194,6 +217,7 @@ function openEdit(row: UserAccount) {
   // 勾选框显示的就是真实权限，不在这里做「空 = 全开」的翻译——那会让界面撒谎。
   editForm.guestScopes =
     row.role === 'GUEST' ? [...(row.guestScopes ?? ALL_GUEST_SCOPES)] : [...ALL_GUEST_SCOPES]
+  editForm.deanOnly = row.deanOnly === true
   alertMessage.value = ''
   editVisible.value = true
 }
@@ -216,6 +240,8 @@ async function submitEdit() {
       phone: editForm.phone.trim(),
       // 第二十六轮：范围改动**立刻生效**，访客不用重新登录
       guestScopes: editIsGuest.value ? editForm.guestScopes : undefined,
+      // 第三十轮：纯院长标志**立刻生效**（后端中间件每个请求都重读这一列）
+      deanOnly: editIsDean.value ? editForm.deanOnly : undefined,
     })
     ElMessage.success(`已保存「${editForm.realName.trim()}」的资料`)
     editVisible.value = false
@@ -337,27 +363,16 @@ const isSelf = (row: UserAccount) => row.id === userStore.user?.id
 
 /**
  * 账号管理权限等级（第十五轮）：院长 > 班主任 > 班长 > 生活委员 > 普通成员。
- * 与后端 `security.ROLE_LEVEL` 同口径 —— 前端据此**隐藏越权按钮**，
- * 后端 `require_role_higher` 才是最终边界（前端隐藏不算安全边界）。
  *
- * GUEST（访客，第二十四轮）与 MEMBER 同级 0：两者都管不了账号，
- * 区别在能看的范围（访客能看全班学生信息、能勾选导出）。
+ * 第二十九轮起**不在这里定义了**——仪表盘也要判等级，两张手写表必然漂，
+ * 已收成 `@/types` 里的唯一一份 `ROLE_LEVEL`（与后端 `security.ROLE_LEVEL`
+ * 同口径，回归 `test_a20_dean_role` 逐项比对）。
  *
- * ⚠ 这张表和后端 `ROLE_LEVEL` 是**两份手写**的数值表，天然会漂。
- * 回归里有断言盯住两边的键和等级完全一致（`test_a20_dean_role`），
- * 改了任何一边必须同时改另一边，否则那条会红。
+ * 前端据此**隐藏越权按钮**，后端 `require_role_higher` 才是最终边界
+ * （前端隐藏不算安全边界）。
  */
-const ROLE_LEVEL: Record<Role, number> = {
-  MEMBER: 0,
-  GUEST: 0, // 访客（只读，给领导看）
-  ADMIN: 1, // 生活委员
-  MONITOR: 2, // 班长
-  TEACHER: 3, // 班主任
-  DEAN: 4, // 院长（系统管理员，等级最高）
-}
-const myLevel = computed(() => ROLE_LEVEL[userStore.user?.role ?? 'MEMBER'])
+const myLevel = computed(() => roleLevel(userStore.user?.role))
 /** 「班主任及以上」= 够格管理访客 / 建访客 / 按学生建号的最低档。院长当然也在内。 */
-const TEACHER_MIN_LEVEL = ROLE_LEVEL.TEACHER
 const isTeacher = computed(() => myLevel.value >= TEACHER_MIN_LEVEL)
 
 /**
@@ -737,6 +752,23 @@ onMounted(async () => {
             四项全勾 = 全部可见；<strong>都不勾 = 只能进自己的「个人信息」</strong>。
           </div>
         </el-form-item>
+
+        <!--
+          「纯院长」（第三十轮）。选了「院长」才出现。
+
+          院长有两种：兼班主任（本班的账目、任务、成员他都管）和纯院长
+          （只管学院那一层，班级事务一概不参与）。不勾 = 兼班主任，
+          和第二十八轮的行为完全一样。
+        -->
+        <el-form-item v-if="createIsDean" label="职务范围">
+          <el-checkbox v-model="createForm.deanOnly">
+            纯院长（只管学院，不参与班级事务）
+          </el-checkbox>
+          <div class="form-tip">
+            纯院长只管学院：全校学生名册、班主任名册、学院任务、学生情况总览。<br />
+            <strong>不参与</strong>班级事务——记账、缴费、班级任务、班级信息、班级成员都归班主任和班委。
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -796,6 +828,22 @@ onMounted(async () => {
             <strong>改完立刻生效</strong>，对方不用重新登录。全勾 = 全部可见，都不勾 = 只能进自己的「个人信息」。
           </div>
         </el-form-item>
+        <!-- 「纯院长」（第三十轮）。只有院长有这一说 -->
+        <el-form-item v-if="editIsDean" label="职务范围">
+          <el-checkbox v-model="editForm.deanOnly">
+            纯院长（只管学院，不参与班级事务）
+          </el-checkbox>
+          <div class="form-tip">
+            <strong>改完立刻生效</strong>，对方不用重新登录。
+          </div>
+        </el-form-item>
+        <!--
+          「他带哪几个班」**不在这里配**（第三十二轮）：
+          现在统一叫「**班主任是哪个班的**」，由两个地方管——
+          ① 院长在「学院 → 班级管理 → 成员管理」里安排（一个班可以有多个班主任）
+          ② 班主任本人在「个人信息 → 我带的班」里自己改
+          放在这里会变成第二个入口，两边说法还不一样。
+        -->
         <div class="form-tip">登录名创建后不可修改；学号可随时更正（同班不可重复）</div>
       </el-form>
       <template #footer>

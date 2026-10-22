@@ -12,13 +12,23 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
-from ..models import FeeBatch, FeePayment, FeeRecord, StudentRecord, SysUser
+from ..models import (
+    ClsClass,
+    FeeBatch,
+    FeePayment,
+    FeeRecord,
+    StudentRecord,
+    SysUser,
+    SysUserClass,
+)
 from ..schemas import ProfileUpdateRequest, UserCreateRequest, UserUpdateRequest
 from ..security import (
+    DEAN_ROLE,
+    STAFF_ROLES,
     GUEST_MANAGER_MIN_LEVEL,
     GUEST_ROLE,
     LoginUser,
@@ -38,7 +48,70 @@ DEFAULT_INITIAL_PASSWORD = "123456"
 MAX_STUDENT_NO_LEN = 20
 
 
-def account_vo(u: SysUser) -> dict:
+
+
+def managed_class_ids(
+    db: Session, user_id: int, role: str, default_class_id: int
+) -> list[int]:
+    """这个账号**能管哪些班**（第三十二轮）。
+
+    - **院长 = 所有启用班**。他是校级的（管的就是全校），
+      不然会出现死锁：谁都没法给一个老师加班——因为**只能给自己
+      已经能管的班加**，而没有人的默认班是别人要加的那个班。
+    - **其他人 = 默认班 ∪ `sys_user_class` 里关联的班**。
+
+    ⚠ **必须用同一个 Session 查**：engine 版的 `security.managed_class_ids`
+    走的是**另一条连接**，看不到当前事务里刚写的关联表（还没提交）——
+    表现为「明明加了班，回执里还是只有一个」。
+
+    ⚠ **默认班永远在里面**：关联表是后加的，老账号一条关联记录都没有——
+    要是只看关联表，所有存量账号都会变成「一个班都管不了」。
+    """
+    if role == DEAN_ROLE:
+        return [
+            int(cid)
+            for (cid,) in db.execute(
+                select(ClsClass.id).where(ClsClass.status == 1).order_by(ClsClass.id.asc())
+            )
+        ]
+    ids: list[int] = [default_class_id]
+    for (cid,) in db.execute(
+        select(SysUserClass.class_id).where(SysUserClass.user_id == user_id)
+    ):
+        c = int(cid)
+        if c not in ids:
+            ids.append(c)
+    return ids
+
+
+def _set_managed_classes(
+    db: Session, user_id: int, default_class_id: int, class_ids: list[int]
+) -> None:
+    """把「可管理的班级」写成给定的那几个（**当前班永远包含在内**）。
+
+    `sys_user.class_id` 是**默认班**（登录后落在哪个班），不能被摘掉——
+    摘掉的话这个人就「一个班都管不了」了，成员列表、账目、学生信息全空。
+    """
+    wanted = [default_class_id]
+    for cid in class_ids:
+        c = int(cid)
+        if c not in wanted:
+            wanted.append(c)
+    # 只留**存在的班**（班级被停用/删了，关联记录要跟着清掉）
+    alive = {
+        int(cid)
+        for (cid,) in db.execute(
+            select(ClsClass.id).where(ClsClass.id.in_(wanted))
+        )
+    }
+    wanted = [c for c in wanted if c in alive] or [default_class_id]
+    db.execute(delete(SysUserClass).where(SysUserClass.user_id == user_id))
+    for cid in wanted:
+        db.add(SysUserClass(user_id=user_id, class_id=cid))
+    db.flush()
+
+
+def account_vo(u: SysUser, managed_ids: list[int] | None = None) -> dict:
     return {
         "id": u.id,
         "username": u.username,
@@ -48,7 +121,12 @@ def account_vo(u: SysUser) -> dict:
         "role": u.role,
         # 只有访客用得上；非访客一律给 null，别让前端对每个角色都判一遍
         "guestScopes": parse_guest_scopes(u.guest_scopes) if u.role == GUEST_ROLE else None,
+        # 第三十轮：只有院长用得上。1 = 纯院长（只管学院，不参与班级事务）。
+        # 非院长一律给 false —— 前端据此决定侧栏里给不给「账目」「班级」两组。
+        "deanOnly": u.role == DEAN_ROLE and bool(u.dean_only),
         "classId": u.class_id,
+        # 第三十二轮：这个账号能管哪些班（默认班排第一）。
+        "managedClassIds": managed_ids or [u.class_id],
         "status": u.status,
         "lastLoginAt": fmt_dt(u.last_login_at),
         "createdAt": fmt_dt(u.created_at),
@@ -56,7 +134,10 @@ def account_vo(u: SysUser) -> dict:
 
 
 def list_users(db: Session, user: LoginUser, *, keyword: str | None) -> list[dict]:
-    conds = [SysUser.class_id == user.class_id]
+    # 第三十二轮：列出**我能管的班**的成员（不止当前班）——
+    # 一个老师带两个班，两个班的成员他都要能看见。
+    managed = managed_class_ids(db, user.id, user.role, user.class_id)
+    conds = [SysUser.class_id.in_(managed)]
     kw = keyword.strip() if keyword is not None else ""
     if kw:
         from ..helpers import like_pattern
@@ -73,7 +154,9 @@ def list_users(db: Session, user: LoginUser, *, keyword: str | None) -> list[dic
     rows = db.scalars(
         select(SysUser).where(*conds).order_by(SysUser.username.asc())
     ).all()
-    return [account_vo(u) for u in rows]
+    return [
+        account_vo(u, managed_class_ids(db, u.id, u.role, u.class_id)) for u in rows
+    ]
 
 
 def _ensure_student_no_unique(
@@ -108,6 +191,8 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
         # 第二十六轮：访客的「可见范围」。只对访客有意义，其他角色一律 NULL，
         # 免得库里躺着一堆永远不会被读的 JSON。
         guest_scopes = dump_guest_scopes(req.guestScopes) if role == GUEST_ROLE else None
+        # 第三十轮：纯院长。只对院长有意义，其他角色一律 0（库里不留死数据）。
+        dean_only = 1 if (role == DEAN_ROLE and req.deanOnly) else 0
         # 第十五轮：新建账号的**角色等级不得高于操作者**。
         # 这是等级体系的唯一提权入口——不改角色的接口（PUT /users/{id} 不含 role），
         # 但「新建一个班主任账号再登进去」能绕开所有护栏，所以必须在这里拦。
@@ -143,12 +228,26 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             phone=req.phone or None,
             role=role,
             guest_scopes=guest_scopes,
+            dean_only=dean_only,
             status=1,
         )
         db.add(row)
         db.flush()
         db.refresh(row)
-        return account_vo(row)
+        # 第三十二轮：新建**班主任**时，自动把「他是这个班的班主任」记上。
+        #
+        # 名册是按关联表（`sys_user_class`）列的——不记的话，新建的班主任
+        # 在名册上**不出现**（看着像这个班没人管）。
+        # 口径和回填一致：只有班主任 / 兼班主任的院长算；纯院长不担任任何班。
+        if role == "TEACHER" or (role == DEAN_ROLE and not dean_only):
+            db.add(SysUserClass(user_id=row.id, class_id=row.class_id))
+            db.flush()
+        # 第三十二轮：新建时也可以直接指定「能管哪些班」（默认只有当前班）。
+        if req.classIds:
+            mine = set(managed_class_ids(db, user.id, user.role, user.class_id))
+            wanted = [cid for cid in req.classIds if int(cid) in mine]
+            _set_managed_classes(db, row.id, row.class_id, wanted)
+        return account_vo(row, managed_class_ids(db, row.id, row.role, row.class_id))
 
 
 def _apply_profile_fields(
@@ -183,7 +282,10 @@ def update_user(
 ) -> dict:
     with db.begin():
         target = db.get(SysUser, user_id)
-        if target is None or target.class_id != user.class_id:
+        # 第三十二轮：成员在**我能管的班**里就行（不一定在当前班）。
+        if target is None or target.class_id not in managed_class_ids(
+            db, user.id, user.role, user.class_id
+        ):
             raise BizException.bad_request("成员不存在")
 
         if (
@@ -193,6 +295,8 @@ def update_user(
             and req.status is None
             and req.password is None
             and req.guestScopes is None
+            and req.deanOnly is None
+            and req.classIds is None
         ):
             raise BizException.bad_request("没有需要修改的内容")
 
@@ -222,10 +326,29 @@ def update_user(
         # 却会在库里躺一份永远读不到的死数据，所以非访客一律存 NULL。
         if req.guestScopes is not None and target.role == GUEST_ROLE:
             values["guest_scopes"] = dump_guest_scopes(req.guestScopes)
+        # 第三十轮：改「是否纯院长」。要求是「创建时选、编辑时也能改」，
+        # 改完**立刻生效**（中间件每个请求都重读这一列）。
+        #
+        # 只对院长生效：给别的角色写这一位不会起作用，
+        # 却会在库里躺一份永远读不到的死数据，所以非院长一律存 0。
+        if req.deanOnly is not None and target.role == DEAN_ROLE:
+            values["dean_only"] = 1 if req.deanOnly else 0
 
-        db.execute(update(SysUser).where(SysUser.id == target.id).values(**values))
-        db.refresh(target)
-        return account_vo(target)
+        # ⚠ `values` 可能**是空的**（只传了 classIds 之类不进这张表的字段）——
+        # `UPDATE ... SET WHERE ...` 是语法错误，整个请求 500。
+        # 所以空了就别执行这条 UPDATE（下面的关联表处理照样做）。
+        if values:
+            db.execute(update(SysUser).where(SysUser.id == target.id).values(**values))
+            db.refresh(target)
+        # 第三十二轮：改「这个账号能管哪些班」。
+        if req.classIds is not None:
+            # 只能给**我能管的班**——不能把权限发给我自己都管不了的班。
+            mine = set(managed_class_ids(db, user.id, user.role, user.class_id))
+            wanted = [cid for cid in req.classIds if int(cid) in mine]
+            if not wanted:
+                raise BizException.bad_request("至少要保留一个你能管的班")
+            _set_managed_classes(db, target.id, target.class_id, wanted)
+        return account_vo(target, managed_class_ids(db, target.id, target.role, target.class_id))
 
 
 def my_profile(db: Session, user: LoginUser) -> dict:
@@ -238,7 +361,9 @@ def my_profile(db: Session, user: LoginUser) -> dict:
         target = db.get(SysUser, user.id)
         if target is None:
             raise BizException.unauthorized("账号不存在或已被删除")
-        return account_vo(target)
+        return account_vo(
+            target, managed_class_ids(db, target.id, target.role, target.class_id)
+        )
 
 
 def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> dict:
@@ -253,7 +378,13 @@ def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> d
         if target is None:
             raise BizException.unauthorized("账号不存在或已被删除")
 
-        if req.realName is None and req.studentNo is None and req.phone is None:
+        if (
+            req.realName is None
+            and req.studentNo is None
+            and req.phone is None
+            and req.deanOnly is None
+            and req.classIds is None
+        ):
             raise BizException.bad_request("没有需要修改的内容")
 
         values = _apply_profile_fields(
@@ -263,9 +394,49 @@ def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> d
             student_no=req.studentNo,
             phone=req.phone,
         )
-        db.execute(update(SysUser).where(SysUser.id == target.id).values(**values))
-        db.refresh(target)
-        return account_vo(target)
+        # 第三十二轮：本人改「职务范围」（纯院长 ↔ 兼班主任）。
+        #
+        # 只有**院长本人**能改：别的角色这一位没有意义（`dean_only` 对他们
+        # 永远是 0），给他们一个开关只会让人以为自己多了什么。
+        #
+        # ⚠ 这是**本人给自己**开班级事务的权限，所以只对「纯院长」开放
+        # （解除第三十轮加的那个限制），不给普通角色。
+        if req.deanOnly is not None and target.role == DEAN_ROLE:
+            values["dean_only"] = 1 if req.deanOnly else 0
+        if values:
+            db.execute(update(SysUser).where(SysUser.id == target.id).values(**values))
+            db.refresh(target)
+
+        # 第三十二轮：本人改「**我带的班**」。
+        #
+        # 「班主任」是**班**的属性（多对多）：`sys_user_class` 里
+        # (我, 班) 的行 = 我是这个班的班主任。
+        #
+        # 这里是**本人说了算**（用户口径）——所以他能给自己加一个班，
+        # 也就等于有了那个班的收钱/成员/任务权限。这是用户明确要的。
+        #
+        # ⚠ 只动**我自己**的那些行：同一个班里别的老师（副班主任）不受影响。
+        # ⚠ 默认班自动包含在内：那是「登录落在哪个班」，
+        # 要是它不在我带的班里，登录后落在一个「我不是班主任」的班上，很别扭。
+        if req.classIds is not None and target.role in STAFF_ROLES:
+            wanted = [int(c) for c in req.classIds]
+            alive: list[int] = []
+            if wanted:
+                alive = [
+                    int(cid)
+                    for (cid,) in db.execute(
+                        select(ClsClass.id).where(
+                            ClsClass.id.in_(wanted), ClsClass.status == 1
+                        )
+                    )
+                ]
+            if target.class_id not in alive:
+                alive.append(target.class_id)
+            db.execute(delete(SysUserClass).where(SysUserClass.user_id == target.id))
+            for cid in alive:
+                db.add(SysUserClass(user_id=target.id, class_id=cid))
+            db.flush()
+        return account_vo(target, managed_class_ids(db, target.id, target.role, target.class_id))
 
 
 def _count(db: Session, model, *conds) -> int:

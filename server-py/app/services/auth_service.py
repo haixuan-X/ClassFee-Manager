@@ -8,10 +8,11 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
-from ..models import ClsClass, SysUser
+from ..models import ClsClass, SysUser, SysUserClass
 from ..schemas import LoginRequest, PasswordRequest
 from ..security import LoginUser, create_token, verify_password
 from ..serializers import user_vo
+from .user_service import managed_class_ids
 
 
 def _class_name(db: Session, class_id: int | None) -> str | None:
@@ -19,6 +20,26 @@ def _class_name(db: Session, class_id: int | None) -> str | None:
         return None
     row = db.get(ClsClass, class_id)
     return row.class_name if row is not None else None
+
+
+def _managed_classes(
+    db: Session, user_id: int, role: str, default_class_id: int
+) -> list[tuple[int, str]]:
+    """这个账号**能管的班**（第三十二轮）：[(班级 id, 班级名), ...]。
+
+    = 默认班 + sys_user_class 里关联的班；**院长 = 所有启用班**。
+    默认班排第一（登录后落在它上面）。
+    """
+    ids: list[int] = managed_class_ids(db, user_id, role, default_class_id)
+    if len(ids) == 1:
+        return [(default_class_id, _class_name(db, default_class_id) or "")]
+    rows = db.execute(
+        select(ClsClass.id, ClsClass.class_name).where(
+            ClsClass.id.in_(ids), ClsClass.status == 1
+        )
+    ).all()
+    name_by_id = {int(r[0]): r[1] for r in rows}
+    return [(cid, name_by_id.get(cid, "")) for cid in ids if cid in name_by_id]
 
 
 def login(db: Session, req: LoginRequest) -> dict:
@@ -44,7 +65,11 @@ def login(db: Session, req: LoginRequest) -> dict:
         )
         return {
             "token": create_token(login_user),
-            "user": user_vo(user, _class_name(db, user.class_id)),
+            "user": user_vo(
+                user,
+                _class_name(db, user.class_id),
+                _managed_classes(db, user.id, user.role, user.class_id),
+            ),
         }
 
 
@@ -53,7 +78,11 @@ def me(db: Session, current: LoginUser) -> dict:
         user = db.get(SysUser, current.id)
         if user is None:
             raise BizException.unauthorized("账号不存在或已被删除")
-        return user_vo(user, _class_name(db, user.class_id))
+        return user_vo(
+            user,
+            _class_name(db, user.class_id),
+            _managed_classes(db, user.id, user.role, user.class_id),
+        )
 
 
 def change_password(db: Session, current: LoginUser, req: PasswordRequest) -> None:
