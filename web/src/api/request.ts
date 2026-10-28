@@ -39,6 +39,14 @@ service.interceptors.response.use(
     const status = error.response?.status
     const message = error.response?.data?.message
 
+    // 二进制下载（xlsx）失败时**不在这里弹**：`responseType: 'blob'` 让
+    // `error.response.data` 是个 Blob，拿不到后端的中文 message，弹出来就是
+    // 「Request failed with status code 403」这种英文技术文案；而且调用方
+    // （导出函数）自己还会再弹一条，同一个失败弹两次。由调用方统一提示。
+    if ((error.config as { responseType?: string } | undefined)?.responseType === 'blob') {
+      return Promise.reject(error)
+    }
+
     if (status === 401) {
       // 必须清 Pinia 里的登录态：只清 localStorage 会让路由守卫仍认为“已登录”，
       // 把 /login 又弹回受保护页，形成卡死循环

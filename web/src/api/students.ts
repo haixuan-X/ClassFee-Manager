@@ -1,7 +1,6 @@
-import type { AxiosResponse } from 'axios'
 import { ElMessage } from 'element-plus'
-import { request } from '@/api/request'
-import service from '@/api/request'
+import { request, service } from '@/api/request'
+import { downloadXlsx, exportFailure } from '@/utils/download'
 import type {
   StudentAccessRequest,
   StudentField,
@@ -242,9 +241,14 @@ export function importStudents(file: File) {
  * 而这里是 xlsx 二进制，没有 `code` 字段会被误判成失败。
  */
 export async function exportStudents(): Promise<void> {
-  await downloadXlsx(
-    service.get<Blob>('/students/export', { responseType: 'blob' }),
-  )
+  try {
+    downloadXlsx(
+      await service.get<Blob>('/students/export', { responseType: 'blob' }),
+      '学生信息.xlsx',
+    )
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /**
@@ -265,9 +269,14 @@ export async function exportSelectedStudents(
     ElMessage.warning('请先勾选要导出的学生或字段')
     return
   }
-  await downloadXlsx(
-    service.post<Blob>('/students/export', { recordIds, fieldKeys }, { responseType: 'blob' }),
-  )
+  try {
+    downloadXlsx(
+      await service.post<Blob>('/students/export', { recordIds, fieldKeys }, { responseType: 'blob' }),
+      '学生信息.xlsx',
+    )
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /**
@@ -280,31 +289,14 @@ export async function exportSelectedStudents(
  * 填完直接走 `importStudents` 传回来，表头不用改（导入按列名找列）。
  */
 export async function downloadStudentTemplate(): Promise<void> {
-  await downloadXlsx(
-    service.get<Blob>('/students/template', { responseType: 'blob' }),
-  )
-}
-
-/** 把 xlsx 响应变成浏览器下载。中文文件名走 RFC 5987 的 filename* */
-async function downloadXlsx(req: Promise<AxiosResponse<Blob>>): Promise<void> {
-  const res = await req
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  // axios 的 headers 类型是 AxiosResponseHeaders，值可能是 string[] / undefined，
-  // 所以只能按 unknown 取——原代码就是 `res.headers['content-disposition'] ?? ''`，
-  // 这次只是把整体类型标成 AxiosResponse，别收紧到 Record<string,string>。
-  const disposition = String(res.headers?.['content-disposition'] ?? '')
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '学生信息.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+  try {
+    downloadXlsx(
+      await service.get<Blob>('/students/template', { responseType: 'blob' }),
+      '学生信息导入模板.xlsx',
+    )
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /** 我提交的申请（mine=true） */

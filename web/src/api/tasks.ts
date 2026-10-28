@@ -1,5 +1,5 @@
-import { request } from '@/api/request'
-import service from '@/api/request'
+import { request, service } from '@/api/request'
+import { downloadXlsx, exportFailure } from '@/utils/download'
 import type {
   TaskAnswer,
   TaskCreatePayload,
@@ -128,46 +128,26 @@ export function fetchTaskDetail(id: number) {
 }
 
 /**
- * 导出全班回答（xlsx）。
- *
- * 直接用 axios 实例而不是 `request()`：后者要解 `{code,message,data}` 信封，
- * 而这里是 xlsx 二进制，没有 `code` 字段会被误判成失败。
+ * xlsx 下载的两个小工具（触发下载 / 把失败翻成中文错误）共用一份，
+ * 放在 `utils/download.ts`——学生名册、账本、学院名册的导出也在用。
  */
 export async function exportTaskDetail(id: number): Promise<void> {
-  const res = await service.get<Blob>(`/tasks/${id}/export`, { responseType: 'blob' })
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const disposition = String(res.headers?.['content-disposition'] ?? '')
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '任务回答.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+  try {
+    const res = await service.get<Blob>(`/tasks/${id}/export`, { responseType: 'blob' })
+    downloadXlsx(res, '任务回答.xlsx')
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /** 导出**任务总览**（所有任务一览 + 回收情况），仅院长。 */
 export async function exportTaskOverview(): Promise<void> {
-  const res = await service.get<Blob>('/tasks/overview/export', { responseType: 'blob' })
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const disposition = String(res.headers?.['content-disposition'] ?? '')
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '任务总览.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+  try {
+    const res = await service.get<Blob>('/tasks/overview/export', { responseType: 'blob' })
+    downloadXlsx(res, '任务总览.xlsx')
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /** 题型枚举。与后端 `task_service.QTYPES` 一一对应。 */

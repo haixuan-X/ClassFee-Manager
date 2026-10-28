@@ -14,6 +14,7 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
 import { publishTask, updateTask, TASK_QTYPES } from '@/api/tasks'
 import { disablePastDates, isPastDateTime } from '@/utils/date'
+import dayjs from 'dayjs'
 import type { Task, TaskCreatePayload, TaskQType, TaskScope } from '@/types'
 
 const props = withDefaults(
@@ -62,15 +63,30 @@ const originalDeadline = ref<string | null>(null)
 const editing = computed(() => props.task !== null)
 const isCollege = computed(() => props.scope === 'COLLEGE')
 
+/**
+ * 后端的截止时间有两种口径，都要能吃下：
+ *
+ * - 班级任务列表（`task_service._build_rows`）：`YYYY-MM-DD HH:mm`（不带秒）
+ * - 学院任务列表（`college_service.tasks` 的 `fmt_dt`）：`YYYY-MM-DD HH:mm:ss`（带秒）
+ *
+ * 原来一律 `.replace(' ', 'T') + ':00'`，对带秒的那份会拼出
+ * `2026-10-29T23:59:59:00` —— pydantic 直接拒，学院任务的**修改必然 400**。
+ *
+ * 解析不出来就原样交给后端报错：**绝不能静默变成 null**，
+ * 那会把「已经设过的截止时间」悄悄改成「不限时间」。
+ */
+function toPickerValue(raw: string): string {
+  const parsed = dayjs(raw.replace(' ', 'T'))
+  return parsed.isValid() ? parsed.format('YYYY-MM-DDTHH:mm:ss') : raw
+}
+
 /** 打开时按 scope / 任务重置表单 */
 watch(
   () => props.modelValue,
   (open) => {
     if (!open) return
     if (props.task) {
-      const deadline = props.task.deadline
-        ? props.task.deadline.replace(' ', 'T') + ':00'
-        : null
+      const deadline = props.task.deadline ? toPickerValue(props.task.deadline) : null
       originalDeadline.value = deadline
       Object.assign(form, {
         title: props.task.title,

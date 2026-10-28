@@ -450,8 +450,16 @@ export interface CollegeTaskRow {
   pinned: boolean
   /** 是不是我发的——决定显示不显示编辑/置顶/关闭/删除 */
   canEdit: boolean
-  /** 能不能看「谁填了什么」——决定显示不显示「导出」（院长/发布人/班主任） */
+  /**
+   * 能不能看明细 / 导出。
+   *
+   * 和 `canEdit` 是**两个**权限：纯院长能管学院任务，却看不到别人班级任务的
+   * 明细（后端 `task_service.can_see_detail`）。按钮必须各按各的显示，
+   * 共用一个 v-if 会出现「关闭能用、导出 403」。
+   */
   canSeeDetail: boolean
+  /** 和 canEdit 同义，给需要区分「改内容」与「管状态」的地方用 */
+  canManage: boolean
   deadline: string | null
   createdAt: string | null
   /** 已答人数 */

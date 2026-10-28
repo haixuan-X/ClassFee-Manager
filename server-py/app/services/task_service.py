@@ -272,13 +272,24 @@ def _require_task(db: Session, class_id: int, task_id: int) -> ClsTask:
 
 
 def _require_publisher(task: ClsTask, user: LoginUser) -> None:
-    """改/关/删任务：发布人自己；**院长**可以管理全院任何任务（学院视角）。
+    """改/关/删任务：发布人自己；**院长**可以管理**学院任务**。
 
     班主任不能删别人（班长）发的任务——「谁发的任务谁负责」这条线要保住；
-    但院长是学院层管理员，学院视角的班级任务一览需要能统一编辑/关闭/删除。
+    但院长是学院层管理员，学院视角需要能统一编辑/关闭/删除学院任务。
+
+    ⚠ **纯院长只管学院**：班级任务他连明细都看不到（见 `can_see_detail`），
+    更不该能改/关/删。`security.pure_dean_allowed` 放行了 `/api/tasks/*`
+    （学院任务要用），所以这道门必须在 service 这一层补齐——
+    否则会出现「按钮没有、接口却能改别人班级任务」的越权（实测
+    `POST /tasks/{别人的班级任务}/close` 200）。
+    兼班主任的院长（dean_only=0）按班主任身份管本班事务，不受此限。
     """
-    if task.created_by != user.id and user.role != DEAN_ROLE:
+    if task.created_by == user.id:
+        return
+    if user.role != DEAN_ROLE:
         raise BizException.forbidden("只有发布这个任务的人才能修改它")
+    if is_pure_dean(user) and not is_college_task(task):
+        raise BizException.forbidden("纯院长只管学院任务；班级任务请由班主任（或班委）处理")
 
 
 # ==================== 值的解析与归一 ====================

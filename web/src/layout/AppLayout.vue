@@ -153,8 +153,9 @@ function onCommand(command: string | number | object) {
   width: 220px;
   padding: var(--space-md) var(--space-sm);
   background: var(--color-card);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  /* ⚠ 侧栏是 fixed 且主内容有 margin-left:220px —— 没有任何东西会从它**背后**滚过，
+     背后的只有静止的页面渐变。blur 那一层画出来和不画完全一样，纯烧 GPU，
+     所以这里不写 backdrop-filter（顶栏要留：内容会从它下面滚过）。 */
   border-right: 1px solid var(--color-border);
   overflow-y: auto;
 }

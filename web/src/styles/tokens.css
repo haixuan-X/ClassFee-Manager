@@ -172,11 +172,14 @@ body::before {
   font-variant-numeric: tabular-nums;
 }
 
-/* 玻璃卡片 */
+/* 玻璃卡片。
+   ⚠ 这里**故意没有** `backdrop-filter: blur()`：卡片底下是**平铺的页面渐变**，
+   把一层渐变再模糊一遍，画出来的还是那层渐变——视觉上等于没做，代价却是
+   每张卡多出一个合成层，滚动/图表动画时整片重栅格化。本应用一页最多 8 张卡，
+   低端机或内存吃紧时这是一笔实打实的 GPU 与显存开销（实测 10 个带 blur 的元素）。
+   真正需要「磨砂」的只有顶栏（内容会从它下面滚过）——那里保留 blur。 */
 .glass-card {
   background: var(--color-card);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);

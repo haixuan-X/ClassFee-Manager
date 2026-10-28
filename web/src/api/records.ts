@@ -1,4 +1,5 @@
 import service, { request } from '@/api/request'
+import { exportFailure } from '@/utils/download'
 import type { Category, RecordRequest, RecordType, FeeRecord, PageInfo, RecordQuery } from '@/types'
 
 /** 类别列表，kind=INCOME|EXPENSE 可选 */
@@ -56,24 +57,28 @@ export function deleteCategory(id: number) {
 export async function exportRecords(query: RecordQuery): Promise<void> {
   // 导出不按分页，page/size 剔掉（后端虽忽略，也别让下载 URL 里出现误导参数）
   const { id, page: _page, size: _size, ...filters } = query
-  const res = await service.get<Blob>('/records/export', {
-    params: { ...filters, id },
-    responseType: 'blob',
-  })
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  // 优先用后端给的 RFC 5987 中文文件名（filename*=UTF-8''...），拿不到就退回默认名
-  const disposition = res.headers['content-disposition'] ?? ''
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '班费账本.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  // 立刻 revoke 会让部分浏览器来不及取数据，延后一拍再释放
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  try {
+    const res = await service.get<Blob>('/records/export', {
+      params: { ...filters, id },
+      responseType: 'blob',
+    })
+    const blob = new Blob([res.data], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    // 优先用后端给的 RFC 5987 中文文件名（filename*=UTF-8''...），拿不到就退回默认名
+    const disposition = res.headers['content-disposition'] ?? ''
+    const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+    const filename = matched ? decodeURIComponent(matched[1]) : '班费账本.xlsx'
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    // 立刻 revoke 会让部分浏览器来不及取数据，延后一拍再释放
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error) {
+    exportFailure(error)
+  }
 }

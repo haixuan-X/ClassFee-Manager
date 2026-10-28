@@ -51,9 +51,12 @@ from ..security import DEAN_ROLE, LoginUser
 from ..serializers import fmt_dt
 from . import student_service as svc
 from .task_service import (
+    can_see_detail,
     is_answer_target,
     is_college_answer_target,
+    is_college_task,
     is_open,
+    is_pure_dean,
 )
 
 #: 班主任角色。这个名册只列他们（以及兼班主任的院长）。
@@ -1584,6 +1587,23 @@ def teacher_candidates(db: Session) -> list[dict]:
 # ==================== 学院任务 ====================
 
 
+def can_manage_task(task: ClsTask, user: LoginUser) -> bool:
+    """这条任务能不能被**改 / 关 / 置顶 / 删**（学院任务页的操作列）。
+
+    与后端闸门 `task_service._require_publisher` 同一条规则：
+
+    - 发布人自己：永远可以
+    - 院长：可以管**学院任务**；班级任务只有**非纯院长**（兼班主任的院长）
+      才可以——纯院长不参与班级事务，班级那几个页面他都进不去，
+      却在「班级任务」一览里把别人的任务关掉，是越权。
+    """
+    if task.created_by == user.id:
+        return True
+    if user.role != DEAN_ROLE:
+        return False
+    return is_college_task(task) or not is_pure_dean(user)
+
+
 def tasks(
     db: Session,
     user: LoginUser,
@@ -1716,10 +1736,18 @@ def tasks(
                 # 第三十三轮：学院任务页要能编辑 / 删除 / 导出自己发的任务。
                 # 前端按 canEdit / canSeeDetail 决定显示哪些按钮，这里必须给出来
                 # （之前没给，操作列只剩一个「—」）。
+                #
+                # ⚠ 两个口径必须分开，而且**都由后端那一条判定**说了算：
+                #   - canEdit（改 / 关 / 置顶 / 删）：发布人自己，或院长
+                #     （`task_service._require_publisher` 允许院长管全院任何任务）。
+                #     但**纯院长不参与班级事务**：他连班级那几个页面都进不去，
+                #     却在「班级任务」一览里把别人的任务关掉，就是越权。
+                #   - canSeeDetail（明细 / 导出）：直接用 `task_service.can_see_detail`。
+                #     自己再写一份必然漂——实测出现过「同一行：关闭能用、导出 403」。
                 "createdBy": t.created_by,
-                "canEdit": t.created_by == user.id or user.role == DEAN_ROLE,
-                "canSeeDetail": t.created_by == user.id or user.role == DEAN_ROLE,
-                "canManage": t.created_by == user.id or user.role == DEAN_ROLE,
+                "canEdit": can_manage_task(t, user),
+                "canSeeDetail": can_see_detail(t, user),
+                "canManage": can_manage_task(t, user),
                 # 编辑对话框回填要用题型 / 候选项（题型本身不给改）。
                 "qtype": t.qtype,
                 "options": json.loads(t.options_json) if t.options_json else [],

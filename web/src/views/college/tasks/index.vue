@@ -194,12 +194,19 @@ async function batchRemove() {
   await load()
 }
 
+/** 正在导出的任务 id：点一次就够，别让人连点出三个下载 */
+const exportingId = ref<number | null>(null)
+
 /** 导出这一条任务的全部回答（谁填了什么、谁还没填） */
 async function onExport(row: CollegeTaskRow) {
+  if (exportingId.value !== null) return
+  exportingId.value = row.id
   try {
     await exportTaskDetail(row.id)
   } catch (e) {
     ElMessage.error(getErrorMessage(e, '导出失败'))
+  } finally {
+    exportingId.value = null
   }
 }
 
@@ -359,7 +366,17 @@ onMounted(load)
               <td class="num">{{ fmtTime(row.deadline) }}</td>
               <td class="num">{{ fmtTime(row.createdAt) }}</td>
               <td>
-                <el-button size="small" @click="onExport(row)">导出</el-button>
+                <!-- 导出 = 看明细，和「改/关/删」是**两个权限**：
+                     纯院长能看学院任务明细，却看不到别人班级任务的明细（会 403），
+                     所以按钮各自按后端下发的标志显示，不能共用一个 v-if -->
+                <el-button
+                  v-if="row.canSeeDetail"
+                  size="small"
+                  :loading="exportingId === row.id"
+                  @click="onExport(row)"
+                >
+                  导出
+                </el-button>
                 <template v-if="row.canEdit">
                   <el-button size="small" @click="openEdit(row)">编辑</el-button>
                   <el-button size="small" @click="toggleOpen(row)">
@@ -370,6 +387,12 @@ onMounted(load)
                   </el-button>
                   <el-button size="small" type="danger" @click="removeTask(row)">删除</el-button>
                 </template>
+                <span
+                  v-if="!row.canSeeDetail && !row.canEdit"
+                  style="color: var(--color-muted-fg)"
+                >
+                  —
+                </span>
               </td>
             </tr>
           </tbody>

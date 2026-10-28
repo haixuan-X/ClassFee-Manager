@@ -1465,7 +1465,8 @@ function onMore(cmd: string) {
                   <button
                     v-if="col.field"
                     class="mini"
-                    title="在这一列前面插入新列"
+                    :aria-label="`在「${col.label}」前面插入新列`"
+                    :title="`在「${col.label}」前面插入新列`"
                     @click="openInsert(col)"
                   >
                     ＋
@@ -1473,7 +1474,8 @@ function onMore(cmd: string) {
                   <button
                     v-if="col.field"
                     class="mini danger"
-                    title="停用该列"
+                    :aria-label="`停用「${col.label}」这一列`"
+                    :title="`停用「${col.label}」这一列`"
                     @click="removeColumn(col)"
                   >
                     ✕
@@ -1653,7 +1655,7 @@ function onMore(cmd: string) {
         </el-form-item>
       </el-form>
       <p class="add-hint">
-        新列会**加到所有班**——学院只有一份表，各班的列名要一样才对得上。
+        新列会加到<b>所有班</b>——学院只有一份表，各班的列名要一样才对得上。
       </p>
       <template #footer>
         <el-button @click="insertOpen = false">取消</el-button>

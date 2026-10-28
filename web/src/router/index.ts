@@ -245,6 +245,21 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 })
 
+/**
+ * `/auth/me` 的**刷新节流**。
+ *
+ * 原来是「每次进路由都拉一次」：点 50 下菜单 = 50 个 `/auth/me`，
+ * 而且 `setUser` 每次都会换掉 `user` 对象 → 侧栏（按角色渲染菜单）跟着整棵重渲染，
+ * 再叠上 localStorage 写一次。数据量大、机器内存吃紧时，这就是肉眼可见的卡顿。
+ *
+ * 缓存里的用户信息只用来渲染首屏，**权限边界永远在后端**（`_STAFF_ROUTES`），
+ * 所以这里放宽到「5 分钟最多刷新一次」不影响安全：角色被降级时最迟 5 分钟后
+ * 界面就收敛了，真出事由后端 401/403 兜底。
+ */
+const ME_REFRESH_MS = 5 * 60 * 1000
+/** 0 = 首屏一定先拉一次（缓存可能是上次会话留下的），之后才进入节流窗口 */
+let lastMeSyncAt = 0
+
 router.beforeEach(async (to) => {
   const userStore = useUserStore()
 
@@ -266,14 +281,19 @@ router.beforeEach(async (to) => {
     if (!userStore.user) {
       try {
         userStore.setUser(await fetchMe())
+        lastMeSyncAt = Date.now()
       } catch {
         /* token 失效由请求拦截器统一处理（清会话跳登录） */
       }
-    } else {
+    } else if (Date.now() - lastMeSyncAt >= ME_REFRESH_MS) {
+      // ⚠ 时间戳在**发起前**就打上，失败也不回退：
+      // 后端挂掉时若「失败即重置」，就变回「每切一次页面重试一次」，
+      // 而那次重试要等 10s 超时——正是「点什么都没反应」的那种卡。
+      lastMeSyncAt = Date.now()
       void fetchMe()
         .then((info) => userStore.setUser(info))
         .catch(() => {
-          /* 后台刷新失败不阻塞导航，下次进页面再试 */
+          /* 后台刷新失败不阻塞导航，5 分钟后自然再试 */
         })
     }
   }

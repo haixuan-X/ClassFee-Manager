@@ -231,8 +231,11 @@ const groups: NavGroup[] = [
           // （本班）和这一条（全校），同名的话两处都写着「学生信息」，
           // 谁也分不清点进去的是哪个。
           { index: '/college/students', label: '学生名册', icon: 'Postcard', roles: DEAN_ONLY },
-          // 学院成员管理 = 各班**班主任（导员）**名册
-          { index: '/college/advisers', label: '成员管理', icon: 'User', roles: DEAN_ONLY },
+          // 学院成员管理 = 各班**班主任（导员）**名册。
+          // 标签写「班主任名册」而不是「成员管理」：侧栏里已经有一个班级层的
+          // 「成员管理」（/member-manage），两处同名会让人以为是同一个页面
+          // （实测：点侧栏「成员管理」，页面标题却是「班主任名册」，对不上）。
+          { index: '/college/advisers', label: '班主任名册', icon: 'User', roles: DEAN_ONLY },
         ],
       },
       {

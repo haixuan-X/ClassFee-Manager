@@ -14,7 +14,6 @@ import {
 } from '@/api/tasks'
 import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
 import { useModal } from '@/composables/useModal'
-import { useUserStore } from '@/stores/user'
 import type {
   Task,
   TaskDetail,
@@ -46,7 +45,6 @@ import type {
  * 不是按钮禁用——按不了的东西就不该在页面上。
  */
 
-const userStore = useUserStore()
 const loading = ref(true)
 const rows = ref<Task[]>([])
 const canPublish = ref(false)
@@ -261,7 +259,7 @@ async function onDelete(row: Task) {
   try {
     await ElMessageBox.confirm(
       `确认删除任务「${row.title}」？` +
-        `已经收回的 ${row.summary.answered} 份回答会**一起删除**，不可恢复。`,
+        `已经收回的 ${row.summary.answered} 份回答会一起删除，不可恢复。`,
       '删除任务',
       { type: 'error', confirmButtonText: '确认删除', cancelButtonText: '取消' },
     )

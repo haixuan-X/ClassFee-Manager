@@ -1,4 +1,5 @@
 import { request, service } from '@/api/request'
+import { downloadXlsx, exportFailure } from '@/utils/download'
 import type {
   CollegeAdviserList,
   CollegeFieldList,
@@ -62,21 +63,12 @@ export function importCollegeAdvisers(file: File) {
 
 /** 下载班主任导入模板（xlsx） */
 export async function downloadAdviserTemplate(): Promise<void> {
-  const res = await service.get<Blob>('/college/advisers/template', { responseType: 'blob' })
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const disposition = String(res.headers?.['content-disposition'] ?? '')
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '班主任导入模板.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+  try {
+    const res = await service.get<Blob>('/college/advisers/template', { responseType: 'blob' })
+    downloadXlsx(res, '班主任导入模板.xlsx')
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /**
@@ -127,33 +119,23 @@ export async function exportCollegeStudents(params: {
   offset?: number
   limit?: number
 }): Promise<void> {
-  const res = await service.get<Blob>('/college/students/export', {
-    responseType: 'blob',
-    params: {
-      columns: params.columns.join(',') || undefined,
-      ids: params.ids?.length ? params.ids.join(',') : undefined,
-      keyword: params.keyword || undefined,
-      classId: params.classId ?? undefined,
-      grade: params.grade || undefined,
-      offset: params.offset ?? undefined,
-      limit: params.limit ?? undefined,
-    },
-  })
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  // 中文文件名走 RFC 5987 的 filename*（后端已按这个格式发）
-  const disposition = String(res.headers?.['content-disposition'] ?? '')
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '学院学生信息.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+  try {
+    const res = await service.get<Blob>('/college/students/export', {
+      responseType: 'blob',
+      params: {
+        columns: params.columns.join(',') || undefined,
+        ids: params.ids?.length ? params.ids.join(',') : undefined,
+        keyword: params.keyword || undefined,
+        classId: params.classId ?? undefined,
+        grade: params.grade || undefined,
+        offset: params.offset ?? undefined,
+        limit: params.limit ?? undefined,
+      },
+    })
+    downloadXlsx(res, '学院学生信息.xlsx')
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /**
@@ -163,23 +145,14 @@ export async function exportCollegeStudents(params: {
  * 填完直接走 `importCollegeStudents` 传回来：有「班级」列就按行分发到各班。
  */
 export async function downloadCollegeStudentTemplate(): Promise<void> {
-  const res = await service.get<Blob>('/college/students/template', {
-    responseType: 'blob',
-  })
-  const blob = new Blob([res.data], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const disposition = String(res.headers?.['content-disposition'] ?? '')
-  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
-  const filename = matched ? decodeURIComponent(matched[1]) : '学院学生名册导入模板.xlsx'
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+  try {
+    const res = await service.get<Blob>('/college/students/template', {
+      responseType: 'blob',
+    })
+    downloadXlsx(res, '学院学生名册导入模板.xlsx')
+  } catch (error) {
+    exportFailure(error)
+  }
 }
 
 /**
