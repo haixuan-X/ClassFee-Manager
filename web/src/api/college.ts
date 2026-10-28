@@ -42,6 +42,43 @@ export function fetchCollegeAdvisers() {
   return request<CollegeAdviserList>({ url: '/college/advisers', method: 'get' })
 }
 
+/** 导入班主任账号（Excel）：姓名 / 登录名 / 初始密码 / 手机号 / 带的班 */
+export function importCollegeAdvisers(file: File) {
+  const fd = new FormData()
+  fd.append('file', file)
+  return request<{
+    created: number
+    updated: number
+    skipped: number
+    errors: string[]
+    errorCount: number
+  }>({
+    url: '/college/advisers/import',
+    method: 'post',
+    data: fd,
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+/** 下载班主任导入模板（xlsx） */
+export async function downloadAdviserTemplate(): Promise<void> {
+  const res = await service.get<Blob>('/college/advisers/template', { responseType: 'blob' })
+  const blob = new Blob([res.data], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  const disposition = String(res.headers?.['content-disposition'] ?? '')
+  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  const filename = matched ? decodeURIComponent(matched[1]) : '班主任导入模板.xlsx'
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 /**
  * 可被选为班主任的账号（第三十二轮）。
  *
@@ -86,6 +123,9 @@ export async function exportCollegeStudents(params: {
   keyword?: string
   classId?: number | null
   grade?: string
+  /** 按行区间导出：从第 offset 条（0 起）开始，最多 limit 条 */
+  offset?: number
+  limit?: number
 }): Promise<void> {
   const res = await service.get<Blob>('/college/students/export', {
     responseType: 'blob',
@@ -95,6 +135,8 @@ export async function exportCollegeStudents(params: {
       keyword: params.keyword || undefined,
       classId: params.classId ?? undefined,
       grade: params.grade || undefined,
+      offset: params.offset ?? undefined,
+      limit: params.limit ?? undefined,
     },
   })
   const blob = new Blob([res.data], {
@@ -104,6 +146,32 @@ export async function exportCollegeStudents(params: {
   const disposition = String(res.headers?.['content-disposition'] ?? '')
   const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
   const filename = matched ? decodeURIComponent(matched[1]) : '学院学生信息.xlsx'
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * 下载学院名册的**导入模板**（列 = 所有启用班级的字段合并，另加「班级」列）。
+ *
+ * 每次下载现读字段，学院里新增一列后重新下载就是新列。
+ * 填完直接走 `importCollegeStudents` 传回来：有「班级」列就按行分发到各班。
+ */
+export async function downloadCollegeStudentTemplate(): Promise<void> {
+  const res = await service.get<Blob>('/college/students/template', {
+    responseType: 'blob',
+  })
+  const blob = new Blob([res.data], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  const disposition = String(res.headers?.['content-disposition'] ?? '')
+  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  const filename = matched ? decodeURIComponent(matched[1]) : '学院学生名册导入模板.xlsx'
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -196,6 +264,17 @@ export function restoreCollegeField(key: string) {
   })
 }
 
+/**
+ * 彻底删除**已停用**的列（所有班一起删）：字段定义和值一起删，不可恢复。
+ * 后端只放行所有班都已停用的 key——和停用/恢复一样，这条是跨班操作。
+ */
+export function purgeCollegeField(key: string) {
+  return request<{ key: string; label: string; classCount: number; deletedValues: number }>({
+    url: `/college/fields/${encodeURIComponent(key)}/purge`,
+    method: 'delete',
+  })
+}
+
 /** 改类型前的预览（不写库）。跨所有班汇总。 */
 export function previewCollegeFieldRetype(key: string, toType: string) {
   return request<CollegeRetypePreview>({
@@ -256,6 +335,40 @@ export function updateCollegeCell(
 }
 
 /**
+ * 新建一个班（**仅院长**）。
+ *
+ * 新班是空班，字段模板复制调用者默认班那份，所以建完直接能用。
+ * 同名班不会报错，后端把已有的那个返回来（`created=false`）。
+ */
+export function createCollegeClass(className: string, grade = '') {
+  return request<{
+    id: number
+    className: string
+    grade: string
+    created: boolean
+    fieldsCopied: number
+  }>({
+    url: '/college/classes',
+    method: 'post',
+    data: { className, grade },
+  })
+}
+
+/**
+ * 从学院名册里删行（**可批量**）。
+ *
+ * 删的是学生记录 + 他填过的所有字段值；**登录账号不动**（账号归「成员管理」）。
+ * 不可撤销，调用前必须让用户确认过。
+ */
+export function deleteCollegeStudents(ids: number[]) {
+  return request<{ deleted: number; ids: number[] }>({
+    url: '/college/students',
+    method: 'delete',
+    params: { ids: ids.join(',') },
+  })
+}
+
+/**
  * 转班：把一个学生挪到另一个班。
  *
  * ⚠ **不是「改一格」**：值表里存的是 `field_id`，而字段是**按班**定义的，
@@ -279,11 +392,19 @@ export function transferCollegeStudent(recordId: number, classId: number) {
   })
 }
 
-/** 学院任务一览：跨班级 */
+/**
+ * 学院视角的任务一览：跨班级。
+ *
+ * `scope` 决定看哪一类（第三十二轮）：
+ * - `COLLEGE`：**学院任务**（院长发到全学院的，各班班主任应答）
+ * - `CLASS`：**班主任发布的班级任务**（各班自己发的，同学应答）
+ * - `ALL`：两类都看
+ */
 export function fetchCollegeTasks(params: {
   keyword?: string
   classId?: number | null
   onlyPinned?: boolean
+  scope?: 'COLLEGE' | 'CLASS' | 'ALL'
 }) {
   return request<CollegeTaskList>({
     url: '/college/tasks',
@@ -292,6 +413,7 @@ export function fetchCollegeTasks(params: {
       keyword: params.keyword || undefined,
       classId: params.classId ?? undefined,
       onlyPinned: params.onlyPinned || undefined,
+      scope: params.scope ?? 'ALL',
     },
   })
 }

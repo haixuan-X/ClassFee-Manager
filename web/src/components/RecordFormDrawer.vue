@@ -6,6 +6,7 @@ import { createRecord, fetchCategories } from '@/api/records'
 import { MAX_RECEIPT_BYTES, RECEIPT_ACCEPT, uploadReceipt } from '@/api/files'
 import { getErrorMessage } from '@/api/request'
 import { useModal } from '@/composables/useModal'
+import { disableFutureDates, isFutureDateTime } from '@/utils/date'
 import CategoryManagerDialog from '@/components/CategoryManagerDialog.vue'
 import type { Category, Channel, RecordRequest, RecordType } from '@/types'
 import { CHANNEL_TEXT, TYPE_TEXT } from '@/types'
@@ -91,7 +92,19 @@ const rules: FormRules = {
     { required: true, message: '请填写摘要', trigger: 'blur' },
     { max: 60, message: '摘要最多 60 字', trigger: 'blur' },
   ],
-  occurredAt: [{ required: true, message: '请选择发生时间', trigger: 'change' }],
+  occurredAt: [
+    { required: true, message: '请选择发生时间', trigger: 'change' },
+    {
+      validator: (_rule, value: string | null, callback) => {
+        // 流水可以补录过去的，但不能记「还没发生」的
+        if (value && isFutureDateTime(value)) {
+          return callback(new Error('发生时间不能晚于现在'))
+        }
+        callback()
+      },
+      trigger: 'change',
+    },
+  ],
 }
 
 /** Esc 关闭兜底（EP select 吞 Escape）+ 关闭后焦点还原；root 指向抽屉内容以判定嵌套层级 */
@@ -140,17 +153,19 @@ async function onSubmit() {
   if (!formRef.value) return
   if (loading.value) return
 
-  const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) {
-    alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
-    await nextTick()
-    alertRef.value?.focus()
-    return
-  }
-
+  // 先上锁，再校验（同个人信息页那个坑）：validate 的 await 期间按钮还能点，
+  // 连点两下会记成**两笔流水**（余额跟着多算一次）
   loading.value = true
   alertMessage.value = ''
   try {
+    const valid = await formRef.value.validate().catch(() => false)
+    if (!valid) {
+      alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
+      await nextTick()
+      alertRef.value?.focus()
+      return
+    }
+
     // 先传小票拿相对路径，再随流水一起落库（上传失败=整单失败，不产生半截流水）
     let receiptUrl: string | undefined
     if (receiptFile.value) {
@@ -258,6 +273,7 @@ async function onSubmit() {
             type="datetime"
             placeholder="选择日期时间"
             value-format="YYYY-MM-DD HH:mm:ss"
+            :disabled-date="disableFutureDates"
             :clearable="false"
           />
         </el-form-item>

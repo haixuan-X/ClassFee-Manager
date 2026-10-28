@@ -204,10 +204,25 @@ export interface StudentDashboard {
   collegeScope: boolean
   /** 可见范围内的学生记录数 */
   studentTotal: number
-  /** 其中「在籍」的人数（休学/退学/毕业等不计入，空值算在籍） */
+  /** 其中「在籍」的人数（毕业/入伍/休学/退学等不计入，空值算在籍） */
   registeredTotal: number
-  /** 注册状态分布，按人数降序；未填写归到「未填写」一项 */
-  statusBreakdown: { status: string; count: number }[]
+  /**
+   * 学籍状态分布，按**固定顺序**排：在籍 / 毕业 / 入伍 / 休学 / 退学 /
+   * 其他 / 未填写（只给有人的那几档）。不按人数排序——每次打开都该在
+   * 同一个位置，才找得到。
+   *
+   * 原始文本是自由填写的，后端按关键词**归类**：`已毕业`→毕业、
+   * `参军入伍`→入伍、`在藉`（错字）→其他。归类之外的写法留在 `samples` 里。
+   */
+  statusBreakdown: {
+    /** 归类后的档位名 */
+    status: string
+    count: number
+    /** 这一档算不算「在籍」（在籍、未填写算；毕业/入伍/休学/退学/其他不算） */
+    registered: boolean
+    /** 这一档下出现过的原始写法（最多 3 种），只对「写法不等于档名」的有值 */
+    samples: string[]
+  }[]
   /** 按入校月份的新增与累计人数——**唯一有真实时间轴的序列** */
   enrollTrend: { ym: string; added: number; cumulative: number }[]
   months: number
@@ -218,6 +233,8 @@ export interface StudentDashboard {
     name: string
     updatedAt: string | null
     regStatus: string | null
+    /** 归类后的档位名（配色/分组用；展示仍用 `regStatus` 原文） */
+    regStatusCanon: string
     grade: string | null
     majorName: string | null
     enrollDate: string | null
@@ -333,6 +350,8 @@ export interface CollegeStudentColumn {
   label: string
   type: 'TEXT' | 'NUMBER' | 'DATE' | 'BOOL'
   system: boolean
+  /** 该列存在于多少个班（仅「已停用列」面板返回） */
+  classCount?: number
 }
 
 /** 学院名册的一行：跨班级的同一个学生 */
@@ -414,19 +433,35 @@ export interface CollegeAdviserList {
 /** 学院任务一览的一行 */
 export interface CollegeTaskRow {
   id: number
+  /** `COLLEGE`=学院任务（院长发的）；`CLASS`=班主任发的班级任务 */
+  scope: TaskScope
+  /** 发布人姓名（学院任务看不出是谁发的，这行必须有名字） */
+  publisher: string
   classId: number
   className: string
   grade: string
   title: string
   question: string
+  qtype: TaskQType
+  options: string[]
+  allowText: boolean
   /** 1=开放 0=已关闭（过了截止时间也算关） */
   open: boolean
   pinned: boolean
+  /** 是不是我发的——决定显示不显示编辑/置顶/关闭/删除 */
+  canEdit: boolean
+  /** 能不能看「谁填了什么」——决定显示不显示「导出」（院长/发布人/班主任） */
+  canSeeDetail: boolean
   deadline: string | null
   createdAt: string | null
   /** 已答人数 */
   answered: number
-  /** 应答总人数（**按该任务自己那个班**算） */
+  /**
+   * 应答总人数。
+   *
+   * 班级任务 = **该任务自己那个班**的应答人数；
+   * 学院任务 = **全校班主任**的人数（一人代表一个班）。
+   */
   total: number
   unanswered: number
 }
@@ -1068,6 +1103,12 @@ export interface StudentImportResult {
 /** 四种题型。与后端 	ask_service.QTYPES 一一对应，改一处必须同时改另一处 */
 export type TaskQType = 'BOOLEAN' | 'SINGLE' | 'MULTI' | 'DATE'
 
+/** 任务的范围（第三十二轮）。与后端 	ask_service.SCOPES 一一对应 */
+export type TaskScope = 'CLASS' | 'COLLEGE'
+
+/** 任务列表看哪一块（第三十二轮）。与后端 	ask_service.VIEWS 一一对应 */
+export type TaskView = 'mine' | 'college' | 'other'
+
 /** 汇总：**只给分布，不含具体是谁**——这是用户明确要的口径 */
 export interface TaskSummary {
   /** 应答对象总数（全部启用账号减去发布人自己） */
@@ -1109,6 +1150,19 @@ export interface Task {
   canSeeDetail: boolean
   /** 能不能改/关/删这条任务——只有发布人自己为 true */
   canEdit: boolean
+  /**
+   * 这条是**班级任务**还是**学院任务**（第三十二轮）。
+   *
+   * - CLASS：班主任/班长发给自己班的，**同学**应答
+   * - COLLEGE：院长发到全学院的，**各班班主任**应答
+   */
+  scope: TaskScope
+  /** 「班级任务」/「学院任务」 */
+  scopeText: string
+  /** 任务属于哪个班（学院任务是发布人的班） */
+  classId: number
+  /** 班级名（界面上要显示「谁发的」） */
+  className: string
   /** 是否置顶：置顶的、还在开放的任务会出现在所有人仪表盘的「置顶任务」里 */
   pinned: boolean
   createdAt: string | null
@@ -1120,6 +1174,46 @@ export interface TaskListPayload {
   rows: Task[]
   /** 我能不能发任务（TEACHER / MONITOR） */
   canPublish: boolean
+  /** 我能不能发**学院任务**（只有院长，第三十二轮） */
+  canPublishCollege: boolean
+  /** 这次看的是哪一块 */
+  view: TaskView
+}
+
+/** 任务总览（第三十二轮，GET /api/tasks/overview） */
+export interface TaskOverviewPayload {
+  /** 能不能看到**其他班**的任务（运营角色） */
+  canSeeAll: boolean
+  /** 任务总数 */
+  total: number
+  /** 还在收答案的 */
+  open: number
+  /** 已关闭的 */
+  closed: number
+  /** 班级任务数 */
+  classTasks: number
+  /** 学院任务数 */
+  collegeTasks: number
+  /** 已答份数 */
+  answered: number
+  /** 应答对象总数（分母为 0 的任务不算） */
+  base: number
+  /** 回收率（百分数）；分母为 0 时为 null */
+  rate: number | null
+  /** 按班分布 */
+  byClass: {
+    classId: number
+    className: string
+    total: number
+    open: number
+    answered: number
+    base: number
+    rate: number | null
+  }[]
+  /** 按发布人分布 */
+  byPublisher: { userId: number; name: string; total: number; open: number }[]
+  /** 最近的任务（与任务列表同一形状） */
+  recent: Task[]
 }
 
 /**
@@ -1179,6 +1273,12 @@ export interface TaskCreatePayload {
   allowText?: boolean
   /** YYYY-MM-DDTHH:mm:ss；不填=不限 */
   deadline?: string | null
+  /**
+   * CLASS（默认）= 班级任务；COLLEGE = **学院任务**（第三十二轮）。
+   *
+   * 学院任务全学院可见、由**各班班主任**应答，只有院长能发（后端会 403）。
+   */
+  scope?: TaskScope
 }
 
 /**

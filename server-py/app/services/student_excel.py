@@ -45,6 +45,19 @@ MAX_ROWS = 5000  # 单次导入上限；班级量级远小于此，够用且防�
 ANCHOR_HEADERS = ("学号", "姓名")
 
 
+def _strip_wrapping_quotes(s: str) -> str:
+    """剥掉整串被一对配对引号裹住的情况。
+
+    某些导出工具（如从带引号的 CSV 转 xlsx）会把每个单元格都裹上引号，
+    于是表头变成 `'学号'`、数据变成 `'2026001'`，系统自然认不出「学号」。
+    仅当首尾是同一种引号且配对才剥，避免误伤「他说'你好'」这种正常文本。
+    """
+    _q = ("'", '"', "“", "”", "‘", "’")
+    if len(s) >= 2 and s[0] in _q and s[-1] == s[0]:
+        return s[1:-1]
+    return s
+
+
 def _cell_text(v) -> str:
     """统一成字符串。
 
@@ -59,7 +72,43 @@ def _cell_text(v) -> str:
         return str(int(v))
     if isinstance(v, datetime):
         return v.strftime("%Y-%m-%d")
-    return str(v).strip()
+    return _strip_wrapping_quotes(str(v).strip())
+
+
+#: 表头里需要清掉的「脏字符」：控制字符、零宽、不间断空格、全角空格等。
+#: 半角空格 `str.strip()` 能去，但**全角空格（中文输入法的空格）和零宽字符去不掉**，
+#: 于是「学号（全角空格）」看着一样却匹配不到精确的「学号」，导入就报「没有学号」。
+_HEADER_DIRTY_RE = re.compile(
+    r"[\u0000-\u001f\u007f\u00a0\u1680\u2000-\u200a\u200b-\u200f\u2028\u2029\u202f\u205f\u3000\ufeff\s]+"
+)
+
+
+def _norm_header(v) -> str:
+    """表头归一化：清掉全角空格/零宽/控制字符再 trim。"""
+    if v is None:
+        return ""
+    return _HEADER_DIRTY_RE.sub(" ", str(v)).strip()
+
+
+#: 学号/姓名的常见别名 → 规范名。**只动这两个锚点列**，
+#: 不动「班级/年级/班主任」，否则会干扰学院侧按原列名做分发与字段建列的判断。
+_HEADER_ALIASES = {
+    "学号": {"学号", "学生学号", "学 号", "学号/", "编号", "序号", "准考证号", "学籍号", "学生编号"},
+    "姓名": {"姓名", "学生姓名", "名字"},
+}
+
+
+def _canon_anchor(v) -> str:
+    """表头清洗 + 学号/姓名别名归一。
+
+    命中别名则换成规范名「学号」「姓名」；否则返回清洗后的原值。
+    清洗同样作用于普通字段名，能顺带避免「宿舍号（全角空格）」被建成重复字段。
+    """
+    n = _strip_wrapping_quotes(_norm_header(v))
+    for canon, aliases in _HEADER_ALIASES.items():
+        if n == canon or n in aliases:
+            return canon
+    return n
 
 
 #: 能当数字的：正负号、小数点、科学计数法。够用就行，不追求完整校验。
@@ -170,7 +219,7 @@ def _find_or_create_fields(
         mapping0: dict[str, StudentField] = {}
         unmatched: list[str] = []
         for h in headers:
-            h = (h or "").strip()
+            h = _canon_anchor(h)
             if not h or h in ANCHOR_HEADERS:
                 continue
             f = by_label.get(h) or by_key.get(h)
@@ -194,7 +243,7 @@ def _find_or_create_fields(
     unmatched: list[str] = []
     new_fields: list[dict] = []
     for h in headers:
-        h = (h or "").strip()
+        h = _canon_anchor(h)
         if not h or h in ANCHOR_HEADERS:
             # 学号/姓名是锚点列，**本来就不在字段表里**，不是「没匹配上」。
             # 把它们报进 unmatched 会让用户以为表格有问题。
@@ -388,7 +437,7 @@ def import_xlsx(db: Session, user: LoginUser, content: bytes) -> dict:
     if not content:
         raise BizException.bad_request("没有读到文件内容")
     try:
-        wb = load_workbook(BytesIO(content), data_only=True, read_only=True)
+        wb = load_workbook(BytesIO(content), data_only=True)
     except Exception as exc:  # noqa: BLE001
         raise BizException.bad_request(f"无法解析 Excel 文件：{exc}") from exc
     ws = wb[wb.sheetnames[0]]
@@ -398,7 +447,7 @@ def import_xlsx(db: Session, user: LoginUser, content: bytes) -> dict:
     except StopIteration as exc:
         raise BizException.bad_request("表格是空的，至少要有表头和一行数据") from exc
 
-    headers = [_cell_text(c) for c in header_row]
+    headers = [_canon_anchor(c) for c in header_row]
     # 学号与姓名是锚点，不走字段值表；模板里必须有，否则无法定位「是哪一行」
     if "学号" not in headers:
         raise BizException.bad_request("表格里必须有「学号」列——它是用来说明这行数据是谁的")
@@ -507,3 +556,153 @@ def export_xlsx(
     wb.save(buf)
     fname = f"学生信息_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     return buf.getvalue(), fname
+
+
+# ==================== 导入模板 ====================
+
+#: 「填写说明」页里每种字段类型的说法：类型名 / 示例 / 通用填写规则。
+_TYPE_HELP: dict[str, tuple[str, str, str]] = {
+    svc.FT_TEXT: ("文本", "张三", "任意文字，最多 255 字"),
+    svc.FT_NUMBER: ("数字", "512", "只填数字，不带单位、不带空格"),
+    svc.FT_DATE: ("日期", "2026-09-01", "2026-09-01 或 20260901 两种都认"),
+    svc.FT_BOOL: ("是/否", "是", "填「是」或「否」"),
+}
+
+#: 个别列的补充要求。键是 `field_key`（各班一致），表里没这列就不显示。
+FIELD_HINTS: dict[str, str] = {
+    "reg_status": "在籍 / 毕业 / 入伍 / 休学 / 退学；其他写法仪表盘会按关键词归类",
+    "grade": "如 2026级",
+    "enroll_date": "YYYY-MM-DD，也可以直接填 20260901",
+}
+
+#: 模板里预先设好单元格格式（文本/日期）的行数。填不满就往下拖，超过也能导——
+#: 这些格式只是「别让 Excel 把学号变成 1.2344E+7」的提示，导入仍按值判断。
+TEMPLATE_STYLE_ROWS = 200
+
+TEMPLATE_SHEET = "学生信息"
+TEMPLATE_HELP_SHEET = "填写说明"
+
+
+def build_template_xlsx(
+    headers: list[dict],
+    *,
+    title: str,
+    intro: list[str],
+    filename: str,
+) -> tuple[bytes, str]:
+    """生成「填完能直接导」的模板。
+
+    ## 列必须**从当前字段现生成**，不能放一张固定的空表
+
+    字段是**按班**定义的，而且用户随时会新增/停用列。模板要是写死的，
+    照着它填完导进来就会多出几列（或漏掉几列）——用户就再也不敢用模板了。
+    每次下载都读一遍 `student_field`，新增字段后重新下载即可。
+
+    ## 表头就在**第 1 行**
+
+    导出文件有标题行、表头在第 3 行；模板**不能**这样：导入读的是第一行表头，
+    隔两行就得先手工删。模板唯一的用途是填完直接传回来。
+
+    ## 第 2 页是填写说明
+
+    导入只读第一张表，说明放第二张——填错位置也不会被当成数据导进去。
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = TEMPLATE_SHEET
+
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=i, value=h["label"])
+        c.font = _HEAD_FONT
+        c.fill = _HEAD_FILL
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(i)].width = max(
+            12, min(28, len(h["label"]) * 2 + 6)
+        )
+        fmt = h.get("format")
+        if fmt:
+            for r in range(2, TEMPLATE_STYLE_ROWS + 2):
+                ws.cell(row=r, column=i).number_format = fmt
+    ws.row_dimensions[1].height = 22
+    # 冻结表头 + 前两列（学号/姓名），往下填的时候始终知道是谁
+    ws.freeze_panes = "C2"
+
+    hs = wb.create_sheet(TEMPLATE_HELP_SHEET)
+    hs["A1"] = title
+    hs["A1"].font = _TITLE_FONT
+    row = 3
+    for line in intro:
+        hs.cell(row=row, column=1, value=line).font = Font(size=10, color="555555")
+        row += 1
+
+    row += 1
+    head_row = row
+    for i, name in enumerate(("列名", "类型", "填写要求", "示例"), start=1):
+        c = hs.cell(row=head_row, column=i, value=name)
+        c.font = _HEAD_FONT
+        c.fill = _HEAD_FILL
+        c.alignment = Alignment(horizontal="center")
+    for h in headers:
+        row += 1
+        type_text, type_example, type_rule = _TYPE_HELP.get(
+            h.get("type") or "", ("文本", "", "任意文字")
+        )
+        hs.cell(row=row, column=1, value=h["label"])
+        hs.cell(row=row, column=2, value=type_text)
+        # 列的专门要求优先；没有就写这个类型的通用规则
+        hs.cell(row=row, column=3, value=h.get("hint") or type_rule)
+        hs.cell(row=row, column=4, value=h.get("example") or type_example)
+    for col, width in zip("ABCD", (18, 10, 56, 18), strict=False):
+        hs.column_dimensions[col].width = width
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), filename
+
+
+def template_xlsx(db: Session, user: LoginUser) -> tuple[bytes, str]:
+    """班级「学生信息」的导入模板：列 = **本班当前启用的字段**。
+
+    权限在路由层判（能导入的人才能拿模板）：模板里只有列名，
+    没有学生数据，但给普通同学一个「导入模板」也没有意义。
+    """
+    fields = svc.list_fields(db, user)
+    headers: list[dict] = [
+        {
+            "label": "学号",
+            "type": svc.FT_TEXT,
+            "format": "@",  # 文本格式：否则 Excel 会把 0012345 吃成 12345
+            "required": True,
+            "example": "12344312",
+            "hint": "必填，同一张表里不要重复。库里已有这个学号就更新那一行",
+        },
+        {
+            "label": "姓名",
+            "type": svc.FT_TEXT,
+            "format": "@",
+            "required": True,
+            "example": "张三",
+            "hint": "必填",
+        },
+    ]
+    headers += [
+        {
+            "label": f["label"],
+            "type": f["type"],
+            # 日期列给日期格式，填「2026-09-01」不会被当成文本左对齐
+            "format": "yyyy-mm-dd" if f["type"] == svc.FT_DATE else None,
+            "hint": FIELD_HINTS.get(f["key"], ""),
+        }
+        for f in fields
+    ]
+    return build_template_xlsx(
+        headers,
+        title="学生信息 · 导入模板",
+        intro=[
+            "填完直接把这个文件传回「学生信息 → 导入 Excel」，表头不用改。",
+            "表头可以调顺序，但不要改列名：导入是按列名找列的。",
+            "空着的格子不会覆盖库里已有的值（只更新填了的格子）。",
+            "列跟本班当前的字段一致；新增或停用字段后，重新下载一次就是新的列。",
+        ],
+        filename=f"学生信息导入模板_{datetime.now():%Y%m%d}.xlsx",
+    )

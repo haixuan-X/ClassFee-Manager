@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchMe } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
-import { ROLE_TEXT } from '@/types'
+import { ROLE_TEXT, type UserInfo } from '@/types'
 import SideNav from '@/layout/SideNav.vue'
 import PasswordDialog from '@/layout/PasswordDialog.vue'
 
@@ -42,11 +42,15 @@ onMounted(async () => {
  */
 function onStorage(e: StorageEvent) {
   if (e.key !== 'classfee.user' || !userStore.isLogin) return
-  fetchMe()
-    .then((u) => userStore.setUser(u))
-    .catch(() => {
-      /* 401 交给拦截器统一处理 */
-    })
+  // ⚠ 直接采用别的标签页写入的值，**不再 fetchMe、不再回写缓存**：
+  // 否则「A 标签写缓存 → B 标签收到 storage → 再拉取并写缓存 → A…」
+  // 会无限互相触发，后端 /auth/me 被每 200ms 刷一次。
+  if (!e.newValue) return
+  try {
+    userStore.applyRemoteUser(JSON.parse(e.newValue) as UserInfo)
+  } catch {
+    /* 缓存格式异常就忽略，下次路由导航会重新拉一次 */
+  }
 }
 
 onMounted(() => window.addEventListener('storage', onStorage))

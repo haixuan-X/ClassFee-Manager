@@ -5,6 +5,7 @@ import dayjs from 'dayjs'
 import { payBatchMember } from '@/api/batches'
 import { getErrorMessage } from '@/api/request'
 import { useModal } from '@/composables/useModal'
+import { disableFutureDates, isFutureDateTime } from '@/utils/date'
 import type { Batch, Channel } from '@/types'
 import { CHANNEL_TEXT } from '@/types'
 
@@ -48,7 +49,19 @@ const rules: FormRules = {
       trigger: 'blur',
     },
   ],
-  occurredAt: [{ required: true, message: '请选择缴费时间', trigger: 'change' }],
+  occurredAt: [
+    { required: true, message: '请选择缴费时间', trigger: 'change' },
+    {
+      validator: (_rule, value: string | null, callback) => {
+        // 可以补录历史缴费，但不能登记「还没发生」的缴费
+        if (value && isFutureDateTime(value)) {
+          return callback(new Error('缴费时间不能晚于现在'))
+        }
+        callback()
+      },
+      trigger: 'change',
+    },
+  ],
 }
 
 watch(visible, async (open) => {
@@ -73,17 +86,19 @@ async function onSubmit() {
     return
   }
 
-  const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) {
-    alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
-    await nextTick()
-    alertRef.value?.focus()
-    return
-  }
-
+  // 先上锁，再校验（同个人信息页那个坑）：validate 期间的 await 是可点击窗口，
+  // 连点两下会**重复登记一笔缴费**（流水和余额都会多算一次）
   loading.value = true
   alertMessage.value = ''
   try {
+    const valid = await formRef.value.validate().catch(() => false)
+    if (!valid) {
+      alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
+      await nextTick()
+      alertRef.value?.focus()
+      return
+    }
+
     await payBatchMember(props.batch.id, {
       userId: props.member.userId,
       amount: form.amount!,
@@ -154,6 +169,7 @@ async function onSubmit() {
             type="datetime"
             placeholder="选择日期时间"
             value-format="YYYY-MM-DD HH:mm:ss"
+            :disabled-date="disableFutureDates"
             :clearable="false"
           />
         </el-form-item>

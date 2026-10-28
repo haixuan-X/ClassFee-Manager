@@ -99,11 +99,32 @@ def init_data() -> None:
 
 
 def _init_class(db: Session, cfg: dict) -> int:
+    """种子班：**只在班级表为空时**建。
+
+    旧逻辑是「按配置的名字找，找不到就建一个」——于是班主任把种子班**删掉或改名**之后，
+    每次重启都会把那个班（连同 35 个字段模板、类别、师生关系）悄悄加回来，
+    改名的情况下还会多出一个同名的「幽灵班」。
+
+    种子只负责「把空库点着」，不负责「恢复用户删掉的数据」。库里已经有班时，
+    优先用配置里指定的那个（名字对得上），否则挂到最早的那个班：
+    班主任账号只在不存在时才建，用它的默认班不违背谁的意愿。
+    """
     existing = db.execute(
         select(ClsClass).where(ClsClass.class_name == cfg["class_name"]).limit(1)
     ).scalar()
     if existing is not None:
         return existing.id
+    oldest = db.execute(
+        select(ClsClass).order_by(ClsClass.id).limit(1)
+    ).scalar()
+    if oldest is not None:
+        log.info(
+            "库中已有班级，跳过种子建班（配置的 CLASSFEE_CLASS_NAME=%s 不在库中；"
+            "学生字段模板 / 类别挂到最早的班 %s 上）",
+            cfg["class_name"],
+            oldest.class_name,
+        )
+        return oldest.id
     clazz = ClsClass(
         class_name=cfg["class_name"],
         grade=cfg["grade"],

@@ -117,6 +117,18 @@ export const useUserStore = defineStore('user', () => {
     initCurrentClass(info)
   }
 
+  /**
+   * 应用**别的标签页**同步过来的用户信息（跨标签 storage 事件用）。
+   *
+   * ⚠ 刻意**不写回 localStorage**：写回会让
+   * 「A 标签写缓存 → B 标签收到 storage → 重新拉取并写缓存 → A 标签…」
+   * 无限互相触发，表现就是后端 /auth/me 被每 200ms 刷一次。
+   */
+  function applyRemoteUser(info: UserInfo) {
+    user.value = info
+    initCurrentClass(info)
+  }
+
   /** 清除本地会话（退出登录 / 401） */
   function clear() {
     token.value = ''
@@ -139,6 +151,7 @@ export const useUserStore = defineStore('user', () => {
     displayName,
     setSession,
     setUser,
+    applyRemoteUser,
     clear,
   }
 })

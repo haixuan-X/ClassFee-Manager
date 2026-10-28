@@ -81,8 +81,8 @@ const createForm = reactive({
   role: 'MEMBER' as Role,
   /** 访客的可见范围（第二十六轮）。默认全选——和第二十四轮那批访客行为一致 */
   guestScopes: [...ALL_GUEST_SCOPES] as GuestScope[],
-  /** 第三十轮：是不是纯院长。只在角色选了「院长」时才有意义 */
-  deanOnly: false,
+  /** 第三十轮：是不是纯院长。只在角色选了「院长」时才有意义。第三十三轮默认纯院长 */
+  deanOnly: true,
 })
 
 /**
@@ -134,22 +134,23 @@ function openCreate() {
   createForm.role = 'MEMBER'
   // 每次打开都恢复全选：上次留下的勾选不该悄悄带到下一个新账号上
   createForm.guestScopes = [...ALL_GUEST_SCOPES]
-  createForm.deanOnly = false
+  createForm.deanOnly = true
   alertMessage.value = ''
   createVisible.value = true
 }
 
 async function submitCreate() {
-  if (!createFormRef.value) return
-  try {
-    await createFormRef.value.validate()
-  } catch {
-    await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
-    return
-  }
+  if (!createFormRef.value || createLoading.value) return
+  // 先上锁，再校验（同个人信息页那个坑）：`await validate()` 是连点窗口，
+  // 手快点两下会建出**两个账号**（第二个还会撞「登录名已存在」）
   createLoading.value = true
   alertMessage.value = ''
   try {
+    const valid = await createFormRef.value.validate().then(() => true).catch(() => false)
+    if (!valid) {
+      await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
+      return
+    }
     const created = await createUser({
       username: createForm.username.trim(),
       realName: createForm.realName.trim(),
@@ -223,16 +224,16 @@ function openEdit(row: UserAccount) {
 }
 
 async function submitEdit() {
-  if (!editTarget.value || !editFormRef.value) return
-  try {
-    await editFormRef.value.validate()
-  } catch {
-    await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
-    return
-  }
+  if (!editTarget.value || !editFormRef.value || editLoading.value) return
+  // 先上锁，再校验（同个人信息页那个坑）
   editLoading.value = true
   alertMessage.value = ''
   try {
+    const valid = await editFormRef.value.validate().then(() => true).catch(() => false)
+    if (!valid) {
+      await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
+      return
+    }
     await updateUser(editTarget.value.id, {
       realName: editForm.realName.trim(),
       // 学号/手机号沿用「空串=清空」语义（后端 None=不改）
@@ -277,16 +278,16 @@ function openReset(row: UserAccount) {
 }
 
 async function submitReset() {
-  if (!resetTarget.value || !resetFormRef.value) return
-  try {
-    await resetFormRef.value.validate()
-  } catch {
-    await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
-    return
-  }
+  if (!resetTarget.value || !resetFormRef.value || resetLoading.value) return
+  // 先上锁，再校验（同个人信息页那个坑）
   resetLoading.value = true
   alertMessage.value = ''
   try {
+    const valid = await resetFormRef.value.validate().then(() => true).catch(() => false)
+    if (!valid) {
+      await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
+      return
+    }
     const pwd = resetForm.password.trim()
     await updateUser(resetTarget.value.id, { password: pwd })
     ElMessage.success(`已重置「${resetTarget.value.realName}」的密码为 ${pwd}，原密码立即失效`)

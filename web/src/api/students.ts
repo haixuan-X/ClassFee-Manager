@@ -80,6 +80,20 @@ export function createStudentAccounts() {
 }
 
 /**
+ * 从本班名册删行（**可批量**，仅班主任及以上；班长能加不能删）。
+ *
+ * 删的是学生记录 + 他填过的所有字段值；**登录账号不动**（账号归「成员管理」）。
+ * 不可撤销，调用前必须让用户确认过。
+ */
+export function deleteStudents(ids: number[]) {
+  return request<{ deleted: number; ids: number[] }>({
+    url: '/students',
+    method: 'delete',
+    params: { ids: ids.join(',') },
+  })
+}
+
+/**
  * 就地编辑一格（表格编辑模式）。
  *
  * 三种写法，不要混用：
@@ -195,6 +209,17 @@ export function restoreStudentField(key: string) {
 }
 
 /**
+ * 彻底删除**已停用**的字段：字段定义和它已填的所有值一起删，不可恢复。
+ * 后端只放行 status=0 的字段——先停用再删，中间留一个反悔窗口。
+ */
+export function purgeStudentField(key: string) {
+  return request<{ key: string; label: string; deletedValues: number }>({
+    url: `/students/fields/${encodeURIComponent(key)}/purge`,
+    method: 'delete',
+  })
+}
+
+/**
  * 导入 xlsx 名单。
  *
  * 学号是 upsert 键；**空单元格不覆盖**旧值。
@@ -242,6 +267,21 @@ export async function exportSelectedStudents(
   }
   await downloadXlsx(
     service.post<Blob>('/students/export', { recordIds, fieldKeys }, { responseType: 'blob' }),
+  )
+}
+
+/**
+ * 下载**导入模板**（列 = 本班当前启用的字段，含学号/姓名）。
+ *
+ * 模板不是写死的文件：每次下载都由后端现读 `student_field` 生成，
+ * 所以老师新增/停用一列之后，重新下载一次就是新的列——
+ * 「模板和表格脱节」这件事从设计上就不会发生。
+ *
+ * 填完直接走 `importStudents` 传回来，表头不用改（导入按列名找列）。
+ */
+export async function downloadStudentTemplate(): Promise<void> {
+  await downloadXlsx(
+    service.get<Blob>('/students/template', { responseType: 'blob' }),
   )
 }
 

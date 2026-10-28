@@ -90,6 +90,17 @@ const stuLoading = ref(false)
 const stuError = ref('')
 
 /**
+ * 「学籍状态」这一列空着的行数。
+ *
+ * 空值按在籍算（见后端 `is_registered`：Excel 不会每列都填满，一空就算未知
+ * 会让分母比分子还小），但卡片必须**说清楚**这里面有几个人其实是空着的，
+ * 不然「全部在籍」会被读成「每个人的学籍都核对过了」。
+ */
+const blankStatus = computed(
+  () => (stu.value?.statusBreakdown ?? []).find((b) => b.status === '未填写')?.count ?? 0,
+)
+
+/**
  * 学生总览的统计卡。三张对应用户提的三个指标。
  *
  * 第三张「学籍变化」目前是**壳**：`changeTotal` 后端恒给 `null`，
@@ -125,8 +136,10 @@ const stuStats = computed(() => {
         ? d.studentTotal === 0
           ? '还没有学生记录'
           : notRegistered > 0
-            ? `${notRegistered} 人不在籍（休学/退学等）`
-            : '全部在籍'
+            ? `${notRegistered} 人不在籍（毕业/入伍/休学/退学等）`
+            : blankStatus.value > 0
+              ? `全部算在籍（其中 ${blankStatus.value} 人这列空着）`
+              : '全部在籍'
         : '加载中',
       tone: '' as '' | 'out',
     },
@@ -475,15 +488,29 @@ onMounted(async () => {
 
         <article class="glass-card panel">
           <div class="panel-head">
-            <h3>注册状态分布</h3>
-            <span class="hint">按人数</span>
+            <h3>学籍状态分布</h3>
+            <span class="hint">在籍/毕业/入伍/休学/退学，其余归「其他」</span>
           </div>
           <ul v-if="(stu?.statusBreakdown ?? []).length > 0" class="breakdown">
             <li v-for="s in stu?.statusBreakdown ?? []" :key="s.status">
-              <span class="bd-name">{{ s.status }}</span>
+              <!--
+                档名是**归类后**的标准值（在籍/毕业/入伍/休学/退学/其他/未填写），
+                括号里是这一档实际出现过的写法——「其他 5」不告诉人是什么写法，
+                等于把问题藏起来（用户导入的 Excel 里可能是「在藉」「转学」）。
+              -->
+              <span
+                class="bd-name"
+                :title="s.samples.length ? `原始写法：${s.samples.join('、')}` : s.status"
+              >
+                {{ s.status
+                }}<span v-if="s.samples.length" class="bd-samples"
+                  >（{{ s.samples.join('、') }}）</span
+                >
+              </span>
               <span class="bd-bar" aria-hidden="true">
                 <span
                   class="bd-fill"
+                  :class="{ off: !s.registered }"
                   :style="{
                     width: `${stu && stu.studentTotal ? (s.count / stu.studentTotal) * 100 : 0}%`,
                   }"
@@ -661,7 +688,8 @@ onMounted(async () => {
 
 .breakdown li {
   display: grid;
-  grid-template-columns: 5.5em 1fr 3em;
+  /* 档名那列要放得下「在籍（在读）」这种带原始写法的名字 */
+  grid-template-columns: minmax(5.5em, 12em) 1fr 3em;
   align-items: center;
   gap: 10px;
   padding: 9px 0;
@@ -679,6 +707,12 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
+/* 原始写法（已毕业、参军入伍…）：跟在档名后面，弱化处理，别抢档名的位置 */
+.bd-samples {
+  color: var(--color-muted-fg);
+  font-size: 12px;
+}
+
 .bd-bar {
   height: 8px;
   border-radius: 999px;
@@ -691,6 +725,12 @@ onMounted(async () => {
   height: 100%;
   border-radius: 999px;
   background: var(--color-accent);
+}
+
+/* 不计入在籍的档（毕业/入伍/休学/退学/其他）：条子用灰色，
+   一眼看得出「这几种不算在籍」，不用去数图例 */
+.bd-fill.off {
+  background: var(--color-muted-fg);
 }
 
 .bd-count {

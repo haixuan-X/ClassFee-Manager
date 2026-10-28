@@ -31,6 +31,8 @@ import {
   createStudentAccounts,
   createStudentField,
   deleteStudentField,
+  deleteStudents,
+  downloadStudentTemplate,
   exportSelectedStudents,
   fetchMyRequests,
   fetchPendingRequests,
@@ -39,6 +41,7 @@ import {
   importStudents,
   previewStudentAccounts,
   previewStudentFieldRetype,
+  purgeStudentField,
   restoreStudentField,
   updateStudent,
   updateStudentField,
@@ -67,6 +70,10 @@ const perm = ref<Awaited<ReturnType<typeof fetchStudents>>['permission'] | null>
 const editKey = ref<string | null>(null)
 /** 正在保存的格子（转圈指示） */
 const savingKey = ref<string | null>(null)
+
+/** 顶部搜索框：后端按学号/姓名模糊匹配（student_service.list_records 的 keyword） */
+const searchKeyword = ref('')
+let _searchTimer: number | null = null
 /** 最近一次保存的时间戳，用于闪一下「已保存」 */
 const savedKey = ref<string | null>(null)
 const savedAt = ref(0)
@@ -205,7 +212,7 @@ const emptyHint = computed(() => {
 async function load() {
   loading.value = true
   try {
-    const sheet = await fetchStudents()
+    const sheet = await fetchStudents(searchKeyword.value.trim() || undefined)
     columns.value = sheet.columns
     rows.value = sheet.rows
     // 刷新后清掉已经不存在的勾选（停用了字段、新增了行都会走到这里）。
@@ -221,6 +228,12 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+/** 搜索框输入：防抖 300ms，避免每敲一个字都打一次后端 */
+function onSearchInput() {
+  if (_searchTimer !== null) clearTimeout(_searchTimer)
+  _searchTimer = window.setTimeout(() => void load(), 300)
 }
 
 async function loadMyRequests() {
@@ -899,6 +912,50 @@ async function submitAdd() {
   }
 }
 
+// ---------------- 删行（不可撤销） ----------------
+
+/**
+ * 删掉勾中的学生。
+ *
+ * 和「新增」不同级：加一行看得见、改得回来；删一行是把他在这张表里的
+ * **所有信息一起抹掉**。所以只给**班主任及以上**（后端同样硬拦），
+ * 班长即使勾了也看不到这个按钮。
+ *
+ * 确认框里要写明「账号不会跟着删」——不然用户会以为一并销号了。
+ */
+const deleting = ref(false)
+
+async function deleteSelected() {
+  const ids = [...selectedIds.value]
+  if (!ids.length || deleting.value) return
+  try {
+    await ElMessageBox.confirm(
+      `将从本班名册里删除 ${ids.length} 名学生，连同他们在表格里填过的所有信息。\n` +
+        '登录账号不会被删除（要停用账号请去「成员管理」）。删除后不能撤销。',
+      '删除学生',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return // 用户取消
+  }
+  deleting.value = true
+  try {
+    const r = await deleteStudents(ids)
+    ElMessage.success(`已删除 ${r.deleted} 名学生`)
+    selectedIds.value = []
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '删除失败'))
+  } finally {
+    deleting.value = false
+  }
+}
+
 // ---------------- 改列名（就地改，跟改格子一个手感） ----------------
 
 /**
@@ -1048,6 +1105,33 @@ async function restoreField(f: StudentField) {
   }
 }
 
+/**
+ * 彻底删除已停用的字段。这个按钮只出现在「已停用字段」面板里：
+ * 能走到这一步说明已经停用过、确认不要了；但值会跟着一起消失，
+ * 确认框必须把「不可恢复」说重一点——它和「恢复」是同一条退路的两个方向。
+ */
+async function purgeField(f: StudentField) {
+  try {
+    await ElMessageBox.confirm(
+      `将彻底删除字段「${f.label}」，连同这一列已填的所有值。\n\n` +
+        '删除后不能恢复，请确认这些数据不再需要。',
+      '彻底删除该字段？',
+      { type: 'error', confirmButtonText: '彻底删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const r = await purgeStudentField(f.key)
+    ElMessage.success(
+      `「${f.label}」已彻底删除` + (r.deletedValues ? `（连同 ${r.deletedValues} 个值）` : ''),
+    )
+    await Promise.all([openTrash(), load()])
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '删除失败'))
+  }
+}
+
 // ---------------- 申请 ----------------
 
 const NEEDED: { scope: StudentScope; label: string; hint: string }[] = [
@@ -1137,6 +1221,26 @@ function onFileChange(e: Event) {
   const f = input.files?.[0]
   if (f) void onImport(f)
   input.value = ''
+}
+
+/**
+ * 下载导入模板。
+ *
+ * 模板由后端按**本班当前字段**现生成（含学号/姓名），第一张表就是能直接填的表头，
+ * 第二张是填写说明。先给模板再让人导入，能挡掉「自己随便编一张表导进来」——
+ * 那种表往往列名不对，等于白导一遍。
+ */
+const templateLoading = ref(false)
+
+async function onDownloadTemplate() {
+  templateLoading.value = true
+  try {
+    await downloadStudentTemplate()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '下载模板失败'))
+  } finally {
+    templateLoading.value = false
+  }
 }
 
 // ---------------- 一键创建账号（第二十五轮） ----------------
@@ -1229,6 +1333,19 @@ const accNothingToDo = computed(() => {
           <input type="file" accept=".xlsx,.xlsm" hidden @change="onFileChange" />
           <el-button :loading="importing" type="primary" tag="span">导入 Excel</el-button>
         </label>
+        <!--
+          导出模板：下载一张空白模板，列 = 本班当前字段（含学号/姓名），
+          用户填好后再用「导入 Excel」上传。没有模板时，用户会拿自己那张
+          表直接导，列名不对就白导一遍。
+        -->
+        <el-button
+          v-if="canAddField"
+          :loading="templateLoading"
+          title="下载一张空白模板（按当前字段生成），填好后用「导入 Excel」上传"
+          @click="onDownloadTemplate"
+        >
+          导出模板
+        </el-button>
         <!-- 没有 Excel 时也能加人；只要学号+姓名，其余在表格里逐格填 -->
         <el-button v-if="canAddField" @click="openAdd">新增学生</el-button>
         <!-- 一键建账号：导入完名单的**下一步**。权限比「加字段」高，仅班主任 -->
@@ -1237,6 +1354,30 @@ const accNothingToDo = computed(() => {
         <el-button @click="openExport">
           导出<span v-if="selectedIds.length">选中（{{ selectedIds.length }}）</span>
         </el-button>
+        <!--
+          删除**只在勾了人、且是班主任及以上时才出现**：
+          没选中时它是个点不动的死按钮，普通同学更是根本不该看到它。
+        -->
+        <el-button
+          v-if="isTeacher && selectedIds.length"
+          type="danger"
+          plain
+          :loading="deleting"
+          @click="deleteSelected"
+        >
+          删除选中（{{ selectedIds.length }}）
+        </el-button>
+
+        <!-- 搜索：后端按学号/姓名模糊匹配，所有人（含只读）都能用 -->
+        <el-input
+          v-model="searchKeyword"
+          style="width: 220px"
+          size="default"
+          placeholder="搜索学号 / 姓名"
+          clearable
+          @input="onSearchInput"
+          @keyup.enter="onSearchInput"
+        />
 
         <!--
           「更多」里装的两个入口都是班主任/班长专属。两者都没有时**整个下拉不渲染**——
@@ -1737,7 +1878,7 @@ const accNothingToDo = computed(() => {
     <el-dialog v-model="trashOpen" title="已停用的字段" width="560px" append-to-body>
       <p class="trash-hint">
         停用只是把这一列从表格和导出里收起来，<strong>已填的值一行都没删</strong>。
-        点「恢复」放回表格，数据原样还在。
+        点「恢复」放回表格，数据原样还在；确认不要了，点「删除」把这一列连同数据一起彻底清除。
       </p>
       <el-table v-loading="trashLoading" :data="disabledFields" size="small">
         <el-table-column prop="label" label="字段名" />
@@ -1749,9 +1890,10 @@ const accNothingToDo = computed(() => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" align="right">
+        <el-table-column label="操作" width="140" align="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="restoreField(row)">恢复</el-button>
+            <el-button link type="danger" @click="purgeField(row)">删除</el-button>
           </template>
         </el-table-column>
         <template #empty>

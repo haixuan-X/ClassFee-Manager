@@ -58,19 +58,23 @@ function safeRedirect(): string {
 async function onSubmit() {
   if (!formRef.value) return
 
-  // blur 即校验；这里提交时再统一校验一次
-  const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) {
-    alertMessage.value = '请按提示补全账号和密码'
-    await nextTick()
-    alertRef.value?.focus()
-    return
-  }
-
+  // ⚠ **先上锁，再校验**（同个人信息页那个坑）：
+  // 先 `await validate()` 再置 `loading`，中间那个 await 就是窗口——
+  // 手快点两下「登录」会发两次登录请求。
   if (loading.value) return
   loading.value = true
   alertMessage.value = ''
+
   try {
+    // blur 即校验；这里提交时再统一校验一次
+    const valid = await formRef.value.validate().catch(() => false)
+    if (!valid) {
+      alertMessage.value = '请按提示补全账号和密码'
+      await nextTick()
+      alertRef.value?.focus()
+      return
+    }
+
     const result = await login(form)
     userStore.setSession(result)
     await router.replace(safeRedirect())

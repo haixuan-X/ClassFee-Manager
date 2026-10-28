@@ -55,10 +55,22 @@ def managed_class_ids(
 ) -> list[int]:
     """这个账号**能管哪些班**（第三十二轮）。
 
-    - **院长 = 所有启用班**。他是校级的（管的就是全校），
-      不然会出现死锁：谁都没法给一个老师加班——因为**只能给自己
-      已经能管的班加**，而没有人的默认班是别人要加的那个班。
     - **其他人 = 默认班 ∪ `sys_user_class` 里关联的班**。
+    - **院长 = 他自己勾的「我带的班」**；一条都没勾过才退回「所有启用班」。
+
+    ## 院长为什么也要看关联表（第三十三轮）
+
+    原来的口径是「院长恒等于全部启用班」。可「个人信息」里明明有「我带的班」
+    多选，院长勾完保存，回执还是全班——**那个多选对院长就是个摆设**。
+    用户是这么撞上的：「感觉有点串数据，没有根据我带的班来分类」。
+
+    现在分两层，互不干扰：
+
+    - **学院层**（`/api/college/*`、学生总览、任务总览）= 全校，不看关联表
+    - **班级层**（账目/任务/学生信息/成员缴费/班级信息）= 只在他勾的班里切
+
+    **没勾过**（老账号、回归探针）仍然全管——否则存量院长一升级就
+    「一个班都切不过去」。
 
     ⚠ **必须用同一个 Session 查**：engine 版的 `security.managed_class_ids`
     走的是**另一条连接**，看不到当前事务里刚写的关联表（还没提交）——
@@ -67,18 +79,34 @@ def managed_class_ids(
     ⚠ **默认班永远在里面**：关联表是后加的，老账号一条关联记录都没有——
     要是只看关联表，所有存量账号都会变成「一个班都管不了」。
     """
-    if role == DEAN_ROLE:
-        return [
-            int(cid)
-            for (cid,) in db.execute(
-                select(ClsClass.id).where(ClsClass.status == 1).order_by(ClsClass.id.asc())
-            )
-        ]
-    ids: list[int] = [default_class_id]
+    picked: list[int] = []
     for (cid,) in db.execute(
         select(SysUserClass.class_id).where(SysUserClass.user_id == user_id)
     ):
         c = int(cid)
+        if c not in picked:
+            picked.append(c)
+
+    if role == DEAN_ROLE:
+        if not picked:
+            return [
+                int(cid)
+                for (cid,) in db.execute(
+                    select(ClsClass.id).where(ClsClass.status == 1).order_by(ClsClass.id.asc())
+                )
+            ]
+        alive = {
+            int(cid)
+            for (cid,) in db.execute(select(ClsClass.id).where(ClsClass.status == 1))
+        }
+        out = [default_class_id]
+        for c in picked:
+            if c in alive and c not in out:
+                out.append(c)
+        return out
+
+    ids: list[int] = [default_class_id]
+    for c in picked:
         if c not in ids:
             ids.append(c)
     return ids
@@ -192,7 +220,13 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
         # 免得库里躺着一堆永远不会被读的 JSON。
         guest_scopes = dump_guest_scopes(req.guestScopes) if role == GUEST_ROLE else None
         # 第三十轮：纯院长。只对院长有意义，其他角色一律 0（库里不留死数据）。
-        dean_only = 1 if (role == DEAN_ROLE and req.deanOnly) else 0
+        # 第三十三轮：新建院长**默认纯院长**（只管学院，不参与班级事务）。
+        # 想「院长 + 班主任」的，自己去「个人信息 → 职务范围」里切，
+        # 或在创建时显式传 deanOnly=false。
+        if role == DEAN_ROLE:
+            dean_only = 0 if req.deanOnly is False else 1
+        else:
+            dean_only = 0
         # 第十五轮：新建账号的**角色等级不得高于操作者**。
         # 这是等级体系的唯一提权入口——不改角色的接口（PUT /users/{id} 不含 role），
         # 但「新建一个班主任账号再登进去」能绕开所有护栏，所以必须在这里拦。
@@ -418,7 +452,16 @@ def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> d
         # ⚠ 只动**我自己**的那些行：同一个班里别的老师（副班主任）不受影响。
         # ⚠ 默认班自动包含在内：那是「登录落在哪个班」，
         # 要是它不在我带的班里，登录后落在一个「我不是班主任」的班上，很别扭。
+        #
+        # ⚠ **纯院长没有这一项**（第三十轮）：他是「只管学院、不参与班级事务」
+        # 的那一种，一个班都不带。界面上这个选项对他不显示，接口这里也拦一道——
+        # 「界面上没有、接口里能改」是最容易漏的那种洞。
         if req.classIds is not None and target.role in STAFF_ROLES:
+            if target.role == DEAN_ROLE and target.dean_only:
+                raise BizException.forbidden(
+                    "纯院长不参与班级事务，没有「我带的班」；"
+                    "在「职务范围」里切回「院长 + 班主任」之后才能带班"
+                )
             wanted = [int(c) for c in req.classIds]
             alive: list[int] = []
             if wanted:

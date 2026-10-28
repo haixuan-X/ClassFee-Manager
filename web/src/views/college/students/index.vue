@@ -42,11 +42,14 @@ import {
   applyCollegeFieldRetype,
   createCollegeField,
   deleteCollegeField,
+  deleteCollegeStudents,
+  downloadCollegeStudentTemplate,
   exportCollegeStudents,
   fetchCollegeDisabledFields,
   fetchCollegeStudents,
   importCollegeStudents,
   previewCollegeFieldRetype,
+  purgeCollegeField,
   restoreCollegeField,
   updateCollegeCell,
   updateCollegeField,
@@ -972,6 +975,37 @@ async function restoreColumn(c: CollegeStudentColumn) {
   }
 }
 
+/**
+ * 彻底删除已停用的列（所有班一起删）。确认框必须把三件事说清：
+ * **所有班**、**连同已填的值**、**不可恢复**——学院列是跨班共用的，
+ * 这一删的影响面比班级页大得多，宁可比班级页更啰嗦一点。
+ */
+async function purgeColumn(c: CollegeStudentColumn) {
+  const classCount = c.classCount
+  try {
+    await ElMessageBox.confirm(
+      `将把「${c.label}」这一列从所有班` +
+        (classCount ? `（共 ${classCount} 个班）` : '') +
+        `里彻底删除，连同已填的所有值。\n\n` +
+        '删除后不能恢复，请确认这些数据不再需要。',
+      '彻底删除该列？',
+      { type: 'error', confirmButtonText: '彻底删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const r = await purgeCollegeField(c.key)
+    ElMessage.success(
+      `「${c.label}」已从 ${r.classCount} 个班彻底删除` +
+        (r.deletedValues ? `（连同 ${r.deletedValues} 个值）` : ''),
+    )
+    await Promise.all([openTrash(), load()])
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '删除失败'))
+  }
+}
+
 // ==================== 勾选 + 导出 ====================
 
 const selectedIds = ref<number[]>([])
@@ -994,9 +1028,55 @@ function toggleRow(id: number) {
   else selectedIds.value.push(id)
 }
 
+/**
+ * 删掉勾中的学生（**不可撤销**）。
+ *
+ * 确认框里必须把两件事说清楚，否则用户会以为删掉的是账号：
+ * 1. 删的是**名册行 + 他填过的所有信息**；
+ * 2. **登录账号还在**，要停用/销号得去「成员管理」。
+ *
+ * 批量删一半失败比全删成功更糟，所以后端对「已经不存在的 id」是跳过的，
+ * 提示按**真正删掉的数量**说（`deleted`），不说「已删除 3 名」而实际只删了 2 个。
+ */
+const deleting = ref(false)
+
+async function deleteSelected() {
+  const ids = [...selectedIds.value]
+  if (!ids.length || deleting.value) return
+  try {
+    await ElMessageBox.confirm(
+      `将从名册里删除 ${ids.length} 名学生，连同他们在表格里填过的所有信息。\n` +
+        '登录账号不会被删除（要停用账号请去「成员管理」）。删除后不能撤销。',
+      '删除学生',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return // 用户取消
+  }
+  deleting.value = true
+  try {
+    const r = await deleteCollegeStudents(ids)
+    ElMessage.success(`已删除 ${r.deleted} 名学生`)
+    selectedIds.value = []
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '删除失败'))
+  } finally {
+    deleting.value = false
+  }
+}
+
 const exporting = ref(false)
 const exportOpen = ref(false)
-const exportRowScope = ref<'selected' | 'all'>('all')
+const exportRowScope = ref<'selected' | 'all' | 'range'>('all')
+/** 「指定行区间」导出用的起止行号（相对当前筛选结果，1 起） */
+const exportRowFrom = ref(1)
+const exportRowTo = ref(10)
 const exportFields = ref<string[]>([])
 const exportFieldFilter = ref('')
 
@@ -1034,9 +1114,15 @@ const exportFieldSearch = computed(() => {
 })
 
 /** 导出行数：已勾选 = 勾了几行；全部 = 当前筛选下多少人。 */
-const exportRowCount = computed(() =>
-  exportRowScope.value === 'selected' ? selectedIds.value.length : total.value,
-)
+const exportRowCount = computed(() => {
+  if (exportRowScope.value === 'selected') return selectedIds.value.length
+  if (exportRowScope.value === 'range') {
+    const from = Math.max(1, Math.floor(exportRowFrom.value || 1))
+    const to = Math.min(total.value, Math.floor(exportRowTo.value || 0))
+    return Math.max(0, to - from + 1)
+  }
+  return total.value
+})
 
 function openExport() {
   exportRowScope.value = selectedIds.value.length ? 'selected' : 'all'
@@ -1062,12 +1148,21 @@ function toggleExportField(key: string) {
 async function submitExport() {
   exporting.value = true
   try {
+    // 「指定行区间」：按当前筛选结果的顺序，取第 from 到 to 条
+    const range =
+      exportRowScope.value === 'range'
+        ? {
+            offset: Math.max(1, Math.floor(exportRowFrom.value || 1)) - 1,
+            limit: Math.max(1, exportRowCount.value),
+          }
+        : {}
     await exportCollegeStudents({
       columns: exportColumnKeys.value,
       ids: exportRowScope.value === 'selected' ? [...selectedIds.value] : undefined,
       keyword: applied.value.keyword,
       classId: applied.value.classId,
       grade: applied.value.grade,
+      ...range,
     })
     exportOpen.value = false
     ElMessage.success(`已导出 ${exportRowCount.value} 名学生 × ${exportColumnKeys.value.length} 列`)
@@ -1097,6 +1192,26 @@ const pendingFile = ref<File | null>(null)
 
 function pickFile() {
   fileInput.value?.click()
+}
+
+/**
+ * 下载学院名册的导入模板。
+ *
+ * 列 = 所有启用班级的字段合并（另加「班级」列）。每次下载都由后端现读字段，
+ * 所以学院里新增一列之后，重新下载就是新列。有模板再导入，
+ * 就不会有人拿自己随手编的表导进来——那种表往往列名对不上。
+ */
+const templateLoading = ref(false)
+
+async function onDownloadTemplate() {
+  templateLoading.value = true
+  try {
+    await downloadCollegeStudentTemplate()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '下载模板失败'))
+  } finally {
+    templateLoading.value = false
+  }
 }
 
 function onFileChange(e: Event) {
@@ -1191,9 +1306,33 @@ function onMore(cmd: string) {
         <el-button type="primary" :loading="importing" @click="pickFile">
           导入 Excel
         </el-button>
+        <!--
+          导出模板：下载一张空白模板，列 = 各班字段合并 + 「班级」列。
+          用户填好后再用「导入 Excel」上传，能挡掉「自己随便编一张表导进来」——列名不对等于白导一遍。
+        -->
+        <el-button
+          :loading="templateLoading"
+          title="下载一张空白模板（按各班字段生成），填好后用「导入 Excel」上传"
+          @click="onDownloadTemplate"
+        >
+          导出模板
+        </el-button>
         <!-- 撤销 / 重做只有快捷键（Ctrl+Z / Ctrl+Y），页头不放按钮 -->
         <el-button @click="openExport">
           导出<span v-if="selectedIds.length">选中（{{ selectedIds.length }}）</span>
+        </el-button>
+        <!--
+          删除**只在勾了人之后才出现**：没选中时它是一个永远点不动的死按钮，
+          摆在那里只会让人以为「删不了」。
+        -->
+        <el-button
+          v-if="selectedIds.length"
+          type="danger"
+          plain
+          :loading="deleting"
+          @click="deleteSelected"
+        >
+          删除选中（{{ selectedIds.length }}）
         </el-button>
         <el-dropdown trigger="click" @command="onMore">
           <el-button aria-label="更多操作">
@@ -1408,7 +1547,7 @@ function onMore(cmd: string) {
               <!-- 显示态 -->
               <template v-else>
                 <span class="txt" :class="{ empty: !cellValue(row, col.key) }">
-                  {{ cellValue(row, col.key) || '—' }}
+                  {{ cellValue(row, col.key) || (col.key === '__class__' ? '未分班' : '—') }}
                 </span>
                 <el-icon v-if="isSaving(row.id, col.key)" class="spin"><Loading /></el-icon>
                 <span v-else-if="justSaved(row.id, col.key)" class="ok-mark">已存</span>
@@ -1533,7 +1672,32 @@ function onMore(cmd: string) {
             <el-radio value="selected" :disabled="!selectedIds.length">
               已勾选（{{ selectedIds.length }} 人）
             </el-radio>
+            <el-radio value="range">指定行区间</el-radio>
           </el-radio-group>
+          <div
+            v-if="exportRowScope === 'range'"
+            style="margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap"
+          >
+            第
+            <el-input-number
+              v-model="exportRowFrom"
+              :min="1"
+              :max="Math.max(1, total)"
+              size="small"
+              controls-position="right"
+              style="width: 110px"
+            />
+            到第
+            <el-input-number
+              v-model="exportRowTo"
+              :min="1"
+              :max="Math.max(1, total)"
+              size="small"
+              controls-position="right"
+              style="width: 110px"
+            />
+            条（共 {{ total }} 人，按当前筛选后的顺序）
+          </div>
         </el-form-item>
 
         <el-form-item label="列">
@@ -1587,7 +1751,7 @@ function onMore(cmd: string) {
         <el-button
           type="primary"
           :loading="exporting"
-          :disabled="exportColumnKeys.length < 2"
+          :disabled="exportColumnKeys.length < 2 || exportRowCount < 1"
           @click="submitExport"
         >
           导出
@@ -1700,7 +1864,7 @@ function onMore(cmd: string) {
     <el-dialog v-model="trashOpen" title="已停用的列" width="560px" append-to-body>
       <p class="trash-hint">
         停用只是把这一列从表格和导出里收起来，<strong>已填的值一行都没删</strong>。
-        点「恢复」放回表格，数据原样还在。
+        点「恢复」放回表格，数据原样还在；确认不要了，点「删除」把这一列连同数据一起彻底清除。
       </p>
       <el-table v-loading="trashLoading" :data="disabledColumns" size="small">
         <el-table-column prop="label" label="列名" />
@@ -1714,9 +1878,10 @@ function onMore(cmd: string) {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" align="right">
+        <el-table-column label="操作" width="140" align="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="restoreColumn(row)">恢复</el-button>
+            <el-button link type="danger" @click="purgeColumn(row)">删除</el-button>
           </template>
         </el-table-column>
         <template #empty>

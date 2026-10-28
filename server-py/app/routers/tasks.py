@@ -17,13 +17,13 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..responses import ok
 from ..schemas import TaskAnswerRequest, TaskCreateRequest, TaskUpdateRequest
-from ..security import LoginUser, get_current_user
+from ..security import LoginUser, get_current_user, require_min_level
 from ..services import task_excel, task_service as svc
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -34,17 +34,49 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 @router.get("")
 def list_tasks(
+    view: str = Query("mine", description="mine=本班+学院；college=只看学院；other=其他班"),
     user: LoginUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     return ok(
         {
-            "rows": svc.list_tasks(db, user),
+            "rows": svc.list_tasks(db, user, view),
             # 发布权限随列表一起下发：前端据此决定要不要显示「发布任务」按钮。
             # 这只是决定按钮显不显示，真正的闸门在 create_task。
             "canPublish": svc.can_publish(user),
+            # 第三十二轮：能不能发**学院任务**（只有院长）
+            "canPublishCollege": user.role == "DEAN",
+            "view": view,
         }
     )
+
+
+@router.get("/overview")
+def task_overview(
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """任务总览（第三十二轮）：统计「现在什么状况」。
+
+    声明在 `/{task_id}/...` 那几条**之前**（段数不同本来不会真撞，
+    但把字面量路径排在参数路径前面是这个仓库的一贯写法）。
+
+    ⚠ **只有院长能看**（用户口径）：它是「学院」这一组里的一页，
+    而「学院」除了院长谁都不展示。侧栏不给入口、路由也弹回仪表盘，
+    后端这里再硬拦一道——手输 URL / 直接调接口都绕不过去。
+    """
+    require_min_level(user, "DEAN", "任务总览")
+    return ok(svc.overview(db, user))
+
+
+@router.get("/overview/export", summary="导出任务总览（所有任务一览）")
+def export_overview(
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """把任务总览导出成 Excel。仅院长。"""
+    require_min_level(user, "DEAN", "任务总览导出")
+    return task_excel.xlsx_response(task_excel.export_overview(db, user))
 
 
 @router.get("/pinned")
@@ -98,6 +130,8 @@ def create_task(
             options=req.options,
             allow_text=bool(req.allowText),
             deadline=req.deadline,
+            # 第三十二轮：scope=COLLEGE 就是**学院任务**（只有院长能发）
+            scope=req.scope or "CLASS",
         )
     )
 

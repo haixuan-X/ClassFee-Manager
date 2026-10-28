@@ -7,6 +7,8 @@
 | GET  /api/students | 全员；**返回体已按可见范围裁剪**，没权限的人拿不到别人的学号 |
 | PUT  /api/students/{id} | 需 `EDIT_OWN` / `EDIT_ALL`，班主任恒可 |
 | POST /api/students/import | 班主任 / 班长 |
+| GET  /api/students/template | 班主任 / 班长（模板 = 本班当前字段，填完直接导回来） |
+| DELETE /api/students?ids=… | **班主任及以上**（班长能加不能删）；删行含字段值，账号不动 |
 | GET  /api/students/export | 全员；导出内容 = 自己的可见范围 |
 | GET/POST/PUT/DELETE /api/students/fields | 新增/改字段：班主任 / 班长 |
 | GET  /api/students/accounts/preview | **仅班主任**。预演一键建账号，不写库 |
@@ -112,6 +114,36 @@ def update_student(
     )
 
 
+@router.delete("")
+def delete_students(
+    ids: str = Query(..., description="要删除的学生记录 id，逗号分隔（如 3,7,9）"),
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """从本班名册删行（可批量）。**只有班主任及以上**，班长不能删。
+
+    删的是 `student_record` + 他填过的所有 `student_record_value`；
+    **登录账号不动**（那是「成员管理」的事）。不可撤销，界面负责确认。
+
+    用逗号串而不是请求体：`DELETE` 带 body 在中间代理上不保证透传，
+    而这条路径只是若干整数，查询串足够。
+    """
+    return ok(svc.delete_records(db, user, _parse_ids(ids)))
+
+
+def _parse_ids(raw: str) -> list[int]:
+    out: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            raise BizException.bad_request("学生 id 不合法") from None
+    return out
+
+
 # ---------------- Excel ----------------
 
 @router.post("/import")
@@ -169,6 +201,21 @@ def export_selected(
     return _xlsx_response(
         student_excel.export_xlsx(db, user, only_ids=ids or None, only_fields=keys or None)
     )
+
+
+@router.get("/template", summary="下载导入模板（列 = 本班当前字段）")
+def download_template(
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """下载**今天这张表的列**，填完直接传回 `/students/import`。
+
+    权限和导入同一档（班主任 / 班长 / 院长）：模板里只有列名、没有学生数据，
+    但给一个导不进来的人发模板没有意义。
+    """
+    if user.role not in svc.FIELD_ADD_ROLES:
+        raise BizException.forbidden("只有班主任或班长可以下载导入模板")
+    return _xlsx_response(student_excel.template_xlsx(db, user))
 
 
 def _xlsx_response(pair: tuple[bytes, str]) -> Response:
@@ -276,6 +323,20 @@ def delete_field(
     模板字段也允许停用；值一律保留，可用 `POST /fields/{key}/restore` 找回。
     """
     return ok(svc.delete_field(db, user, field_key))
+
+
+@router.delete("/fields/{field_key}/purge", summary="彻底删除已停用的字段（含值）")
+def purge_field(
+    field_key: str,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """彻底删除**已停用**的字段：字段行连同它名下的所有值一起删，不可恢复。
+
+    只对已停用（status=0）的字段放行——先停用、再彻底删除，两步保护。
+    误删想找回走 `POST /fields/{key}/restore`（在彻底删除之前都有效）。
+    """
+    return ok(svc.purge_field(db, user, field_key))
 
 
 # ---------------- 申请与审批 ----------------

@@ -401,8 +401,20 @@ _STAFF_COMPILED = [(m, re.compile(p)) for m, p in _STAFF_ROUTES]
 #: 纯院长**可以**访问的接口（方法 + 路径正则）。
 #:
 #: - `/api/auth/**`：登录、/me、改自己的密码与资料——那是他自己的账号
-#: - `/api/college/**`：学院三块（学生名册 / 班主任名册 / 学院任务）
+#: - `/api/college/**`：学院这一层**全部**接口（学生名册 / 班主任名册 / 学院任务）。
+#:   名册不只是看：改一格、转班、导入、删行、安排班主任都是院长的本职——
+#:   只给 GET 的话他点开「学院学生信息」一个格子都改不了，那就是个只读海报。
+#:   这个前缀下没有账目/缴费/班级任务，所以放宽到写不越界。
+#:   班级那一套（记账、缴费、批次、类别、班级任务、班级信息、班级学生信息）
+#:   仍然不在白名单里。
+#: - `GET /api/class/choices`：**全校启用班的名单**（只有 id / 班名 / 年级）。
+#:   「个人信息」页要用它渲染「我带的班」——纯院长把这个开关一拨到
+#:   「院长 + 班主任」就立刻需要选项，而那时 `dean_only` 还是 1（改完才落库），
+#:   拦掉的话用户会先吃一个 403 才看到下拉框。给的是班名，不是班级事务：
+#:   账目、缴费、班级任务、班级成员一个都不在里面。
 #: - `/api/dashboard/students`：学生情况总览（学院级看板）
+#: - `/api/tasks/overview`：任务总览（第三十二轮）——统计的是**全校**的任务，
+#:   属学院事务，不含任何班级账目，所以纯院长能看。
 #:
 #: 刻意**不包含** `/api/dashboard/summary|trend|category-pie`：那是班级账目总览的
 #: 数据源。纯院长没有班级账目可言——侧栏里也不给他「账目」这一组。
@@ -411,7 +423,18 @@ _PURE_DEAN_ALLOWED: list[tuple[str, str]] = [
     ("POST", r"^/api/auth/"),
     ("PUT", r"^/api/auth/"),
     ("GET", r"^/api/college/"),
+    ("POST", r"^/api/college/"),
+    ("PUT", r"^/api/college/"),
+    ("DELETE", r"^/api/college/"),
+    ("GET", r"^/api/class/choices$"),
     ("GET", r"^/api/dashboard/students$"),
+    # 第三十三轮：任务接口。**学院任务（scope=COLLEGE）是院长的本职**，
+    # 发布/查看/管理它必须放行；但 service 层会把纯院长**限制在学院任务内**
+    # （不能发/看/管班级任务）。兼班主任院长（dean_only=0）不受此限制。
+    ("GET", r"^/api/tasks"),
+    ("POST", r"^/api/tasks"),
+    ("PUT", r"^/api/tasks"),
+    ("DELETE", r"^/api/tasks"),
 ]
 
 _PURE_DEAN_COMPILED = [(m, re.compile(p)) for m, p in _PURE_DEAN_ALLOWED]
@@ -479,43 +502,60 @@ async def _anyio_thread(fn, *args):
 def managed_class_ids(user_id: int, default_class_id: int, role: str) -> list[int]:
     """这个账号**能管的班**（第三十二轮）。
 
-    - **院长 = 所有启用班**。他是校级的（管的就是全校），
-      不然会出现死锁：谁都没法给一个老师加班——因为**只能给自己
-      已经能管的班加**，而没有人的默认班是别人要加的那个班。
     - **其他人 = 默认班 ∪ `sys_user_class` 里关联的班**。
+    - **院长 = 他自己勾的「我带的班」**；一条都没勾过才退回「所有启用班」。
 
-    ⚠ **默认班永远在里面**：关联表是后加的，老账号一条关联记录都没有——
-    要是只看关联表，所有存量账号都会变成「一个班都管不了」。
+    ## 为什么院长不再「恒等于全校」（第三十三轮）
+
+    「个人信息 → 我带的班」对院长原来是**摆设**：不管勾成什么样，
+    回执和侧栏切换器永远是全部启用班。用户的说法是「感觉有点串数据，
+    没有根据我带的班来分类」。
+
+    现在**学院层照旧全校**（那是 `/api/college/*` 自己的口径，不走过里），
+    这里只管**班级层**（账目/任务/学生信息/成员缴费/班级信息）能切到哪些班。
+
+    **一条关联都没有 = 从没设过**：老账号、回归探针都走这条，
+    行为与以前一致（全部启用班），不会升级即失效。
+
+    ⚠ **默认班永远在里面**：关联表只存「额外带的班」，摘不掉默认班。
     """
     from sqlalchemy import text
 
     from .db import engine
 
-    if role == DEAN_ROLE:
-        try:
-            with engine.connect() as conn:
-                return [
-                    int(cid)
-                    for (cid,) in conn.execute(
-                        text("SELECT id FROM cls_class WHERE status = 1 ORDER BY id")
-                    )
-                ]
-        except Exception:  # noqa: BLE001
-            return [default_class_id]
-
-    ids: list[int] = [default_class_id]
     try:
         with engine.connect() as conn:
+            picked: list[int] = []
             for (cid,) in conn.execute(
                 text("SELECT class_id FROM sys_user_class WHERE user_id = :i"),
                 {"i": user_id},
             ):
                 c = int(cid)
-                if c not in ids:
-                    ids.append(c)
+                if c not in picked:
+                    picked.append(c)
+            alive = {
+                int(cid)
+                for (cid,) in conn.execute(
+                    text("SELECT id FROM cls_class WHERE status = 1")
+                )
+            }
     except Exception:  # noqa: BLE001
         # 查不到就按「只管默认班」处理：宁可少一个班，也不能让他多看一个班的账
-        pass
+        return [default_class_id]
+
+    if role == DEAN_ROLE:
+        if not picked:
+            return sorted(alive) or [default_class_id]
+        out = [default_class_id]
+        for c in picked:
+            if c in alive and c not in out:
+                out.append(c)
+        return out
+
+    ids: list[int] = [default_class_id]
+    for c in picked:
+        if c not in ids:
+            ids.append(c)
     return ids
 
 
@@ -622,12 +662,21 @@ def install_auth_middleware(app: FastAPI) -> None:
                 managed = await _anyio_thread(
                     managed_class_ids, user.id, user.class_id, user.role
                 )
-                try:
-                    user.class_id = resolve_current_class(
-                        user, request.query_params.get("classId"), managed
-                    )
-                except BizException as e:
-                    return fail(e.code, e.message, None, status=e.status)
+                # ⚠ **学院口径的接口不吃 `classId` 这层语义**：那几页的
+                # `classId` 是页面上的「全部班级」筛选条件，不是「本次操作哪个班」。
+                # 混在一起会出怪事：把学院名册筛到某个不在「我带的班」里的班，
+                # 整个请求 403（筛一下就被拒，看起来像权限坏了）。
+                # 前端 `api/request.ts` 对同一批路径也不注入 classId，两边口径一致。
+                college_scope = path.startswith("/api/college/") or path.startswith(
+                    "/api/dashboard/students"
+                )
+                if not college_scope:
+                    try:
+                        user.class_id = resolve_current_class(
+                            user, request.query_params.get("classId"), managed
+                        )
+                    except BizException as e:
+                        return fail(e.code, e.message, None, status=e.status)
                 # 纯院长（第三十轮）：只管学院，班级事务一概不参与。
                 # 后端硬拦——前端隐藏的只是**入口**，手输 URL 或直接调接口都能绕过去。
                 if user.role == DEAN_ROLE and dean_only:

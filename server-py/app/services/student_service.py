@@ -35,7 +35,7 @@ import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
@@ -669,6 +669,34 @@ def restore_field(db: Session, user: LoginUser, field_key: str) -> dict:
         return {"id": f.id, "key": f.field_key, "label": f.field_label, "status": 1}
 
 
+def purge_field(db: Session, user: LoginUser, field_key: str) -> dict:
+    """彻底删除**已停用**的字段：字段行连同它名下的所有值一起删，不可恢复。
+
+    只放行 `status=0` 的字段，是刻意设的**两步保护**：先停用（软删、可恢复）
+    再彻底删除，中间留一个反悔窗口。直接硬删一个正在用的列，
+    一失手就毁掉整列历史数据；确认框里的「不可恢复」必须和这里的真删对得上。
+    """
+    if user.role not in FIELD_ADD_ROLES:
+        raise BizException.forbidden("只有班主任或班长可以删除字段")
+    with db.begin():
+        f = db.execute(
+            select(StudentField).where(
+                StudentField.class_id == user.class_id,
+                StudentField.field_key == field_key,
+            )
+        ).scalar_one_or_none()
+        if f is None:
+            raise BizException.bad_request("字段不存在")
+        if f.status != 0:
+            raise BizException.bad_request("只能彻底删除已停用的字段，请先停用它")
+        removed = db.execute(
+            delete(StudentRecordValue).where(StudentRecordValue.field_id == f.id)
+        ).rowcount
+        label = f.field_label
+        db.delete(f)
+        return {"key": field_key, "label": label, "deletedValues": int(removed or 0)}
+
+
 # ==================== 记录与字段值 ====================
 
 def match_user_id(db: Session, class_id: int, student_no: str) -> int | None:
@@ -712,16 +740,78 @@ def _load_values(db: Session, record_ids: list[int]) -> dict[tuple[int, int], st
 
 # ==================== 仪表盘「学生情况总览」 ====================
 
-#: `reg_status`（注册状态）模板里是**纯 TEXT**，全库没有取值字典——
-#: 没有任何代码约束它只能填哪几个词（实测：seed 只给了字段名和类型）。
-#: 所以「在籍」只能靠关键词推断。这里列的是**明确离校**的写法，
-#: 其余（含**空值**）一律算在籍。
+# ==================== 学籍状态 ====================
+
+#: 学籍状态的标准取值。用户口径（第三十四轮）：「在籍、毕业、入伍、休学、退学
+#: 这是学籍的示例情况」。
 #:
-#: 为什么把空值算在籍而不是「未知」：`student_record` 是导入 Excel 建出来的，
-#: 模板有 34 个字段而 Excel 不可能每列都填满，一空就算未知的话，
-#: 分母会被掏空，「注册人数」比「学生总数」还小——那明显不对。
-#: 宁可多算一个在读的，也别把在读的学生从分母里剔掉。
-_NOT_REGISTERED_KEYWORDS = ("休学", "退学", "结业", "毕业", "保留学籍", "开除", "肄业")
+#: `reg_status` 这一列是**自由文本**（模板里就是 TEXT，全库没有取值字典，也没
+#: 用它拦过任何输入），导入的 Excel 里写法五花八门：「在藉」「已毕业」「参军入伍」
+#: 「休学（病假）」。所以这里不跟字符串死比，而是**按关键词归类**——同一件事的
+#: 不同写法落到同一档，仪表盘才数得对。
+REG_STATUS_ENROLLED = "在籍"
+REG_STATUS_GRADUATED = "毕业"
+REG_STATUS_MILITARY = "入伍"
+REG_STATUS_SUSPENDED = "休学"
+REG_STATUS_QUIT = "退学"
+REG_STATUS_OTHER = "其他"
+REG_STATUS_EMPTY = "未填写"
+
+#: 五个标准值，顺序即仪表盘里的展示顺序（不是按人数排——人数排序会让人
+#: 每次打开都找不到同一档在哪）。
+REG_STATUSES = (
+    REG_STATUS_ENROLLED,
+    REG_STATUS_GRADUATED,
+    REG_STATUS_MILITARY,
+    REG_STATUS_SUSPENDED,
+    REG_STATUS_QUIT,
+)
+
+#: 每一档认哪些写法。**顺序 = 判定顺序，先命中先算**：一条「休学后复学」两边
+#: 都沾，归先命中的那类。把「退学」放最前是因为「退学」是终态，写成
+#: 「自动退学（原休学）」时该按退学算。
+REG_STATUS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (REG_STATUS_QUIT, ("退学", "开除", "除名", "取消学籍")),
+    (REG_STATUS_GRADUATED, ("毕业", "结业", "肄业")),
+    (REG_STATUS_MILITARY, ("入伍", "参军", "服兵役", "应征", "军籍")),
+    (REG_STATUS_SUSPENDED, ("休学", "保留学籍", "停学")),
+    (REG_STATUS_ENROLLED, ("在籍", "在册", "在读", "在校", "在学", "注册", "复学")),
+)
+
+
+def classify_reg_status(raw: str | None) -> str:
+    """把学籍状态的自由文本归到一类标准值。
+
+    空值 → `未填写`；一个关键词都不沾 → `其他`。`其他` 不硬塞进某一档，
+    也不丢掉：仪表盘上单列一行，点开能看见原始写法（`samples`）。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return REG_STATUS_EMPTY
+    for label, words in REG_STATUS_RULES:
+        if any(w in s for w in words):
+            return label
+    return REG_STATUS_OTHER
+
+
+def is_registered(raw: str | None) -> bool:
+    """算不算「在籍」（计入年级学籍注册人数）。
+
+    ## 五个标准值里**只有「在籍」算**
+
+    用户口径：在籍/毕业/入伍/休学/退学 里只有在籍计入注册人数。入伍按
+    **保留学籍**处理——人不在校，不算注册。认不出写法的（`其他`）同样不算，
+    宁可在仪表盘上让人看见「有 N 个人这列填得不像学籍状态」。
+
+    ## 但**空值**仍算在籍
+
+    `student_record` 是导入 Excel 建出来的，模板 30 多列不可能每列都填满；
+    一空就算未知的话分母会被掏空，「注册人数」比「学生总数」还小——那明显
+    不对。宁可多算一个在读的，也别把在读的学生从分母里剔掉。界面上
+    「未填写」是单独一档，看得见。
+    """
+    return classify_reg_status(raw) in (REG_STATUS_ENROLLED, REG_STATUS_EMPTY)
+
 
 #: 趋势图默认展示近几个月。**只有 `enroll_date`（入校日期）是真正的时间轴**，
 #: 其余字段（TEXT/NUMBER/BOOL）没有日期维度，无从谈趋势。
@@ -729,13 +819,6 @@ DEFAULT_TREND_MONTHS = 12
 
 #: 「最新学籍信息」取几条。
 LATEST_LIMIT = 8
-
-
-def _is_registered(status: str | None) -> bool:
-    s = (status or "").strip()
-    if not s:
-        return True  # 空值按在籍算，见 _NOT_REGISTERED_KEYWORDS 的说明
-    return not any(k in s for k in _NOT_REGISTERED_KEYWORDS)
 
 
 def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND_MONTHS) -> dict:
@@ -837,17 +920,24 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
 
     total = len(records)
     breakdown: dict[str, int] = {}
+    #: 每档下面收集几种**原始写法**（最多 3 种）。「其他 5」不告诉人是什么写法，
+    #: 等于把问题藏起来——用户得能看见「这 5 条写的是『在藉』『转学』」。
+    samples: dict[str, list[str]] = {}
     registered = 0
     enroll_months: dict[str, int] = {}
     latest_rows: list[dict] = []
 
     for rid, rec in records.items():
         status = val(rid, "reg_status")
-        # 空状态归到「未填写」而不是「在籍」——分母里算在籍，但分布图上
+        # 空状态归到「未填写」而不是假装在籍——分母里算在籍，但分布图上
         # 让老师看得见「有 N 个人这项是空的」，否则模板空列永远是隐形的。
-        label = status or "未填写"
-        breakdown[label] = breakdown.get(label, 0) + 1
-        if _is_registered(status):
+        bucket = classify_reg_status(status)
+        breakdown[bucket] = breakdown.get(bucket, 0) + 1
+        if status and status != bucket:
+            seen = samples.setdefault(bucket, [])
+            if status not in seen and len(seen) < 3:
+                seen.append(status)
+        if is_registered(status):
             registered += 1
 
         ed = val(rid, "enroll_date")
@@ -864,10 +954,12 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
             # is not JSON serializable）。项目里所有时间出参都走这个函数。
             "updatedAt": fmt_dt(rec.updated_at),
             "regStatus": status,
+            # 归到哪一档（前端配色/分组用；原样文本仍然照给，不篡改用户数据）
+            "regStatusCanon": bucket,
             "grade": val(rid, "grade"),
             "majorName": val(rid, "major_name"),
             "enrollDate": ed,
-            "registered": _is_registered(status),
+            "registered": is_registered(status),
             # 学院口径下让人看得出这一行是哪个班的
             "className": (
                 class_by_id[rec.class_id].class_name
@@ -895,9 +987,19 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
         "collegeScope": is_college,
         "studentTotal": total,
         "registeredTotal": registered,
+        # 五个标准值按**固定顺序**在前（在籍/毕业/入伍/休学/退学），
+        # 认不出写法的「其他」和空着的「未填写」跟在后面。
+        # 顺序不随人数变：每次打开都在同一个位置，才找得到。
+        # 没有人的那几档不占位（空班不该摆 5 行 0）。
         "statusBreakdown": [
-            {"status": k, "count": v}
-            for k, v in sorted(breakdown.items(), key=lambda kv: (-kv[1], kv[0]))
+            {
+                "status": k,
+                "count": breakdown[k],
+                "registered": is_registered(None if k == REG_STATUS_EMPTY else k),
+                "samples": samples.get(k, []),
+            }
+            for k in (*REG_STATUSES, REG_STATUS_OTHER, REG_STATUS_EMPTY)
+            if breakdown.get(k)
         ],
         "enrollTrend": trend,
         "months": months,
@@ -1040,6 +1142,55 @@ def _assert_can_manage(db: Session, user: LoginUser) -> None:
     """
     if user.role not in FIELD_ADD_ROLES:
         raise BizException.forbidden("只有班主任或班长可以新增学生")
+
+
+def delete_records(db: Session, user: LoginUser, record_ids: list[int]) -> dict:
+    """从**本班名册**删掉若干学生（含他们填过的每一格）。**不可撤销**。
+
+    ## 删的是什么
+
+    `student_record` 那一行 + 他所有的 `student_record_value`。
+    这是真删，没有回收站——界面必须先确认再调。
+
+    ## 不删什么
+
+    **登录账号不动**（`sys_user` 是独立的一条）。人离校了账号还在，那是该去
+    「成员管理」停用/删除账号的事；顺手把账号连同缴费记录一起抹掉不属于这里。
+
+    ## 为什么是「班主任及以上」
+
+    加一行（`FIELD_ADD_ROLES` = 班长及以上）和删一行不是一个量级的事：
+    加错了看得见、改得回来；删一行是**把这个人在全班名册里的所有信息一起抹掉**。
+    班长能加不能删，删行留给班主任和院长。
+
+    ## 只删自己班的
+
+    `ids` 里混进别班的 id 一律跳过（不报错也不删）——本班页面的入口
+    本来就不该拿到别班的行，真混进来也绝不能让一次调用删到别人班。
+    """
+    if user.role not in APPROVER_ROLES:
+        raise BizException.forbidden("只有班主任可以删除学生")
+    ids = sorted({int(i) for i in record_ids})
+    if not ids:
+        raise BizException.bad_request("没有选中任何学生")
+    with db.begin():
+        # 读也放在事务里：先 SELECT 再 begin 会撞「a transaction is already begun」
+        owned = [
+            int(i)
+            for i in db.scalars(
+                select(StudentRecord.id).where(
+                    StudentRecord.id.in_(ids),
+                    StudentRecord.class_id == user.class_id,
+                )
+            )
+        ]
+        if not owned:
+            raise BizException.bad_request("学生记录不存在或不属于本班")
+        db.execute(
+            delete(StudentRecordValue).where(StudentRecordValue.record_id.in_(owned))
+        )
+        db.execute(delete(StudentRecord).where(StudentRecord.id.in_(owned)))
+    return {"deleted": len(owned), "ids": owned}
 
 
 def update_record(

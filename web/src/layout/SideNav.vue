@@ -96,6 +96,14 @@ interface NavGroup {
   /** 抽拉式子分组；为空则这一组只有平铺的 items */
   subs?: NavSubGroup[]
   /**
+   * **只有这些角色**能看到这一组（第三十二轮）。
+   *
+   * 「学院」这一组就是它：**除了院长，谁都不展示**（用户口径）。
+   * 组级过滤比逐条给 item 加 roles 可靠——加新入口时忘了标，
+   * 就会漏在别人的侧栏里，而这里是一刀切。
+   */
+  roles?: Role[]
+  /**
    * 纯院长**看不到**这一组（第三十轮）。
    *
    * 纯院长只管学院，班级那一套（账目、班级任务、班级信息、班级成员）
@@ -153,6 +161,9 @@ const GUEST_SCOPE_OF_PATH: Record<string, GuestScope> = {
   '/records': 'RECORDS',
   '/student-info': 'STUDENTS',
   '/tasks': 'TASKS',
+  // 任务总览（第三十二轮）：统计的就是任务，和「班级任务」同源，
+  // 所以跟着 TASKS 范围走（路由守卫那份表里也是同一个口径）。
+  '/tasks/overview': 'TASKS',
 }
 
 /**
@@ -202,7 +213,12 @@ const groups: NavGroup[] = [
   {
     // 学院（第三十轮）：位置在「总览」和「账目」之间。
     // 「班级管理」和「任务」做成**抽拉式**（可展开/收起），不是直接铺开的入口。
+    //
+    // ⚠ **这一组只有院长能看到**（用户口径：「学院这一栏，除了院长，谁都不展示」）。
+    //  组级 `roles` 一刀切，比逐条给 item 加 roles 可靠——以后往这一组加新入口，
+    //  忘了标角色也不会漏到别人的侧栏里。
     title: '学院',
+    roles: DEAN_ONLY,
     items: [],
     subs: [
       {
@@ -224,7 +240,17 @@ const groups: NavGroup[] = [
         label: '任务',
         icon: 'Bell',
         items: [
+          // 任务总览（第三十二轮）：统计「现在什么状况」。
+          // ⚠ **只有院长能看**（用户口径）——它挂在「学院」这一组下，
+          // 而那一组除了院长谁都不展示。
+          { index: '/tasks/overview', label: '任务总览', icon: 'DataLine' },
+          // **学院任务**：院长发到**全学院**的，由各班班主任应答
           { index: '/college/tasks', label: '学院任务', icon: 'List', roles: DEAN_ONLY },
+          // **班级任务**（学院视角）：查看**各班班主任发布的任务**（第三十二轮）。
+          // ⚠ 和「班级 > 班级任务」同名但不是一回事：
+          //   - 「班级 > 班级任务」= 本班的任务，能发布、能答题
+          //   - 这一条 = 各班班主任发的任务的**只读**一览
+          { index: '/college/class-tasks', label: '班级任务', icon: 'Bell', roles: DEAN_ONLY },
         ],
       },
     ],
@@ -246,9 +272,14 @@ const groups: NavGroup[] = [
       // 走页面内的申请流程。路由不设 roles，拦在路由层会让同学连自己的信息都看不到。
       // 访客例外：他能看**全部**（服务端 scope 决定的），但一行都改不了。
       { index: '/student-info', label: '学生信息', icon: 'Postcard' },
-      // 班级任务（第二十五轮）：全员可读（填答案是全员动作），访客也能看但只能看汇总。
+      // 班级任务（第二十五轮）：**本班**的任务，能发布、能答题。
+      // 全员可读（填答案是全员动作），访客也能看但只能看汇总。
       // 发布按钮在页面内按 `canPublish` 显示，这里不设 roles —— 和学生信息同理，
       // 拦在侧栏会让同学连题都看不到。真正的闸门在 task_service。
+      //
+      // ⚠ 和「学院 > 任务 > 班级任务」同名但不是一回事：
+      //   - 这一条 = **本班**的任务，班主任/班长在这里发布、同学在这里填
+      //   - 「学院 > 任务 > 班级任务」 = 各班班主任发的任务的**只读**一览（院长看）
       { index: '/tasks', label: '班级任务', icon: 'Bell' },
       // 「我的缴费」：回答「有没有班费要交 / 我交了吗 / 什么时候截止」，这三问
       // **只有缴费对象问得出来** —— 后端 `_class_members` 只给 MEMBER 生成缴费行，
@@ -302,6 +333,9 @@ function canSee(item: NavItem): boolean {
 
 const visibleGroups = computed(() =>
   groups
+    // 组级角色闸门（第三十二轮）：「学院」这一组**只有院长**能看到。
+    // 组级一刀切比逐条给 item 加 roles 可靠——加新入口忘了标就会漏出去。
+    .filter((group) => !group.roles || group.roles.includes(userStore.user?.role ?? 'MEMBER'))
     // 纯院长不参与班级事务：「账目」「班级」两组整个不出现（第三十轮）
     .filter((group) => !(group.hiddenForPureDean && userStore.isPureDean))
     .map((group) => ({
@@ -416,6 +450,9 @@ watch(
     <!--
       班级切换器（第三十二轮）：一个班主任可能带好几个班。
       只有**多班时**才渲染——只有一个班的人不需要看见这个控件。
+
+      学院页面也照常给：它是「当前班」这个全局上下文，不是学院页的筛选器；
+      学院那几页各有自己的「全部班级」下拉。
     -->
     <div v-if="userStore.canSwitchClass" class="class-switch">
       <el-select

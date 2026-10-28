@@ -1,21 +1,27 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
 import {
   deleteTask,
   exportTaskDetail,
   fetchTaskDetail,
   fetchTasks,
-  publishTask,
   setTaskOpen,
   setTaskPinned,
   submitTaskAnswer,
   TASK_QTYPES,
-  updateTask,
 } from '@/api/tasks'
+import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
 import { useModal } from '@/composables/useModal'
-import type { Task, TaskCreatePayload, TaskDetail, TaskQType } from '@/types'
+import { useUserStore } from '@/stores/user'
+import type {
+  Task,
+  TaskDetail,
+  TaskQType,
+  TaskScope,
+  TaskView,
+} from '@/types'
 
 /**
  * 班级任务（第二十五轮）。
@@ -40,21 +46,53 @@ import type { Task, TaskCreatePayload, TaskDetail, TaskQType } from '@/types'
  * 不是按钮禁用——按不了的东西就不该在页面上。
  */
 
+const userStore = useUserStore()
 const loading = ref(true)
 const rows = ref<Task[]>([])
 const canPublish = ref(false)
+const canPublishCollege = ref(false)
+
+/**
+ * 看哪一块（第三十二轮）。
+ *
+ * - mine（默认）：**本班**的任务 + **学院**的任务
+ * - college：只看学院任务
+ * - other：**其他班**班主任发出来的（只读；同学看与自己无关，所以不显示这一档）
+ */
+const view = ref<TaskView>('mine')
+
+/**
+ * 范围切换（第三十三轮：班级数据不互通）。
+ *
+ * 只保留两档：本班 + 学院、学院任务。
+ * **刻意没有「其他班」**——班主任 / 班长 / 生活委员 / 同学都只能看
+ * 「自己班 + 院长下发的学院任务」，看别的班属于越界。
+ */
+const VIEWS: { key: TaskView; label: string; hint: string }[] = [
+  { key: 'mine', label: '本班 + 学院', hint: '我自己班的，以及学院发下来的' },
+  { key: 'college', label: '学院任务', hint: '院长发到全学院的，各班班主任应答' },
+]
+
+const visibleViews = VIEWS
 
 async function load() {
   loading.value = true
   try {
-    const data = await fetchTasks()
+    const data = await fetchTasks(view.value)
     rows.value = data.rows
     canPublish.value = data.canPublish
+    canPublishCollege.value = data.canPublishCollege
   } catch {
     rows.value = []
   } finally {
     loading.value = false
   }
+}
+
+function switchView(v: TaskView) {
+  if (view.value === v) return
+  view.value = v
+  void load()
 }
 
 /* ============================ 题型说明 ============================ */
@@ -68,101 +106,34 @@ const percent = (answered: number, total: number) =>
 /* ============================ 发布 / 修改 ============================ */
 
 const formVisible = ref(false)
-const formLoading = ref(false)
-const formRef = ref<FormInstance>()
-const editingId = ref<number | null>(null)
-const { restoreFocus: restoreFormFocus } = useModal(formVisible)
-
-const blank = () => ({
-  title: '',
-  question: '',
-  qtype: 'BOOLEAN' as TaskQType,
-  /** 候选项：数组编辑器，每项一个输入框 */
-  options: ['', ''] as string[],
-  allowText: false,
-  /** el-date-picker 的 `YYYY-MM-DDTHH:mm:ss` 字符串，null = 不限 */
-  deadline: null as string | null,
-})
-const form = reactive(blank())
-
-const needsOptions = computed(() => form.qtype === 'SINGLE' || form.qtype === 'MULTI')
-/** 去掉首尾空白和空串，发布前归一（用户很容易在候选项里敲进一个空格） */
-const cleanOptions = computed(() => form.options.map((o) => o.trim()).filter(Boolean))
-
-const formRules: FormRules = {
-  title: [
-    { required: true, message: '请输入任务标题', trigger: 'blur' },
-    { max: 60, message: '任务标题最多 60 字', trigger: 'blur' },
-  ],
-  question: [
-    { required: true, message: '请输入题目', trigger: 'blur' },
-    { max: 255, message: '题目最多 255 字', trigger: 'blur' },
-  ],
-}
+/** 发布哪一类任务（第三十二轮） */
+const formScope = ref<TaskScope>('CLASS')
+/** 传了就进「修改」模式 */
+const editingTask = ref<Task | null>(null)
 
 function openCreate() {
-  editingId.value = null
-  Object.assign(form, blank())
+  editingTask.value = null
+  formScope.value = 'CLASS'
+  formVisible.value = true
+}
+
+/**
+ * 发布**学院任务**（第三十二轮）：全学院可见，由**各班班主任**应答。
+ *
+ * 只有一个入口按钮是不够的——「发布任务」和「发布学院任务」的区别
+ * 体现在**谁来答**上，界面上必须分开说清楚，不能让人发错了再返工。
+ */
+function openCreateCollege() {
+  editingTask.value = null
+  formScope.value = 'COLLEGE'
   formVisible.value = true
 }
 
 /** 改任务。**题型和候选项不给改**——换题型会让已收回的答案对不上题。 */
 function openEdit(row: Task) {
-  editingId.value = row.id
-  Object.assign(form, {
-    title: row.title,
-    question: row.question,
-    qtype: row.qtype,
-    options: row.options.length ? [...row.options] : ['', ''],
-    allowText: row.allowText,
-    deadline: row.deadline ? row.deadline.replace(' ', 'T') + ':00' : null,
-  })
+  editingTask.value = row
+  formScope.value = row.scope
   formVisible.value = true
-}
-
-function addOption() {
-  if (form.options.length >= 12) return
-  form.options.push('')
-}
-
-function removeOption(i: number) {
-  // 少于 2 项时全删光，编辑器会变成空白，用户会以为出 bug 了——
-  // 所以始终留住 2 个空位（后端也会拒少于 2 项）
-  if (form.options.length <= 2) return
-  form.options.splice(i, 1)
-}
-
-async function submitForm() {
-  const formEl = formRef.value
-  if (!formEl) return
-  const ok = await formEl.validate().catch(() => false)
-  if (!ok) return
-
-  const payload: TaskCreatePayload = {
-    title: form.title.trim(),
-    question: form.question.trim(),
-    qtype: form.qtype,
-    allowText: form.allowText,
-    deadline: form.deadline,
-  }
-  if (needsOptions.value) payload.options = cleanOptions.value
-
-  formLoading.value = true
-  try {
-    if (editingId.value === null) {
-      await publishTask(payload)
-      ElMessage.success('任务已发布')
-    } else {
-      await updateTask(editingId.value, payload)
-      ElMessage.success('任务已修改')
-    }
-    formVisible.value = false
-    await load()
-  } catch (e) {
-    ElMessage.error(getErrorMessage(e, '发布失败'))
-  } finally {
-    formLoading.value = false
-  }
 }
 
 /* ============================ 答题 ============================ */
@@ -210,7 +181,7 @@ const canSubmitAnswer = computed(() => {
 
 async function submitAnswer() {
   const task = current.value
-  if (!task) return
+  if (!task || answerLoading.value) return
   if (!canSubmitAnswer.value) {
     ElMessage.warning('请先选择或填写答案')
     return
@@ -306,6 +277,34 @@ async function onDelete(row: Task) {
   }
 }
 
+/** 批量选择：只对「自己能删的」任务显示复选框（发布人自己；院长可管全院） */
+const selectedIds = ref<number[]>([])
+function toggleSelect(id: number) {
+  const i = selectedIds.value.indexOf(id)
+  if (i >= 0) selectedIds.value.splice(i, 1)
+  else selectedIds.value.push(id)
+}
+async function batchRemove() {
+  const ids = [...selectedIds.value]
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${ids.length} 条任务吗？连带答案一起删除，不可恢复。`,
+      '批量删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const results = await Promise.allSettled(ids.map((id) => deleteTask(id)))
+  const okCount = results.filter((r) => r.status === 'fulfilled').length
+  const failCount = results.length - okCount
+  selectedIds.value = []
+  if (failCount > 0) ElMessage.warning(`已删除 ${okCount} 条，${failCount} 条失败`)
+  else ElMessage.success(`已删除 ${okCount} 条任务`)
+  await load()
+}
+
 /* ============================ 杂项 ============================ */
 
 // 只用于**已知角色**的兜底显示（`ROLE_TEXT[row.role] ?? row.role`）。
@@ -343,22 +342,64 @@ onMounted(async () => {
       <div>
         <h2>班级任务</h2>
         <p>
-          班主任或班长发一个题，全班在这里填；只公布「多少人是、多少否」，具体谁填了什么只有发布人和班主任看得到
+          班主任或班长发一个题，全班在这里填；只公布「多少人是、多少否」，具体谁填了什么只有发布人和班主任看得到。
+          <strong>学院任务</strong>是院长发到全学院的，由<strong>各班班主任</strong>应答，也在这里填。
         </p>
       </div>
-      <el-button v-if="canPublish" type="primary" @click="openCreate">发布任务</el-button>
+      <div class="head-tools">
+        <el-button v-if="canPublish" type="primary" @click="openCreate">发布任务</el-button>
+        <el-button v-if="canPublishCollege" @click="openCreateCollege">发布学院任务</el-button>
+      </div>
+    </div>
+
+    <!-- 范围切换：第三十二轮 -->
+    <div class="view-switch" role="tablist" aria-label="任务范围">
+      <button
+        v-for="v in visibleViews"
+        :key="v.key"
+        type="button"
+        role="tab"
+        class="view-btn"
+        :class="{ active: view === v.key }"
+        :aria-selected="view === v.key"
+        :title="v.hint"
+        @click="switchView(v.key)"
+      >
+        {{ v.label }}
+      </button>
     </div>
 
     <p ref="alertRef" class="sr-alert" role="alert">{{ alertMessage }}</p>
+
+    <div
+      v-if="selectedIds.length"
+      style="display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--el-fill-color-light); border-radius: 6px"
+    >
+      <span>已选 <strong>{{ selectedIds.length }}</strong> 条</span>
+      <el-button size="small" type="danger" @click="batchRemove">批量删除</el-button>
+      <el-button size="small" @click="selectedIds = []">取消选择</el-button>
+    </div>
 
     <div v-loading="loading" class="task-list" aria-label="任务列表">
       <p v-if="!loading && rows.length === 0" class="glass-card empty">{{ emptyText }}</p>
 
       <section v-for="row in rows" :key="row.id" class="glass-card task" :aria-label="row.title">
         <header class="task-head">
+          <el-checkbox
+            v-if="row.canEdit"
+            :model-value="selectedIds.includes(row.id)"
+            :aria-label="`选择 ${row.title}`"
+            @change="toggleSelect(row.id)"
+          />
           <div class="head-left">
             <h3>
               {{ row.title }}
+              <el-tag v-if="row.scope === 'COLLEGE'" size="small" type="primary" effect="plain">
+                学院任务
+              </el-tag>
+              <el-tag v-else-if="row.className" size="small" type="info" effect="plain">
+                {{ row.className }}
+              </el-tag>
               <el-tag v-if="row.pinned" size="small" type="danger" effect="plain">置顶</el-tag>
               <el-tag v-if="row.isMine" size="small" type="warning" effect="plain">我发布的</el-tag>
               <el-tag v-if="!row.open" size="small" type="info" effect="plain">已关闭</el-tag>
@@ -460,104 +501,12 @@ onMounted(async () => {
     </div>
 
     <!-- ============================ 发布 / 修改 ============================ -->
-    <el-dialog
+    <TaskPublishDialog
       v-model="formVisible"
-      :title="editingId === null ? '发布任务' : '修改任务'"
-      width="560px"
-      :close-on-click-modal="false"
-      @closed="restoreFormFocus"
-    >
-      <el-form ref="formRef" :model="form" :rules="formRules" label-width="88px" @submit.prevent>
-        <el-form-item label="任务标题" prop="title">
-          <el-input v-model="form.title" placeholder="如「返校统计」" maxlength="60" show-word-limit />
-          <div class="form-tip">列表里显示的短标题，一句话说清是干什么的</div>
-        </el-form-item>
-
-        <el-form-item label="题目" prop="question">
-          <el-input
-            v-model="form.question"
-            placeholder="如「你已经返校了吗？」"
-            maxlength="255"
-            show-word-limit
-          />
-          <div class="form-tip">真正被回答的那句话，同学看到的就是它</div>
-        </el-form-item>
-
-        <el-form-item label="题型" prop="qtype">
-          <el-radio-group v-model="form.qtype" :disabled="editingId !== null">
-            <el-radio-button v-for="t in TASK_QTYPES" :key="t.value" :value="t.value">
-              {{ t.label }}
-            </el-radio-button>
-          </el-radio-group>
-          <div class="form-tip">
-            {{ TASK_QTYPES.find((t) => t.value === form.qtype)?.hint }}
-          </div>
-        </el-form-item>
-
-        <el-form-item v-if="needsOptions" label="候选项">
-          <div class="options">
-            <div v-for="(_, i) in form.options" :key="i" class="opt-row">
-              <el-input
-                v-model="form.options[i]"
-                :placeholder="`选项 ${i + 1}`"
-                maxlength="30"
-                aria-label="候选项"
-              />
-              <el-button
-                :disabled="form.options.length <= 2"
-                size="small"
-                link
-                type="danger"
-                :aria-label="`删除选项 ${i + 1}`"
-                @click="removeOption(i)"
-              >
-                删除
-              </el-button>
-            </div>
-            <el-button size="small" :disabled="form.options.length >= 12" @click="addOption">
-              加一项
-            </el-button>
-            <div class="form-tip">
-              已填 {{ cleanOptions.length }} 项（至少 2 项，最多 12 项，每项 30 字内）
-            </div>
-          </div>
-        </el-form-item>
-
-        <el-form-item label="补充说明">
-          <el-switch v-model="form.allowText" active-text="允许" inactive-text="不允许" />
-          <div class="form-tip">
-            打开后，答完还能再写一句话（如没返校的原因）。不打开则只记答案本身。
-          </div>
-        </el-form-item>
-
-        <el-form-item label="截止时间">
-          <el-date-picker
-            v-model="form.deadline"
-            type="datetime"
-            placeholder="留空 = 不限时间"
-            format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DDTHH:mm:ss"
-            style="width: 100%"
-          />
-          <div class="form-tip">过了这个时间就不再收答案，已填的照常保留</div>
-        </el-form-item>
-
-        <el-alert
-          v-if="editingId !== null"
-          type="info"
-          show-icon
-          :closable="false"
-          title="题型和候选项改不了"
-          description="换题型会让已经收回的答案对不上题。要换请删掉这个任务重新发一个。"
-        />
-      </el-form>
-      <template #footer>
-        <el-button @click="formVisible = false">取消</el-button>
-        <el-button type="primary" :loading="formLoading" @click="submitForm">
-          {{ editingId === null ? '发布' : '保存' }}
-        </el-button>
-      </template>
-    </el-dialog>
+      :scope="formScope"
+      :task="editingTask"
+      @saved="load"
+    />
 
     <!-- ============================ 答题 ============================ -->
     <el-dialog
@@ -691,6 +640,35 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* 范围切换（第三十二轮） */
+.view-switch {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.view-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface, #fff);
+  color: var(--color-muted-fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.view-btn.active {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.head-tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .task-list {
   display: flex;
   flex-direction: column;
@@ -704,6 +682,12 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+}
+/* 复选框 + 标题：让标题区撑满剩余宽度，标题紧跟复选框，
+   而不是被 space-between 推到最右边（第三十三轮） */
+.task-head .head-left {
+  flex: 1;
+  min-width: 0;
 }
 .task-head h3 {
   margin: 0 0 4px;

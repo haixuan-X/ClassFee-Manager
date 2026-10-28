@@ -49,6 +49,7 @@ const GUEST_PAGE_SCOPE: Record<string, GuestScope> = {
   records: 'RECORDS',
   'student-info': 'STUDENTS',
   tasks: 'TASKS',
+  'tasks-overview': 'TASKS',
 }
 
 /**
@@ -65,6 +66,12 @@ const COLLEGE_FREE_PATHS = new Set([
   'college-students',
   'college-advisers',
   'college-tasks',
+  // 学院视角的班级任务（第三十二轮）：各班班主任发布的任务一览，
+  // 和「学院任务」一样是学院事务，纯院长能看。
+  'college-class-tasks',
+  // 任务总览（第三十二轮）：统计的是**全校**的任务，属学院事务，
+  // 纯院长能看。后端 `security._PURE_DEAN_ALLOWED` 同样放行 /api/tasks/overview。
+  'tasks-overview',
   'profile',
 ])
 const routes: RouteRecordRaw[] = [
@@ -128,6 +135,17 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '学生信息' },
       },
       {
+        // 任务总览（第三十二轮）：统计「现在什么状况」——
+        // 多少条、还开着几条、回收率、按班/按发布人的分布。
+        // ⚠ **只有院长能看**（用户口径）：它属于「学院」这一组，
+        // 而那一组除了院长谁都不展示。路由不设 roles 的话手输 URL 能进，
+        // 所以这里要设——入口和直达两条路都堵上。
+        path: 'tasks/overview',
+        name: 'tasks-overview',
+        component: () => import('@/views/tasks/overview.vue'),
+        meta: { title: '任务总览', roles: ['DEAN'] },
+      },
+      {
         // 班级任务（第二十五轮）：发出去还要回收答案，所以三个"看"分得很开——
         // 任务列表全员可读（但只到汇总）、明细只有发布人和班主任、答题访客被拦。
         // 路由不设 roles：同学要能答题，拦在路由层会连题都看不到。
@@ -185,10 +203,23 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '班主任名册', roles: ['DEAN'] },
       },
       {
+        // 学院任务（第三十二轮）：**院长发的**任务一览（scope=COLLEGE），
+        // 全学院可见、由各班班主任应答。同一页面组件按 scope 参数切换视图。
+        // 班主任也进得来（他要应答学院任务）；后端 `require_min_level(user, "TEACHER")` 兜底。
         path: 'college/tasks',
         name: 'college-tasks',
         component: () => import('@/views/college/tasks/index.vue'),
+        props: { scope: 'COLLEGE' },
         meta: { title: '学院任务', roles: ['DEAN'] },
+      },
+      {
+        // 学院视角的**班级任务**（第三十二轮）：**班主任发的**任务一览
+        // （scope=CLASS）。和上面那个是同一批任务的两类，所以共用页面组件。
+        path: 'college/class-tasks',
+        name: 'college-class-tasks',
+        component: () => import('@/views/college/tasks/index.vue'),
+        props: { scope: 'CLASS' },
+        meta: { title: '班级任务', roles: ['DEAN'] },
       },
       {
         // 个人信息：全员可访问（普通成员也能改自己的姓名/学号/手机号）。

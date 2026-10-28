@@ -66,17 +66,19 @@ watch(visible, async (open) => {
 async function onSubmit() {
   if (!formRef.value) return
   if (loading.value) return
-  const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) {
-    alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
-    await nextTick()
-    alertRef.value?.focus()
-    return
-  }
-
+  // 先上锁，再校验（同个人信息页那个坑）：validate 期间按钮还能点，
+  // 连点两下会发两次改密请求（第二次原密码已经变了，直接报错）
   loading.value = true
   alertMessage.value = ''
   try {
+    const valid = await formRef.value.validate().catch(() => false)
+    if (!valid) {
+      alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
+      await nextTick()
+      alertRef.value?.focus()
+      return
+    }
+
     await changePassword({
       oldPassword: form.oldPassword,
       newPassword: form.newPassword,

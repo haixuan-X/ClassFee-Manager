@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getErrorMessage } from '@/api/request'
 import {
+  downloadAdviserTemplate,
   fetchCollegeAdvisers,
   fetchCollegeTeacherCandidates,
+  importCollegeAdvisers,
   setCollegeClassTeachers,
 } from '@/api/college'
 import type { CollegeAdviserList, CollegeAdviserRow } from '@/types'
@@ -122,6 +125,51 @@ async function saveArrange() {
   }
 }
 
+/* ==================== 导入班主任（方案 A） ==================== */
+const importing = ref(false)
+const templateLoading = ref(false)
+const fileInput = ref<HTMLInputElement>()
+
+function pickFile() {
+  fileInput.value?.click()
+}
+
+async function onFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  importing.value = true
+  try {
+    const r = await importCollegeAdvisers(f)
+    ElMessage.success(
+      `导入完成：新增 ${r.created} 人，更新 ${r.updated} 人` +
+        (r.skipped ? `，跳过 ${r.skipped} 行` : ''),
+    )
+    if (r.errors?.length) {
+      await ElMessageBox.alert(r.errors.join('\n'), '部分行未导入', {
+        confirmButtonText: '知道了',
+      })
+    }
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '导入失败'))
+  } finally {
+    importing.value = false
+  }
+}
+
+async function onDownloadTemplate() {
+  templateLoading.value = true
+  try {
+    await downloadAdviserTemplate()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '下载模板失败'))
+  } finally {
+    templateLoading.value = false
+  }
+}
+
 /** 班级去重（一班一行）——名册是「一个班有几个班主任就几行」 */
 const uniqueClasses = computed(() => {
   const seen = new Set<number>()
@@ -151,7 +199,18 @@ onMounted(load)
           班主任本人也能在「个人信息」里改「我带的班」。账号的增删改请到「班级 → 成员管理」。
         </p>
       </div>
-      <el-button type="primary" @click="openArrange">改班主任安排</el-button>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap">
+        <el-button :loading="templateLoading" @click="onDownloadTemplate">下载模板</el-button>
+        <el-button :loading="importing" @click="pickFile">导入班主任</el-button>
+        <el-button type="primary" @click="openArrange">改班主任安排</el-button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".xlsx,.xls"
+          style="display: none"
+          @change="onFileChange"
+        />
+      </div>
     </div>
 
     <section class="glass-card" aria-label="班主任名册" :aria-busy="loading">

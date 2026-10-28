@@ -6,6 +6,7 @@ import dayjs from 'dayjs'
 import { closeBatch, createBatch, deleteBatch, fetchBatchDetail, fetchBatches } from '@/api/batches'
 import { getErrorMessage } from '@/api/request'
 import { useModal } from '@/composables/useModal'
+import { disablePastDates } from '@/utils/date'
 import { useUserStore } from '@/stores/user'
 import BatchPayDialog from '@/components/BatchPayDialog.vue'
 import type { Batch, BatchDetail, Channel, PaymentRow, PayStatus, Role } from '@/types'
@@ -157,17 +158,20 @@ function openCreate() {
 async function onCreate() {
   if (!formRef.value || creating.value) return
 
-  const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) {
-    alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
-    await nextTick()
-    alertRef.value?.focus()
-    return
-  }
-
+  // ⚠ **先上锁，再校验**（同个人信息页那个坑）：
+  // 先 `await validate()` 再置 `creating`，中间那个 await 就是窗口——
+  // 手快点两下「创建」会建出**两个批次**（还各生成一批缴费记录）。
   creating.value = true
   alertMessage.value = ''
   try {
+    const valid = await formRef.value.validate().catch(() => false)
+    if (!valid) {
+      alertMessage.value = '表单有未填写或格式不正确的项，请按下方提示修改'
+      await nextTick()
+      alertRef.value?.focus()
+      return
+    }
+
     const created = await createBatch({
       name: form.name.trim(),
       amount: form.amount!,
@@ -558,6 +562,7 @@ onMounted(() => load())
               type="date"
               placeholder="选择截止日"
               value-format="YYYY-MM-DD"
+              :disabled-date="disablePastDates"
             />
           </el-form-item>
         </div>

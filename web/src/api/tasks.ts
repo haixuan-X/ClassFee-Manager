@@ -5,9 +5,11 @@ import type {
   TaskCreatePayload,
   TaskDetail,
   TaskListPayload,
+  TaskOverviewPayload,
   TaskPinnedPayload,
   TaskQType,
   TaskUpdatePayload,
+  TaskView,
 } from '@/types'
 
 /**
@@ -26,9 +28,24 @@ import type {
  * 后端已经把非发布人看不到的东西裁掉了，前端再滤一遍只会让人以为"只是没渲染"。
  */
 
-/** 任务列表（含发布权限标记）。每条自带我的答案和汇总。 */
-export function fetchTasks() {
-  return request<TaskListPayload>({ url: '/tasks', method: 'get' })
+/**
+ * 任务列表（含发布权限标记）。每条自带我的答案和汇总。
+ *
+ * iew 决定看哪一块（第三十二轮）：
+ * - mine（默认）：**本班**的任务 + **学院**的任务
+ * - college：只看学院任务
+ * - other：**其他班**班主任发出来的（只读）
+ */
+export function fetchTasks(view: TaskView = 'mine') {
+  return request<TaskListPayload>({ url: '/tasks', method: 'get', params: { view } })
+}
+
+/**
+ * 任务总览（第三十二轮）：统计「现在什么状况」——
+ * 多少条、还开着几条、回收率、按班/按发布人的分布、最近任务。
+ */
+export function fetchTaskOverview() {
+  return request<TaskOverviewPayload>({ url: '/tasks/overview', method: 'get' })
 }
 
 /**
@@ -124,6 +141,25 @@ export async function exportTaskDetail(id: number): Promise<void> {
   const disposition = String(res.headers?.['content-disposition'] ?? '')
   const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
   const filename = matched ? decodeURIComponent(matched[1]) : '任务回答.xlsx'
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+/** 导出**任务总览**（所有任务一览 + 回收情况），仅院长。 */
+export async function exportTaskOverview(): Promise<void> {
+  const res = await service.get<Blob>('/tasks/overview/export', { responseType: 'blob' })
+  const blob = new Blob([res.data], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  const disposition = String(res.headers?.['content-disposition'] ?? '')
+  const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  const filename = matched ? decodeURIComponent(matched[1]) : '任务总览.xlsx'
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url

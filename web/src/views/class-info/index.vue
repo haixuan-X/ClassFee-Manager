@@ -92,15 +92,15 @@ function openEditor() {
 
 async function submitEditor() {
   if (!editorFormRef.value || editorLoading.value) return
-  try {
-    await editorFormRef.value.validate()
-  } catch {
-    await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
-    return
-  }
+  // 先上锁，再校验（同个人信息页那个坑）
   editorLoading.value = true
   alertMessage.value = ''
   try {
+    const valid = await editorFormRef.value.validate().then(() => true).catch(() => false)
+    if (!valid) {
+      await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
+      return
+    }
     const updated = await updateClassInfo({
       className: editorForm.className.trim(),
       grade: editorForm.grade.trim(),

@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { fetchMe, fetchMyProfile, updateProfile } from '@/api/auth'
 import { fetchClassChoices } from '@/api/class'
+import { createCollegeClass } from '@/api/college'
 import { getErrorMessage } from '@/api/request'
 import { useUserStore } from '@/stores/user'
 import { ROLE_TEXT, STAFF_ROLES } from '@/types'
@@ -35,20 +36,60 @@ const form = reactive({
   studentNo: '',
   phone: '',
   deanOnly: false,
-  /** 第三十二轮：我带的班（班主任是班的多对多属性） */
-  classIds: [] as number[],
+  /**
+   * 第三十二轮：我带的班（班主任是班的多对多属性）。
+   *
+   * 里面可能临时混进**字符串**：下拉开了 `allow-create`，输入一个库里没有的
+   * 班名回车，Element Plus 塞进来的是那个**班名**而不是 id。
+   * `onClassIdsChange` 会把它拿去建班、换成真 id——保存前一定全是数字。
+   */
+  classIds: [] as (number | string)[],
 })
 
 /** 是不是院长——「职务范围」这一栏只对院长出现（别的角色没这一说） */
 const isDean = computed(() => userStore.user?.role === 'DEAN')
 
 /**
+ * 有没有「学号」这一项。
+ *
+ * 学号是**学生**的标识（缴费名单、批次排序要用）；院长 / 班主任 / 访客
+ * 是教职工或校方，本来就没有学号，给他们摆一个输入框只会让人以为要填。
+ */
+const showStudentNo = computed(() => {
+  const r = userStore.user?.role
+  return r === 'MEMBER' || r === 'ADMIN' || r === 'MONITOR'
+})
+
+/**
+ * 是不是**纯院长**（第三十轮）：只管学院，不参与班级事务。
+ *
+ * 他一个班都不带，所以「我带的班」这一项对他不存在；
+ * 「所在班级」那一行也该换成「职务范围」，写着一个他根本不去的班是骗人。
+ */
+const isPureDean = computed(
+  () => userStore.user?.role === 'DEAN' && userStore.user.deanOnly === true,
+)
+
+/**
  * 能不能改「我带的班」——**只有运营角色**（生活委员/班长/班主任/院长）。
  *
  * 班主任是**班**的归属，普通同学跟这个没关系（他不是班主任），
  * 给普通同学一个「我带的班」的开关只会让人以为自己多了什么。
+ *
+ * ⚠ **纯院长没有这一项**（第三十轮）：他是「只管学院、不参与班级事务」的那一种，
+ * 一个班都不带，摆一个「我带的班」给他就是**假的**——勾了也不生效
+ * （纯院长的白名单里根本没有班级接口）。他在上面的「职务范围」里切回
+ * 「院长 + 班主任」，这一项就回来了。
  */
-const canManageClasses = computed(() => STAFF_ROLES.includes(userStore.user?.role ?? 'MEMBER'))
+const canManageClasses = computed(() => {
+  const u = userStore.user
+  if (!u) return false
+  if (!STAFF_ROLES.includes(u.role)) return false
+  // 用**表单当前值**判断：切一下上面的「职务范围」，这一项立刻出现/消失，
+  // 不用先保存再刷新（保存了才变会让人以为「怎么没反应」）。
+  if (u.role === 'DEAN' && form.deanOnly) return false
+  return true
+})
 
 /**
  * 「所在班级」= **当前正在操作的那个班**（第三十二轮）。
@@ -66,8 +107,83 @@ const currentClassName = computed(() => {
 
 /** 所有启用的班（供「我带的班」多选） */
 const allClasses = ref<{ id: number; className: string; grade: string }[]>([])
+
+/**
+ * 可选项 = 拉到的班 + **当前选着但没在列表里的班**。
+ *
+ * 少这层兜底时，只要 `/class/choices` 那一次没拉到（纯院长以前会被拦 403），
+ * `el-select` 找不到对应选项就**直接显示裸 id**——「我带的班」里冒出
+ * 「1 / 471 / 472」这种数字，看起来像坏了。宁可显示「班级 #471」，
+ * 也不能让人对着三个数字猜。
+ */
+const classOptions = computed(() => {
+  const known = new Set(allClasses.value.map((c) => c.id))
+  const missing = form.classIds
+    .filter((id): id is number => typeof id === 'number' && !known.has(id))
+    .map((id) => ({ id, className: `班级 #${id}`, grade: '' }))
+  return [...allClasses.value, ...missing]
+})
 /** 我的默认班（永远包含在「我带的班」里） */
 const defaultClassName = computed(() => userStore.user?.className ?? '—')
+
+/**
+ * 能不能在下拉里**输入班名回车新建班**。
+ *
+ * 建班是学院层的事（后端 `POST /api/college/classes` 也只给院长），
+ * 所以只有院长看到这个能力。老师只能从已有班里选——他要带的新班
+ * 由院长在「班主任名册」里分配，那是本来就在走的路。
+ */
+const canCreateClass = computed(() => userStore.user?.role === 'DEAN')
+
+/**
+ * 把下拉里**还是班名的项**换成真 id：建班 → 记进选项 → 用它换掉那条字符串。
+ *
+ * `allow-create` 会把**字符串**塞进 `v-model`（其余项都是班级 id）。不换的话
+ * 保存时后端只认整数，整条 400，所以变更的瞬间就要换掉。
+ *
+ * 失败**向上抛**：调用方决定怎么提示。半路吞掉错误会让「班没建出来」和
+ * 「班建出来了但没勾上」看起来一模一样。
+ */
+async function resolveNewClassNames(): Promise<void> {
+  const names = form.classIds.filter(
+    (v): v is string => typeof v === 'string' && v.trim() !== '',
+  )
+  if (!names.length) return
+  const ids = form.classIds.filter((v): v is number => typeof v === 'number')
+  for (const raw of names) {
+    const name = raw.trim()
+    const c = await createCollegeClass(name)
+    if (!allClasses.value.some((x) => x.id === c.id)) {
+      allClasses.value = [
+        ...allClasses.value,
+        { id: c.id, className: c.className, grade: c.grade },
+      ]
+    }
+    if (!ids.includes(c.id)) ids.push(c.id)
+    ElMessage.success(
+      c.created
+        ? `已新建班级「${c.className}」，字段模板照着你的默认班复制了 ${c.fieldsCopied} 列`
+        : `「${c.className}」已经有了，已加入`,
+    )
+  }
+  form.classIds = ids
+}
+
+/**
+ * 下拉变更：输入一个新班名回车 → 建班并选中。
+ *
+ * 新班是**空班**，字段模板由后端从我的默认班复制一份，
+ * 建完直接能导入名单、能进「学生信息」。
+ */
+async function onClassIdsChange() {
+  try {
+    await resolveNewClassNames()
+  } catch (e) {
+    // 建班失败：把那几个字符串摘掉，别让它们卡在下拉里显示成「已选中」
+    ElMessage.error(getErrorMessage(e, '新建班级失败，请稍后重试'))
+    form.classIds = form.classIds.filter((v) => typeof v === 'number')
+  }
+}
 
 const rules: FormRules<typeof form> = {
   realName: [
@@ -100,10 +216,15 @@ async function load() {
     // 第三十二轮：我带的班
     form.classIds = [...(mine.managedClassIds ?? [mine.classId])]
     // 可选的班（运营角色以上才有；普通同学这栏是空的）
-    try {
-      allClasses.value = (await fetchClassChoices()).classes ?? []
-    } catch {
-      allClasses.value = []
+    //
+    // 只有运营角色才去拉：同学用不上这份名单，凭空发一个请求只是多一次
+    // 可能失败的机会（失败会被全局拦截器弹成红条）。
+    if (STAFF_ROLES.includes(mine.role)) {
+      try {
+        allClasses.value = (await fetchClassChoices()).classes ?? []
+      } catch {
+        allClasses.value = []
+      }
     }
     // 顶栏的角色/班级也一并刷新（可能刚被运营改过）
     userStore.setUser(await fetchMe())
@@ -133,23 +254,38 @@ function fillFromStore() {
 
 async function onSubmit() {
   if (!formRef.value || saving.value) return
-  const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) {
-    await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
-    return
-  }
+  // ⚠ **先上锁，再校验**。
+  //
+  // 原来先 `await validate()`、校验过了才置 `saving`，中间那个 await 就是
+  // 一个**窗口**：手快点两下「保存修改」，两次提交都从窗口里穿过去——
+  // 一次改完弹两个「个人信息已更新」，后端那边还可能撞出「系统繁忙」。
   saving.value = true
   alertMessage.value = ''
   try {
+    const valid = await formRef.value.validate().catch(() => false)
+    if (!valid) {
+      await showAlert('表单有未填写或格式不正确的项，请按下方提示修改')
+      return
+    }
+    // 建班的请求可能**还在路上**（刚敲完班名就点保存）：这时 v-model 里那一条
+    // 还是班名，不能直接拿去保存。等它换成 id 再走——否则界面上勾着新班，
+    // 库里其实没存上（下一次登录就没了）。
+    if (canManageClasses.value) await resolveNewClassNames()
     const updated = await updateProfile({
       realName: form.realName.trim(),
       // 沿用「空串=清空」语义（后端 None=不改）
-      studentNo: form.studentNo.trim(),
+      // 院长 / 班主任 / 访客没有学号：干脆不传，避免写一个空值
+      studentNo: showStudentNo.value ? form.studentNo.trim() : undefined,
       phone: form.phone.trim(),
       // 第三十二轮：职务范围。只给院长传（别的角色传了后端会忽略）
       deanOnly: isDean.value ? form.deanOnly : undefined,
       // 第三十二轮：我带的班（**直接生效**）
-      classIds: canManageClasses.value ? form.classIds : undefined,
+      //
+      // 只传数字：上面的 `resolveNewClassNames` 已经把班名换成 id 了，
+      // 这里再滤一次是兜底——后端只认整数，混进一个字符串会整条 400。
+      classIds: canManageClasses.value
+        ? form.classIds.filter((v): v is number => typeof v === 'number')
+        : undefined,
     })
     userStore.setUser(updated)
     if (detail.value) {
@@ -224,7 +360,7 @@ onMounted(load)
               show-word-limit
             />
           </el-form-item>
-          <el-form-item label="学号" prop="studentNo">
+          <el-form-item v-if="showStudentNo" label="学号" prop="studentNo">
             <el-input
               v-model="form.studentNo"
               placeholder="选填，用于缴费名单与批次排序"
@@ -264,17 +400,28 @@ onMounted(load)
             我带的班（第三十二轮）：班主任是**班**的归属，一个老师可以带好几个班。
             改了立刻生效——登录后左侧就能切到这些班，各班的账目、成员、
             任务、学生信息**分开**，互不串。
+
+            院长还能**就地建班**：输入一个库里没有的班名回车，直接建出来并勾上
+            （第三十三轮，用户要的）。老师不行——建班是学院层的事，
+            他要带的新班由院长在「班主任名册」里分配。
           -->
           <el-form-item v-if="canManageClasses" label="我带的班">
             <el-select
               v-model="form.classIds"
               multiple
               filterable
-              placeholder="选你带的班（不选就只带默认班）"
+              :allow-create="canCreateClass"
+              default-first-option
+              :placeholder="
+                canCreateClass
+                  ? '选你带的班；输入新班名回车可直接新建'
+                  : '选你带的班（不选就只带默认班）'
+              "
               style="width: 100%"
+              @change="onClassIdsChange"
             >
               <el-option
-                v-for="c in allClasses"
+                v-for="c in classOptions"
                 :key="c.id"
                 :label="c.className"
                 :value="c.id"
@@ -284,6 +431,10 @@ onMounted(load)
               带上的班，登录后能在<strong>左侧切换</strong>；各班的账目、成员、任务、
               学生信息分开，互不串。<strong>改完立刻生效</strong>，不用重新登录。
               你的默认班（{{ defaultClassName }}）始终包含在内。
+              <template v-if="canCreateClass">
+                输入一个还没建过的班名<strong>回车即新建</strong>，新班的字段模板
+                照着你的默认班复制。
+              </template>
             </div>
           </el-form-item>
 
@@ -314,7 +465,11 @@ onMounted(load)
               <el-tag size="small" effect="light">{{ roleText ? ROLE_TEXT[roleText] : '—' }}</el-tag>
             </dd>
           </div>
-          <div class="row">
+          <div v-if="isPureDean" class="row">
+            <dt>职务范围</dt>
+            <dd>只管学院（不参与班级事务）</dd>
+          </div>
+          <div v-else class="row">
             <dt>所在班级</dt>
             <dd>{{ currentClassName }}</dd>
           </div>

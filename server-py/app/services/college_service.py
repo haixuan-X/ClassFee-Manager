@@ -17,13 +17,18 @@
 - **成员管理**：各班**班主任（导员）名册**。一班一行，不是全院账号列表。
 - **任务**：跨班级的任务一览，答题分母**按任务自己的班级**算。
 
-## 全部只读
+## 学院层也能写，但**只写名册**
 
-学院这一层是**看**的：名册、目录、一览。改人改任务仍然在班级层做——
-不然同一份数据会有两个可写入口，必然出现「两边不一致」。
+最初这里只有读接口。后来加了「就地改一格」「转班」「删行」——它们改的都是
+**学生名册**（`student_record` / `student_record_value`），归属就是学院这一层：
+院长管全校名单，名册写不进去，他连新生报到都对不齐。
+
+账目、缴费、批次、班级任务**仍然只在班级层写**——那是有两个可写入口就会
+必然不一致的部分，学院视图对它们一律只读。
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal
 
@@ -45,7 +50,11 @@ from ..models import (
 from ..security import DEAN_ROLE, LoginUser
 from ..serializers import fmt_dt
 from . import student_service as svc
-from .task_service import is_answer_target, is_open
+from .task_service import (
+    is_answer_target,
+    is_college_answer_target,
+    is_open,
+)
 
 #: 班主任角色。这个名册只列他们（以及兼班主任的院长）。
 TEACHER_ROLE = "TEACHER"
@@ -232,6 +241,11 @@ def students(
     # 所以年级筛选放到**行级**做（见下面 `base` 的附加条件）。
     target = [c for c in classes if class_id is None or c.id == class_id]
     class_ids = [c.id for c in target]
+    # 未分班（class_id=0）的学生也算「学院名册」的一员：
+    # 不选具体班级时把它们一起列出来，否则「导进来默认没有班」的学生
+    # 在界面上完全看不见。选定某个班时才只看那个班。
+    if class_id is None:
+        class_ids = list(dict.fromkeys([*class_ids, 0]))
 
     page = max(1, int(page or 1))
     size = max(1, min(int(size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
@@ -690,6 +704,45 @@ def transfer_student(
         return _move_student_to_class(db, user, rec, target)
 
 
+def delete_students(db: Session, user: LoginUser, record_ids: list[int]) -> dict:
+    """从**名册**里删行（可批量，跨班级）。
+
+    ## 删的是什么
+
+    `student_record` 那一行 + 他所有的 `student_record_value`（填过的每一格）。
+    这是**真删**，没有回收站：界面上必须先确认（前端用 `ElMessageBox.confirm`）。
+
+    ## 不删什么
+
+    **登录账号不动**。账号不是名册的附属品——它挂在 `sys_user` 上，
+    有自己的角色/权限/缴费记录，归「成员管理」管。人离校了却还有账号，
+    那是账号该被停用，不是「删了学生记录就顺手把人家的缴费凭证删掉」。
+    所以界面上要把这句话说出来，不能让人以为删了行账号也跟着没了。
+
+    ## 只删 id 命中的那些
+
+    不按班级二次过滤：院长看的就是**全校**名册，筛选条件在界面上。
+    已经不在库里的 id（别的窗口刚删过）**跳过**，不报错——批量删一半失败
+    再让用户去猜「哪几个删掉了」比全删成功更糟。
+    返回真正删掉的数量，界面据此给提示。
+    """
+    ids = sorted({int(i) for i in record_ids})
+    if not ids:
+        raise BizException.bad_request("没有选中任何学生")
+    with db.begin():
+        # 读也放在事务里：先 SELECT 再 begin 会撞「a transaction is already begun」
+        existing = [int(i) for i in db.scalars(
+            select(StudentRecord.id).where(StudentRecord.id.in_(ids))
+        )]
+        if not existing:
+            raise BizException.bad_request("这些学生记录已经不存在了")
+        db.execute(
+            delete(StudentRecordValue).where(StudentRecordValue.record_id.in_(existing))
+        )
+        db.execute(delete(StudentRecord).where(StudentRecord.id.in_(existing)))
+    return {"deleted": len(existing), "ids": existing}
+
+
 def _move_student_to_class(
     db: Session, user: LoginUser, rec: StudentRecord, target: ClsClass
 ) -> dict:
@@ -808,6 +861,83 @@ def _move_student_to_class(
 
 
 # ==================== 列管理（学院只有一份表） ====================
+
+
+def create_class(
+    db: Session, user: LoginUser, class_name: str, grade: str = ""
+) -> dict:
+    """新建一个班（院长在「个人信息 → 我带的班」里输入一个不存在的班名时用）。
+
+    ## 只建班，不建人
+
+    新班是**空班**：没有学生、没有账目、没有班主任。建它的人随后会把自己
+    加进「我带的班」（那是 `update_profile` 的事），这里只负责把班立起来。
+
+    ## 字段模板跟着建班人的默认班走
+
+    新班一个字段都没有的话，「学生信息」里就只剩学号和姓名两列——
+    那不叫新建班级，那叫建了个壳。所以把他默认班的字段定义**复制一份**
+    （`field_key` / 名称 / 类型 / 顺序 / 是否系统列），停用的列不复制：
+    停用本来就是「这张表不要这一列」的意思。同一个学院的班用的是同一套模板，
+    这比让人手工补三十多列靠谱。
+
+    ## 重名
+
+    同名班**直接返回已有的那个**（`created=False`），不报错：两处界面同时
+    点「新建」不该让后手的人吃一条红条。停用的班也算重名——名字还占着。
+    """
+    name = (class_name or "").strip()
+    if not name:
+        raise BizException.bad_request("班级名不能为空")
+    if len(name) > 64:
+        raise BizException.bad_request("班级名不能超过 64 个字符")
+    with db.begin():
+        exists = db.execute(
+            select(ClsClass).where(ClsClass.class_name == name)
+        ).scalar_one_or_none()
+        if exists is not None:
+            return {
+                "id": exists.id,
+                "className": exists.class_name,
+                "grade": exists.grade or "",
+                "created": False,
+                "fieldsCopied": 0,
+            }
+        clazz = ClsClass(
+            class_name=name,
+            grade=(grade or "").strip()[:32],
+            head_teacher=None,
+            balance=Decimal("0.00"),
+            status=1,
+        )
+        db.add(clazz)
+        db.flush()
+        src = db.scalars(
+            select(StudentField)
+            .where(StudentField.class_id == user.class_id, StudentField.status == 1)
+            .order_by(StudentField.sort.asc(), StudentField.id.asc())
+        ).all()
+        for f in src:
+            db.add(
+                StudentField(
+                    class_id=clazz.id,
+                    field_key=f.field_key,
+                    field_label=f.field_label,
+                    field_type=f.field_type,
+                    is_system=f.is_system,
+                    sort=f.sort,
+                    status=1,
+                    created_by=user.id,
+                )
+            )
+        db.flush()
+    return {
+        "id": clazz.id,
+        "className": clazz.class_name,
+        "grade": clazz.grade or "",
+        "created": True,
+        "fieldsCopied": len(src),
+    }
 
 
 def _next_field_key(db: Session, class_ids: list[int]) -> str:
@@ -1084,6 +1214,45 @@ def restore_college_field(db: Session, user: LoginUser, field_key: str) -> dict:
         }
 
 
+def purge_college_field(db: Session, user: LoginUser, field_key: str) -> dict:
+    """彻底删除**已停用**的列（所有班一起删）：字段定义连同值一起删，不可恢复。
+
+    和班级版同一个两步保护：只放行 `status=0` 的行。只要有任何一个班
+    这列还开着就拒绝——学院的停用/恢复都是**全班一起**的，出现半开半停
+    说明状态不一致，此时应先恢复成一致再操作，而不是删掉一半数据。
+    """
+    if user.role not in svc.FIELD_ADD_ROLES:
+        raise BizException.forbidden("只有班主任或班长可以删除字段")
+    with db.begin():
+        rows = list(
+            db.scalars(
+                select(StudentField).where(
+                    StudentField.class_id.in_([c.id for c in _active_classes(db)]),
+                    StudentField.field_key == field_key,
+                )
+            )
+        )
+        if not rows:
+            raise BizException.bad_request("字段不存在")
+        if any(f.status != 0 for f in rows):
+            raise BizException.bad_request("该列仍有班级在启用，请先停用后再彻底删除")
+        removed = 0
+        for f in rows:
+            r = db.execute(
+                delete(StudentRecordValue).where(StudentRecordValue.field_id == f.id)
+            ).rowcount
+            removed += int(r or 0)
+        label = rows[0].field_label
+        for f in rows:
+            db.delete(f)
+        return {
+            "key": field_key,
+            "label": label,
+            "classCount": len(rows),
+            "deletedValues": removed,
+        }
+
+
 def _fields_by_key(db: Session, field_key: str) -> list[StudentField]:
     """所有班里**这个 key** 的字段定义。
 
@@ -1248,10 +1417,28 @@ def advisers(db: Session, user: LoginUser) -> dict:
         .where(
             SysUserClass.class_id.in_([c.id for c in classes]) if classes else False,
             SysUser.status == 1,
+            # **纯院长不算班主任**（docstring 里那条规则）：
+            # 他「只管学院、不参与班级事务」，一个班都不带。
+            # ⚠ 关联表里的行是**改职务范围之前**留下的（切回「院长 + 班主任」
+            # 还要用），所以这里必须按账号**当前的身份**过滤，不能只看关联表。
+            SysUser.role == "TEACHER",
         )
         .order_by(SysUserClass.class_id.asc(), SysUser.id.asc())
     ).all()
-    for cid, t in links:
+    # 兼班主任的院长（role=DEAN 且 dean_only=0）也是班主任——单靠 role=TEACHER
+    # 筛的话他会从名册上消失，而名册恰恰是「这个班的班主任是谁」的地方。
+    deans = db.execute(
+        select(SysUserClass.class_id, SysUser)
+        .join(SysUser, SysUser.id == SysUserClass.user_id)
+        .where(
+            SysUserClass.class_id.in_([c.id for c in classes]) if classes else False,
+            SysUser.status == 1,
+            SysUser.role == "DEAN",
+            SysUser.dean_only == 0,
+        )
+        .order_by(SysUserClass.class_id.asc(), SysUser.id.asc())
+    ).all()
+    for cid, t in list(links) + list(deans):
         by_class.setdefault(int(cid), []).append(t)
 
     rows = []
@@ -1320,9 +1507,20 @@ def set_class_teachers(
                     )
                 )
             ]
-        # 重写这个班的班主任安排
+        # 重写这个班的班主任安排。
+        #
+        # ⚠ **院长那一行走不得**（第三十三轮）：`sys_user_class` 现在一身二职——
+        # 既是「这个班的班主任」（这里安排的），也是院长自己的「我带的班」
+        # （他在个人信息里勾的）。照旧整班删光的话，院长只要在
+        # 「班主任名册」里给这个班换一次人，自己就被顺手摘掉了。
+        # 所以只删非院长的行：院长带哪个班，只由院长自己说了算。
         db.execute(
-            delete(SysUserClass).where(SysUserClass.class_id == class_id)
+            delete(SysUserClass).where(
+                SysUserClass.class_id == class_id,
+                ~SysUserClass.user_id.in_(
+                    select(SysUser.id).where(SysUser.role == DEAN_ROLE)
+                ),
+            )
         )
         for uid in alive:
             db.add(SysUserClass(user_id=uid, class_id=class_id))
@@ -1393,14 +1591,28 @@ def tasks(
     keyword: str | None = None,
     class_id: int | None = None,
     only_pinned: bool = False,
+    scope: str = "ALL",
 ) -> dict:
     """跨班级的任务一览。
 
-    ## 答题分母**按任务自己的班级**算
+    ## `scope` 把两类任务分开（第三十二轮）
 
-    一个任务只对**它所在那个班**的同学有效。所以「已填 3 / 共 30 人」
+    | scope | 看什么 | 谁发的 |
+    |-------|--------|--------|
+    | `COLLEGE` | **学院任务** | 院长发到全学院的，各班班主任应答 |
+    | `CLASS` | **班级任务** | 各班班主任/班长发给自己班的 |
+    | `ALL`（默认） | 两类都看 | —— |
+
+    侧栏「学院 > 任务」下面挂着两个入口（学院任务 / 班级任务），
+    它们看的是**同一批任务的两类**，所以筛的是同一个列表。
+
+    ## 答题分母**按任务自己的类别**算
+
+    一个班级任务只对**它所在那个班**的同学有效。所以「已填 3 / 共 30 人」
     里的 30 是那个班的应答人数，不是全院人数。跨班混算会得出
     「已填 3 / 共 60 人」这种没人看得懂的数。
+
+    学院任务的分母是**全校的班主任**（一人代表一个班）。
 
     分母的算法与班级任务页**完全一致**（`task_service.is_answer_target`），
     两处各算一次必然漂。
@@ -1409,10 +1621,22 @@ def tasks(
     target = [c for c in classes if class_id is None or c.id == class_id]
     class_ids = [c.id for c in target]
 
-    if not class_ids:
+    # 学院任务不属于任何班（class_id 只是发布人的默认班），
+    # 所以筛「学院任务」时**不能**拿 class_id 去限制它。
+    want_college = scope == "COLLEGE"
+    want_class = scope == "CLASS"
+    if want_college:
+        class_ids = []
+    if not class_ids and not want_college:
         return {"rows": [], "total": 0, "classes": _class_choices(db, classes)}
 
-    stmt = select(ClsTask).where(ClsTask.class_id.in_(class_ids))
+    stmt = select(ClsTask)
+    if want_college:
+        stmt = stmt.where(ClsTask.scope == "COLLEGE")
+    elif want_class:
+        stmt = stmt.where(ClsTask.scope == "CLASS", ClsTask.class_id.in_(class_ids))
+    else:
+        stmt = stmt.where(ClsTask.class_id.in_(class_ids))
     kw = (keyword or "").strip()
     if kw:
         pat = like_pattern(kw)
@@ -1429,11 +1653,10 @@ def tasks(
     # 应答对象：各班的启用账号。分母逐条按任务的发布人筛（发布人自己不答）。
     active_by_class: dict[int, list[SysUser]] = {}
     if task_list:
-        for u in db.scalars(
-            select(SysUser).where(
-                SysUser.class_id.in_(class_ids), SysUser.status == 1
-            )
-        ):
+        user_stmt = select(SysUser).where(SysUser.status == 1)
+        if class_ids:
+            user_stmt = user_stmt.where(SysUser.class_id.in_(class_ids))
+        for u in db.scalars(user_stmt):
             active_by_class.setdefault(u.class_id, []).append(u)
 
     answers_by_task: dict[int, int] = {}
@@ -1446,18 +1669,38 @@ def tasks(
             answers_by_task[int(tid)] = int(cnt)
 
     class_by_id = {c.id: c for c in classes}
+    # 发布人（学院任务看不出是谁发的，这行必须有名字）
+    publisher_names: dict[int, str] = {}
+    if task_list:
+        for uid, rname, uname in db.execute(
+            select(SysUser.id, SysUser.real_name, SysUser.username).where(
+                SysUser.id.in_([t.created_by for t in task_list])
+            )
+        ):
+            publisher_names[int(uid)] = (rname or uname or "")
     rows = []
     for t in task_list:
         cls = class_by_id.get(t.class_id)
-        base = sum(
-            1
-            for u in active_by_class.get(t.class_id, [])
-            if is_answer_target(u, t.created_by)
-        )
+        if (t.scope or "CLASS") == "COLLEGE":
+            # 学院任务：应答对象是**全校的班主任**（一人代表一个班）
+            base = sum(
+                1
+                for lst in active_by_class.values()
+                for u in lst
+                if is_college_answer_target(u)
+            )
+        else:
+            base = sum(
+                1
+                for u in active_by_class.get(t.class_id, [])
+                if is_answer_target(u, t.created_by, t.scope)
+            )
         answered = answers_by_task.get(t.id, 0)
         rows.append(
             {
                 "id": t.id,
+                "scope": t.scope or "CLASS",
+                "publisher": publisher_names.get(t.created_by, ""),
                 "classId": t.class_id,
                 "className": cls.class_name if cls else "",
                 "grade": (cls.grade if cls else "") or "",
@@ -1470,6 +1713,17 @@ def tasks(
                 "answered": answered,
                 "total": base,
                 "unanswered": max(0, base - answered),
+                # 第三十三轮：学院任务页要能编辑 / 删除 / 导出自己发的任务。
+                # 前端按 canEdit / canSeeDetail 决定显示哪些按钮，这里必须给出来
+                # （之前没给，操作列只剩一个「—」）。
+                "createdBy": t.created_by,
+                "canEdit": t.created_by == user.id or user.role == DEAN_ROLE,
+                "canSeeDetail": t.created_by == user.id or user.role == DEAN_ROLE,
+                "canManage": t.created_by == user.id or user.role == DEAN_ROLE,
+                # 编辑对话框回填要用题型 / 候选项（题型本身不给改）。
+                "qtype": t.qtype,
+                "options": json.loads(t.options_json) if t.options_json else [],
+                "allowText": bool(t.allow_text),
             }
         )
 

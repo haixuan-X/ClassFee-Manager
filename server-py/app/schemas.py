@@ -485,6 +485,9 @@ class TaskCreateRequest(_BodyModel):
     options: list[str] | None = None
     allowText: bool | None = None
     deadline: datetime | None = None
+    # 第三十二轮：CLASS=班级任务（默认）；COLLEGE=学院任务（全学院可见，班主任应答）。
+    # 只有院长能发 COLLEGE（service 层拦）。
+    scope: str | None = None
 
     @field_validator("title")
     @classmethod

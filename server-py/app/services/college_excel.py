@@ -95,6 +95,8 @@ def export_xlsx(
     keyword: str | None = None,
     class_id: int | None = None,
     grade: str | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> tuple[bytes, str]:
     """导出学院学生信息（跨班级）。行和列都可以只导其中一部分。
 
@@ -127,6 +129,12 @@ def export_xlsx(
     if only_ids:
         want = {int(i) for i in only_ids}
         rows = [r for r in rows if r["id"] in want]
+    elif offset > 0 or limit is not None:
+        # 「按行区间导出」：在当前筛选结果里取第 offset 条起的 limit 条。
+        # 与 only_ids 互斥（勾选行时按 id 精确取，不用区间）。
+        start = max(0, offset)
+        end = None if limit is None else start + max(0, limit)
+        rows = rows[start:end]
 
     columns = all_columns
     dropped = 0
@@ -213,7 +221,237 @@ def export_xlsx(
     return buf.getvalue(), f"学院学生信息_{datetime.now():%Y%m%d_%H%M}.xlsx"
 
 
+def template_xlsx(db: Session) -> tuple[bytes, str]:
+    """学院「学生名册」的导入模板：列 = **所有启用班级的字段合并**（+ 班级）。
+
+    ## 为什么是合并后的列，而不是「当前筛选那个班」的列
+
+    学院模板是给**一张表填好几个班**用的（导入按「班级」列分发），所以列必须
+    覆盖所有班。某个班没有这一列时，导入会照「没见过的列自动建字段」给它建上
+    ——这也是学院里加一列时「每个班都该有」的同一条规则。
+
+    ## 「班级」列
+
+    有它就按行分发到各班；整列空着，就全进导入时选的那个班。
+    模板里留着它，是提醒填表的人「这一行是谁」——不填也能导。
+    """
+    classes = _active_classes(db)
+    columns = _unified_columns(db, [c.id for c in classes])
+    headers: list[dict] = [
+        {
+            "label": "班级",
+            "type": svc.FT_TEXT,
+            "format": "@",
+            "example": "云计算2502",
+            "hint": "填班名（要和库里一致）；整列不填就按导入时选的班",
+        },
+        {
+            "label": "学号",
+            "type": svc.FT_TEXT,
+            "format": "@",
+            "required": True,
+            "example": "12344312",
+            "hint": "必填。同一个班里学号唯一；不同班可以有相同学号",
+        },
+        {
+            "label": "姓名",
+            "type": svc.FT_TEXT,
+            "format": "@",
+            "required": True,
+            "example": "张三",
+            "hint": "必填",
+        },
+    ]
+    headers += [
+        {
+            "label": c["label"],
+            "type": c["type"],
+            "format": "yyyy-mm-dd" if c["type"] == svc.FT_DATE else None,
+            "hint": se.FIELD_HINTS.get(c["key"], ""),
+        }
+        for c in columns
+    ]
+    return se.build_template_xlsx(
+        headers,
+        title="学院学生名册 · 导入模板",
+        intro=[
+            "填完直接把这个文件传回「学院学生名册 → 导入 Excel」，表头不用改。",
+            "有「班级」列就按行分发到各班；没有就全进导入时选的那个班。",
+            "各班的字段不完全一样，这份模板是合并后的列：某个班没这列时，"
+            "导入会自动给那个班建上。",
+            "表头可以调顺序，但不要改列名；空着的格子不会覆盖库里已有的值。",
+            "列跟学院当前的字段一致：新增或停用字段后，重新下载一次就是新的列。",
+        ],
+        filename=f"学院学生名册导入模板_{datetime.now():%Y%m%d}.xlsx",
+    )
+
+
 # ==================== 导入 ====================
+
+
+#: 班主任导入模板的列名（导入时也认这些别名）
+_ADVISER_NAME_HEADERS = ("姓名", "班主任", "老师姓名", "教师姓名")
+_ADVISER_USER_HEADERS = ("登录名", "账号", "用户名", "登录账号")
+_ADVISER_PWD_HEADERS = ("初始密码", "密码")
+_ADVISER_PHONE_HEADERS = ("手机号", "电话", "手机")
+_ADVISER_CLASS_HEADERS = ("带的班", "班级", "班级名", "带班", "所带班级")
+_ADVISER_DEFAULT_PWD = "123456"
+
+
+def _col_index(headers: list[str], names: tuple[str, ...]) -> int:
+    for n in names:
+        if n in headers:
+            return headers.index(n)
+    return -1
+
+
+def adviser_template() -> bytes:
+    """班主任导入模板（表头 + 说明，不含示例数据，避免误导入）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "班主任导入"
+    ws.cell(
+        row=1, column=1, value="班主任导入模板 · 填好传回「学院 → 成员管理 → 导入班主任」"
+    ).font = _TITLE_FONT
+    ws.cell(
+        row=2,
+        column=1,
+        value=(
+            "姓名、登录名必填；班级必须已存在，多个用顿号/逗号分隔；"
+            "密码留空默认 123456；登录名已存在的会更新资料。"
+        ),
+    ).font = Font(size=10, color="666666")
+
+    headers = ["姓名", "登录名", "初始密码", "手机号", "带的班"]
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=3, column=i, value=h)
+        c.font = _HEAD_FONT
+        c.fill = _HEAD_FILL
+        c.alignment = Alignment(horizontal="center")
+        ws.column_dimensions[get_column_letter(i)].width = 22
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def import_advisers(db: Session, user: LoginUser, content: bytes) -> dict:
+    """导入班主任账号（方案 A）。
+
+    - 列：姓名、登录名、初始密码（可选）、手机号（可选）、带的班。
+    - 按**登录名** upsert；已存在但不是班主任 → 跳过（不悄悄改别人身份）。
+    - 班级**必须已存在**（不自动建班），找不到就整行跳过并报错。
+    - 导入后把「带的班」写成该账号的管辖范围。
+    """
+    from ..security import hash_password
+    from .user_service import _set_managed_classes
+
+    if not content:
+        raise BizException.bad_request("没有读到文件内容")
+    try:
+        wb = load_workbook(BytesIO(content), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        raise BizException.bad_request(f"无法解析 Excel 文件：{exc}") from exc
+    ws = wb[wb.sheetnames[0]]
+    rows = ws.iter_rows(values_only=True)
+    try:
+        header_row = next(rows)
+    except StopIteration as exc:
+        raise BizException.bad_request("表格是空的，至少要有表头") from exc
+
+    headers = [se._canon_anchor(c) for c in header_row]
+    col_name = _col_index(headers, _ADVISER_NAME_HEADERS)
+    col_user = _col_index(headers, _ADVISER_USER_HEADERS)
+    col_pwd = _col_index(headers, _ADVISER_PWD_HEADERS)
+    col_phone = _col_index(headers, _ADVISER_PHONE_HEADERS)
+    col_class = _col_index(headers, _ADVISER_CLASS_HEADERS)
+    if col_name < 0 or col_user < 0:
+        raise BizException.bad_request("表格里必须有「姓名」和「登录名」列")
+    if col_class < 0:
+        raise BizException.bad_request("表格里必须有「带的班」列")
+
+    body, _samples = se._read_body(rows, headers)
+
+    created = updated = skipped = 0
+    errors: list[str] = []
+    # ⚠ 班级查询必须**在事务块内**：先 SELECT 再 `db.begin()` 会报
+    # 「A transaction is already begun」（SQLAlchemy 执行查询就开了隐式事务）。
+    with db.begin():
+        classes = _active_classes(db)
+        for excel_row_no, cells in body:
+            name = cells[col_name].strip()
+            uname = cells[col_user].strip()
+            if not name or not uname:
+                errors.append(f"第 {excel_row_no} 行：姓名和登录名不能为空")
+                skipped += 1
+                continue
+
+            raw_class = cells[col_class].strip() if col_class < len(cells) else ""
+            class_names = [x for x in re.split(r"[、,，;；/\s]+", raw_class) if x]
+            matched: list[ClsClass] = []
+            missing: list[str] = []
+            for cn in class_names:
+                c = _match_class(classes, cn)
+                if c is None:
+                    missing.append(cn)
+                elif c.id not in [m.id for m in matched]:
+                    matched.append(c)
+            if missing:
+                errors.append(
+                    f"第 {excel_row_no} 行：找不到班级 {'、'.join(missing)}（班级需先在系统里存在）"
+                )
+                skipped += 1
+                continue
+            if not matched:
+                errors.append(f"第 {excel_row_no} 行：没有填写有效的班")
+                skipped += 1
+                continue
+
+            pwd = cells[col_pwd].strip() if 0 <= col_pwd < len(cells) else ""
+            phone = cells[col_phone].strip() if 0 <= col_phone < len(cells) else ""
+
+            existing = db.scalar(select(SysUser).where(SysUser.username == uname))
+            if existing is not None:
+                if existing.role != "TEACHER":
+                    errors.append(
+                        f"第 {excel_row_no} 行：登录名 {uname} 已存在且不是班主任，跳过"
+                    )
+                    skipped += 1
+                    continue
+                existing.real_name = name
+                if phone:
+                    existing.phone = phone
+                if pwd:
+                    existing.password = hash_password(pwd)
+                existing.status = 1
+                uid = existing.id
+                updated += 1
+            else:
+                row = SysUser(
+                    class_id=matched[0].id,
+                    username=uname,
+                    password=hash_password(pwd or _ADVISER_DEFAULT_PWD),
+                    real_name=name,
+                    student_no=None,
+                    phone=phone or None,
+                    role="TEACHER",
+                    guest_scopes=None,
+                    dean_only=0,
+                    status=1,
+                )
+                db.add(row)
+                db.flush()
+                uid = row.id
+                created += 1
+
+            _set_managed_classes(db, uid, matched[0].id, [c.id for c in matched])
+
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "errorCount": len(errors),
+    }
 
 
 def _match_class(
@@ -316,6 +554,7 @@ def import_xlsx(
     user: LoginUser,
     content: bytes,
     default_class_id: int | None = None,
+    unassigned: bool = False,
 ) -> dict:
     """导入学院学生信息。**按文件里的「班级」列分发到各班**。
 
@@ -336,7 +575,7 @@ def import_xlsx(
     if not content:
         raise BizException.bad_request("没有读到文件内容")
     try:
-        wb = load_workbook(BytesIO(content), data_only=True, read_only=True)
+        wb = load_workbook(BytesIO(content), data_only=True)
     except Exception as exc:  # noqa: BLE001
         raise BizException.bad_request(f"无法解析 Excel 文件：{exc}") from exc
     ws = wb[wb.sheetnames[0]]
@@ -346,7 +585,7 @@ def import_xlsx(
     except StopIteration as exc:
         raise BizException.bad_request("表格是空的，至少要有表头和一行数据") from exc
 
-    headers = [se._cell_text(c) for c in header_row]
+    headers = [se._canon_anchor(c) for c in header_row]
     if "学号" not in headers:
         raise BizException.bad_request("表格里必须有「学号」列——它是用来说明这行数据是谁的")
     if "姓名" not in headers:
@@ -383,7 +622,7 @@ def import_xlsx(
         by_id = {c.id: c for c in classes}
 
         default_class: ClsClass | None = None
-        if col_class < 0:
+        if col_class < 0 and not unassigned:
             if default_class_id is None:
                 raise BizException.bad_request(
                     "表格里没有「班级」列，请先选择这些学生要导入到哪个班"
@@ -407,36 +646,36 @@ def import_xlsx(
         # 班 → 这一行里出现的班主任名字（第三十二轮）
         teacher_by_class: dict[int, set[str]] = {}
         for excel_row_no, cells in body:
-            target = default_class
-            if col_class >= 0:
-                raw_class = cells[col_class].strip()
-                if not raw_class:
-                    # ⚠ **空班级名不能建班**——会建出一个名字为空的班
-                    # （名册上多一行空班级、学生进了那个「班」）。
-                    # 这一行直接跳过并报出来。
-                    errors.append(
-                        f"第 {excel_row_no} 行：班级是空的，这行没导入"
-                    )
-                    continue
-                matched = _match_class(classes, raw_class)
-                if matched is None:
-                    # ⚠ 库里没有这个班 → **自动建班**，而不是把行丢掉。
-                    #
-                    # 丢掉的话：用户导一份全校名单进来，发现少了一半人，
-                    # 还得先手工建班再导一遍。而「没见过的列自动建字段」
-                    # 那条设计（第二十四轮）就是这个思路的延伸——**用户导进来的
-                    # 东西不该被静默丢弃**。
-                    matched = _create_class(db, raw_class, _row_grade_of(cells, headers))
-                    classes.append(matched)
-                    by_id[matched.id] = matched
-                    created_classes.append(matched.class_name)
-                target = matched
-            cid = target.id
-            # 第三十二轮：这一行指定的班主任（**元信息**，不进字段表）
-            if col_teacher >= 0:
-                t_name = cells[col_teacher].strip()
-                if t_name:
-                    teacher_by_class.setdefault(cid, set()).add(t_name)
+            if unassigned:
+                # 「导入默认没有班」：一律进未分班（class_id=0），
+                # 既不按「班级」列分发，也不自动建班。
+                cid = 0
+            else:
+                target = default_class
+                if col_class >= 0:
+                    raw_class = cells[col_class].strip()
+                    if not raw_class:
+                        # ⚠ **空班级名不能建班**——会建出一个名字为空的班
+                        # （名册上多一行空班级、学生进了那个「班」）。
+                        # 这一行直接跳过并报出来。
+                        errors.append(
+                            f"第 {excel_row_no} 行：班级是空的，这行没导入"
+                        )
+                        continue
+                    matched = _match_class(classes, raw_class)
+                    if matched is None:
+                        # ⚠ 库里没有这个班 → **自动建班**，而不是把行丢掉。
+                        matched = _create_class(db, raw_class, _row_grade_of(cells, headers))
+                        classes.append(matched)
+                        by_id[matched.id] = matched
+                        created_classes.append(matched.class_name)
+                    target = matched
+                cid = target.id
+                # 第三十二轮：这一行指定的班主任（**元信息**，不进字段表）
+                if col_teacher >= 0:
+                    t_name = cells[col_teacher].strip()
+                    if t_name:
+                        teacher_by_class.setdefault(cid, set()).add(t_name)
             samples = groups.setdefault(cid, ([], {}))[1]
             g_body = groups[cid][0]
             g_body.append((excel_row_no, cells))

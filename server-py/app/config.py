@@ -95,7 +95,9 @@ def settings() -> dict:
         "grade": os.environ.get("CLASSFEE_CLASS_GRADE")
         or os.environ.get("CLASSFEE_INIT_GRADE", "2022级"),
         "head_teacher": os.environ.get("CLASSFEE_CLASS_HEAD_TEACHER")
-        or os.environ.get("CLASSFEE_INIT_HEAD_TEACHER", "测试班主任"),
+        or os.environ.get("CLASSFEE_INIT_HEAD_TEACHER")
+        # 没配就跟着班主任账号的姓名走；都没有就留空（不写「测试班主任」这种假数据）
+        or os.environ.get("CLASSFEE_TEACHER_NAME", "").strip(),
         # 小票图片存储根目录（compose 里挂 named volume 保证重建容器不丢图）
         "upload_dir": os.environ.get(
             "CLASSFEE_UPLOAD_DIR", str(Path(__file__).resolve().parents[1] / "uploads")
