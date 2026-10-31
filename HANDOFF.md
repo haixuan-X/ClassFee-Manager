@@ -1,4 +1,4 @@
-﻿# 交接文档 · HANDOFF
+# 交接文档 · HANDOFF
 
 > **给下一个 AI 会话**：读完这一份就能接着干活，不必从头摸索。
 > 由上一个会话写于 **2026-10-30**，它当时刚完成「学院任务详情仪表盘」与「按状态筛选导出」两件事。
@@ -25,7 +25,7 @@ README 与设计文档写的是**历史数字**，以下以代码为准：
 | 「288 项断言」 | **1121 passed / 0 failed**（`server-py/tests/api_regression.py`） |
 | 「36 个 REST 端点 / 11 个页面」 | 更多，见 §4 |
 | 没有「任务 / 学院」模块 | 已有完整的**任务（点名/统计）**与**学院（院长）**层 |
-| 版本 | **1.2.0** |
+| 版本 | **1.3.0** |
 
 **第 23–49 轮的交付记录没有写进 `docs/系统设计文档.md`**，只存在于代码注释、回归用例名（`test_a24`…`test_a39`）与本文件 §6、§7。
 
@@ -50,7 +50,7 @@ README 与设计文档写的是**历史数字**，以下以代码为准：
 
 ## 2. 当前状态快照（2026-10-30）
 
-- **版本** `1.2.0`。真相源 **`server-py/app/version.py` 里 `VERSION = "1.2.0"` 一行**；`web/package.json` 同步写 1.2.0，回归 `test_a19_version` 专门盯两处漂移。
+- **版本** `1.3.0`。真相源 **`server-py/app/version.py` 里 `VERSION = "1.3.0"` 一行**；`web/package.json` 同步写 1.3.0，回归 `test_a19_version` 专门盯两处漂移。
 - **分支** `main`，最近提交 `93daf83 修复前端代码的 TypeScript 类型校验不通过`。
 - **⚠ 大量改动未提交**（**用户自己 commit，AI 永远不要替他提交**）：
   - 26 个文件已修改，**+1935 / −92**
@@ -131,7 +131,7 @@ npm run build         # vite build
 - 网络：`browser_network_requests({static:false, filter:"regex"})`、`browser_network_request({index, part:"request-body"})`
 - 截图：`browser_take_screenshot({scale:"css", filename})` —— `scale` 是**必填**
 - ⚠ 工具会在仓库根生成 **`.playwright-mcp/`**（快照 + 下载的 xlsx），**提交前删掉**，它是工具缓存不是代码
-- 登录页/侧栏页脚会显示 `v1.2.0`，可当版本探针
+- 登录页/侧栏页脚会显示 `v1.3.0`，可当版本探针
 
 ---
 
@@ -340,8 +340,8 @@ STAFF_ROLES = {"ADMIN", "MONITOR", "TEACHER", "DEAN"}   # 记账/成员管理等
 
 ### 此前几轮（一并同步）
 
-- `server-py/app/version.py`（1.2.0 真相源）
-- `web/package.json` + `web/package-lock.json`（1.2.0 锚点）
+- `server-py/app/version.py`（1.3.0 真相源）
+- `web/package.json` + `web/package-lock.json`（1.3.0 锚点）
 - `server-py/db/schema.sql` — **⚠ 服务器要建 `cls_task_student_answer` 表**
 - `server-py/app/security.py` — 纯院长白名单 / 访客范围
 - `server-py/app/models.py`、`app/services/task_service.py`、`app/routers/users.py`、`app/services/user_service.py`、`app/schemas.py`

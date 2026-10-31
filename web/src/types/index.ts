@@ -431,6 +431,18 @@ export interface CollegeAdviserList {
 }
 
 /**
+ * 批量删除班主任账号的回执（第五十三轮）。
+ *
+ * 批量里「能删的删、删不了的跳过」——所以除了 `deleted`，
+ * 还要把 `skipped` 的原因带回来，界面才能说明「为什么少删了」。
+ */
+export interface CollegeAdviserDeleteResult {
+  deleted: number
+  ids: number[]
+  skipped: { userId: number; reason: string }[]
+}
+
+/**
  * 院长账号（第五十二轮）。
  *
  * 院长**可以有多位**：这里列的是 `role=DEAN` 的全部账号，不按班级过滤。

@@ -73,8 +73,9 @@ const classViews = computed<ClassView[]>(() =>
     .sort((a, b) => b.absent.length - a.absent.length || a.cls.className.localeCompare(b.cls.className)),
 )
 
+/** 班级筛选范围内的全部学生行——图例、卡片、名单都从这一份算，口径只有一处 */
 const allRows = computed<TaskDetailStudentRow[]>(() =>
-  classViews.value.flatMap((v) => v.cls.rows),
+  scopedViews.value.flatMap((v) => v.cls.rows),
 )
 
 const stats = computed(() => {
@@ -110,6 +111,44 @@ const filter = ref<ReturnBucket | null>(null)
 function toggleFilter(bucket: ReturnBucket): void {
   filter.value = filter.value === bucket ? null : bucket
 }
+
+/* ==================== 按班级筛选（第五十四轮） ====================
+ *
+ * 用户口径：名单一长就得一屏一屏往下翻。点左边的「班级」按钮弹出班级框，
+ * 选中哪个班，下面（和上方四张卡片）就只算那个班；再点同一个班 = 复位。
+ *
+ * 两个筛选**正交**：班级筛选（看哪个班）× 状态筛选（看哪一栏）。
+ * 导出跟着两者一起走——文件里的行就是屏幕上那些行。
+ */
+
+const classFilter = ref<number | null>(null)
+const classPickerOpen = ref(false)
+
+/** 班级框里的选项：全部 + 每个班（带人数） */
+const classChoices = computed(() =>
+  classViews.value.map((v) => ({
+    id: v.cls.classId,
+    name: v.cls.className,
+    total: v.cls.total,
+  })),
+)
+
+function pickClass(id: number | null): void {
+  // 再点一次同一个班 = 取消筛选（和顶部卡片同一套「再点一次复位」的约定）
+  classFilter.value = classFilter.value === id ? null : id
+  classPickerOpen.value = false
+}
+
+const classFilterName = computed(
+  () => classChoices.value.find((c) => c.id === classFilter.value)?.name ?? '',
+)
+
+/** 班级筛选之后的班（状态筛选不在这里做，交给 `visibleViews`） */
+const scopedViews = computed<ClassView[]>(() =>
+  classFilter.value === null
+    ? classViews.value
+    : classViews.value.filter((v) => v.cls.classId === classFilter.value),
+)
 
 /** 当前筛选命中的学生行（不筛时 = 全部行）——导出的 recordIds 就从这来 */
 const filteredRows = computed<TaskDetailStudentRow[]>(() => {
@@ -357,9 +396,60 @@ async function load() {
         <!-- ============================ 每班名单 ============================ -->
         <!-- 标题跟着筛选走：筛着「未返校」时标题还写「各班未返校情况」是对的，
              但筛「已返校」就必须改口，否则文件名和屏幕各说各话 -->
-        <h4 class="sec-title">
-          {{ filter ? `${BUCKET_META[filter].label} · 各班名单` : '各班未返校情况' }}
-        </h4>
+        <div class="sec-head">
+          <div class="sec-head-left">
+            <!-- 班级筛选：点一下弹出班级框，选中哪个班下面就只列那个班（再点一次复位） -->
+            <el-popover
+              v-model:visible="classPickerOpen"
+              placement="bottom-start"
+              :width="240"
+              trigger="click"
+            >
+              <template #reference>
+                <el-button :type="classFilter === null ? 'default' : 'primary'">
+                  {{ classFilter === null ? '按班级筛选' : `班级：${classFilterName}` }}
+                </el-button>
+              </template>
+              <div class="cls-picker" role="listbox" aria-label="按班级筛选">
+                <button
+                  type="button"
+                  class="cls-opt"
+                  :class="{ on: classFilter === null }"
+                  :aria-selected="classFilter === null"
+                  @click="pickClass(null)"
+                >
+                  全部班级<b class="num">{{ classChoices.length }}</b>
+                </button>
+                <button
+                  v-for="c in classChoices"
+                  :key="c.id"
+                  type="button"
+                  class="cls-opt"
+                  :class="{ on: classFilter === c.id }"
+                  :aria-selected="classFilter === c.id"
+                  @click="pickClass(c.id)"
+                >
+                  {{ c.name }}<b class="num">{{ c.total }}</b>
+                </button>
+              </div>
+            </el-popover>
+
+            <h4 class="sec-title">
+              {{ filter ? `${BUCKET_META[filter].label} · 各班名单` : '各班未返校情况' }}
+            </h4>
+          </div>
+
+          <!-- 导出放在标题行右侧（用户口径：名单太长还得翻到底部才能导，太麻烦）。
+               跟着**班级筛选 + 状态筛选**一起走；筛出 0 人时禁用，别让人吃 400。 -->
+          <el-button
+            type="primary"
+            :loading="exporting"
+            :disabled="filter !== null && !filteredRows.length"
+            @click="onExport"
+          >
+            {{ exportLabel }}
+          </el-button>
+        </div>
 
         <p v-if="!visibleViews.length" class="all-good">
           ✓ 没有{{ filter ? BUCKET_META[filter].label : '' }}的学生
@@ -424,19 +514,8 @@ async function load() {
       </template>
     </div>
 
-    <template #footer>
-      <!-- 导出跟着筛选走：当前筛的是谁、导出来就是谁（recordIds 由屏幕上的行现算）。
-           筛选态一个人都没有 → 禁用，别让人点了吃一个 400 -->
-      <el-button
-        type="primary"
-        :loading="exporting"
-        :disabled="filter !== null && !filteredRows.length"
-        @click="onExport"
-      >
-        {{ exportLabel }}
-      </el-button>
-      <el-button @click="visible = false">关闭</el-button>
-    </template>
+    <!-- 底部不再放按钮：导出挪到名单标题那一行（数据一长就得翻到底部才能导，太麻烦），
+         关闭用弹窗右上角的 × 就够了。 -->
   </el-dialog>
 </template>
 
@@ -687,6 +766,68 @@ async function load() {
   background: var(--tone-ok-bg);
   color: var(--tone-ok);
   font-size: 13px;
+}
+
+/* 名单标题那一行：左边「班级筛选 + 标题」，右边导出。
+   `sticky` + 高 z-index：名单再长，导出按钮也一直钉在顶部，不用往回滚。 */
+.sec-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin: var(--space-lg) 0 var(--space-sm);
+  padding: var(--space-sm) 0;
+  background: var(--color-bg);
+}
+
+.sec-head-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+/* 班级筛选弹层：一个班一行，右边是这个班的人数 */
+.cls-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.cls-opt {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cls-opt:hover {
+  background: var(--color-muted);
+}
+
+.cls-opt.on {
+  background: var(--color-muted);
+  font-weight: 600;
+}
+
+/* 标题原本的 margin 由 .sec-head 接管了，这里只留字号 */
+.sec-head .sec-title {
+  margin: 0;
+  font-size: 14px;
 }
 
 .grp {

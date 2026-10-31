@@ -107,21 +107,30 @@ def call(method: str, path: str, body=None, token: str | None = None, raw: bytes
         headers["Content-Type"] = "application/json"
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(BASE + path, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            payload = r.read()
-            ctype = r.headers.get("Content-Type", "")
-            if "json" in ctype:
-                return r.status, (json.loads(payload) if payload else None)
-            return r.status, {"_bytes": len(payload)}
-    except urllib.error.HTTPError as e:
-        payload = e.read()
+    last_err: Exception | None = None
+    # 连接层错误（本机偶发的重置/超时）**重试一次**再判红。
+    # 上一轮回归里「匿名记账 -> 401」就因为一次连接重置整轮判红——
+    # 那不是产品的问题，是本地网络抖动；真挂了的接口重试也会稳定复现。
+    for attempt in (1, 2):
         try:
-            return e.code, (json.loads(payload) if payload else None)
-        except Exception:  # noqa: BLE001
-            return e.code, {"_raw": payload[:200].decode("utf-8", "replace")}
-    except Exception as e:  # noqa: BLE001  连接层错误
-        return 0, {"code": 0, "message": repr(e)}
+            with urllib.request.urlopen(req, timeout=30) as r:
+                payload = r.read()
+                ctype = r.headers.get("Content-Type", "")
+                if "json" in ctype:
+                    return r.status, (json.loads(payload) if payload else None)
+                return r.status, {"_bytes": len(payload)}
+        except urllib.error.HTTPError as e:
+            payload = e.read()
+            try:
+                return e.code, (json.loads(payload) if payload else None)
+            except Exception:  # noqa: BLE001
+                return e.code, {"_raw": payload[:200].decode("utf-8", "replace")}
+        except Exception as e:  # noqa: BLE001  连接层错误
+            last_err = e
+            if attempt == 1:
+                continue
+            return 0, {"code": 0, "message": repr(last_err)}
+    return 0, {"code": 0, "message": repr(last_err)}
 
 
 def code_of(resp) -> int | None:
@@ -4411,6 +4420,17 @@ def test_a25_college_excel() -> None:
         return
     T = S["T"]
 
+    # 导入时「没见过的班」会自动建出来。老库里「云计算2502」本来就存在，
+    # 所以清理时只删后建的那几个；干净库上它也是导入建的，同样要删——
+    # 否则用户把数据清空之后，跑一轮回归就又多出一个班（怎么也删不干净）。
+    from sqlalchemy import text as _t_base
+
+    from app.db import engine as _engine_base
+
+    with _engine_base.connect() as c_base:
+        before_classes = {int(r[0])
+                          for r in c_base.execute(_t_base("SELECT id FROM cls_class"))}
+
     # ---------- 造一个带「班级」列的表 ----------
     wb = _Wb()
     ws = wb.active
@@ -4710,12 +4730,14 @@ def test_a25_college_excel() -> None:
     with _engine.begin() as c:
         c.execute(_t("DELETE FROM student_field WHERE field_label IN "
                      "('院考标签','插在前面','插在后面')"))
-        # 自动建的两个班也要删（它们的字段模板是导入时建出来的）
-        for name in ("不存在的班", "回归新建班", "Z90夹具班"):
+        # 自动建的班也要删（它们的字段模板是导入时建出来的）。
+        # 「云计算2502」是**本轮导入才建的**才删——库里本来就有这个班时
+        # 它属于真实数据，绝不能跟着清掉（`before_classes` 就是为这个）。
+        for name in ("不存在的班", "回归新建班", "Z90夹具班", "云计算2502"):
             nc = c.execute(
                 _t("SELECT id FROM cls_class WHERE class_name = :n"), {"n": name}
             ).scalar()
-            if nc:
+            if nc and int(nc) not in before_classes:
                 c.execute(
                     _t("DELETE FROM student_record_value WHERE record_id IN "
                        "(SELECT id FROM student_record WHERE class_id = :c)"),
@@ -5079,6 +5101,29 @@ def test_a28_college_transfer() -> None:
     if not check("院长探针可用", bool(D), "建号失败"):
         return
 
+    # 探针学生写进「云计算2502」：库里没有这个班时**会被导入自动建出来**。
+    # 记下开跑前有哪些班，收尾时把「本轮才建出来的」删掉——库里本来就有的
+    # 那个班是真实数据，绝不能跟着清掉。不这么处理的话，用户把数据清空之后
+    # 每跑一次回归就多出一个班。
+    with _engine.connect() as c0:
+        before_classes = {int(r[0]) for r in c0.execute(_t("SELECT id FROM cls_class"))}
+
+    def drop_src_class() -> None:
+        with _engine.begin() as c:
+            nc = c.execute(
+                _t("SELECT id FROM cls_class WHERE class_name = '云计算2502'")
+            ).scalar()
+            if not nc or int(nc) in before_classes:
+                return
+            c.execute(_t("DELETE FROM student_record_value WHERE record_id IN "
+                         "(SELECT id FROM student_record WHERE class_id = :c)"),
+                      {"c": nc})
+            c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM student_field WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM sys_user_class WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM fee_category WHERE class_id = :c"), {"c": nc})
+            c.execute(_t("DELETE FROM cls_class WHERE id = :c"), {"c": nc})
+
     # ---------- 造一个探针学生 ----------
     wb = _Wb()
     ws = wb.active
@@ -5095,6 +5140,7 @@ def test_a28_college_transfer() -> None:
     row = next((r for r in (d.get("rows") or []) if r["studentNo"] == "Z9701"), None)
     if not check("名册里能拿到 Z9701", row is not None, str(d.get("rows"))[:200]):
         _purge_students_prefix("Z97")
+        drop_src_class()
         _purge_user(DEAN_PROBE + "_mv")
         return
     rid = row["id"]
@@ -5195,6 +5241,10 @@ def test_a28_college_transfer() -> None:
     with _engine.begin() as c:
         c.execute(_t("DELETE FROM student_field WHERE field_label = '回归缺列'"))
     _purge_fixture_class("回归转班夹具班")
+    # 「云计算2502」**本轮被导入建出来**才删（`before_classes` 挡着）：
+    # 库里本来就有这个班时它就是真实名册，绝不能动；干净库上它是这条用例
+    # 建的素材，不删的话跑一次回归就留下一个班 + 3 列字段。
+    drop_src_class()
     _purge_user(DEAN_PROBE + "_mv")
 
 
@@ -6553,6 +6603,34 @@ def test_a39_task_export_filter() -> None:
 
     EXP_PROBE = DEAN_PROBE + "_exp"
 
+    # 名册可能被清空（用户会把演示数据删干净），而这一段要拿「至少 3 行」当
+    # 筛选素材。依赖基线数据的用例在**干净库上会悄悄少跑一整段**（报告里
+    # 只是断言变少，看不出少了什么），所以素材由用例自己造、自己删——
+    # 和 `_fixture_class` 同一条原则。
+    FIX_NOS = [f"ZX39{i}" for i in range(1, 6)]
+
+    def ensure_students() -> None:
+        """在班主任的班里补 5 个夹具学生（已存在就覆盖）。"""
+        with _engine.begin() as c:
+            cid = c.execute(
+                _t("SELECT class_id FROM sys_user WHERE username = :u"), {"u": ROOT_U}
+            ).scalar()
+            if not cid:
+                return
+            for i, no in enumerate(FIX_NOS, 1):
+                c.execute(_t("DELETE FROM student_record WHERE student_no = :n"),
+                          {"n": no})
+                c.execute(_t(
+                    "INSERT INTO student_record (class_id, student_no, name) "
+                    "VALUES (:c, :n, :m)"),
+                    {"c": cid, "n": no, "m": f"筛选导出探针{i}"})
+
+    def drop_students() -> None:
+        with _engine.begin() as c:
+            for no in FIX_NOS:
+                c.execute(_t("DELETE FROM student_record WHERE student_no = :n"),
+                          {"n": no})
+
     def cleanup(task_id=None) -> None:
         if task_id:
             call("DELETE", f"/tasks/{task_id}", None, D)
@@ -6560,6 +6638,7 @@ def test_a39_task_export_filter() -> None:
             c.execute(_t("DELETE FROM cls_task WHERE title = :p"),
                       {"p": "regress 筛选导出"})
         _purge_user(EXP_PROBE)
+        drop_students()
 
     # ---------- 执行身份：纯院长（顺带验白名单） ----------
     D = _insert_dean_probe(EXP_PROBE)
@@ -6579,11 +6658,19 @@ def test_a39_task_export_filter() -> None:
     tid = (data_of(j) or {}).get("id")
 
     # ---------- ② 明细里取两行当「筛选命中」 ----------
-    st, j = call("GET", f"/tasks/{tid}/detail", None, D)
-    d = data_of(j) or {}
-    # 带上班名：断言「只输出命中的班」时不能假设两行一定同一个班
-    all_rows = [(cl.get("className"), r)
+    def fetch_detail():
+        st, j = call("GET", f"/tasks/{tid}/detail", None, D)
+        d = data_of(j) or {}
+        # 带上班名：断言「只输出命中的班」时不能假设两行一定同一个班
+        rows = [(cl.get("className"), r)
                 for cl in (d.get("classes") or []) for r in cl.get("rows") or []]
+        return st, d, rows
+
+    st, d, all_rows = fetch_detail()
+    if len(all_rows) < 3:
+        # 干净库里没有学生可当素材：自己补几个再取一次（跑完由 cleanup 删掉）
+        ensure_students()
+        st, d, all_rows = fetch_detail()
     total = (d.get("answered") or 0) + (d.get("unanswered") or 0)
     if not check("纯院长看明细 -> 200 且名册不空", st == 200 and len(all_rows) >= 3,
                  f"st={st} rows={len(all_rows)}"):
@@ -7119,6 +7206,158 @@ def test_a42_dean_accounts() -> None:
         _purge_user(MAKER)
 
 
+def test_a43_adviser_batch_delete() -> None:
+    """班主任名册批量删除账号（第五十三轮）。
+
+    两条线：
+
+    1. **删的是账号，不是班级**——名册上那个班还在，只是回到「未建账号」；
+    2. **只删班主任账号**——学生、纯院长、同级院长混进选择里一律跳过并说明原因，
+       不能把学院页变成「按 id 删任意账号」的后门。
+
+    另外两条护栏与单条删除同口径：不能删自己、有缴费/流水/批次引用不能删。
+    """
+    print("\n--- 班主任名册：批量删除账号 ---")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+    from app.security import hash_password as _hash
+
+    T = S["T"]
+    FIX = "回归夹具-批量删班主任"
+    D_ACC = DEAN_PROBE + "_a43"
+    NAMES = [DEAN_PROBE + f"_a43_{s}"
+             for s in ("t1", "t2", "t3", "ref", "stu", "pure", "dean2")]
+
+    def mk(username: str, role: str, cid: int, *, dean_only: int = 0,
+           adviser: bool = False) -> int:
+        """直写库造一个账号（可选：占一个班主任位）。"""
+        with _engine.begin() as c:
+            c.execute(_t("DELETE FROM sys_user_class WHERE user_id IN "
+                         "(SELECT id FROM sys_user WHERE username = :u)"),
+                      {"u": username})
+            c.execute(_t("DELETE FROM sys_user WHERE username = :u"), {"u": username})
+            c.execute(_t(
+                "INSERT INTO sys_user (class_id, username, password, real_name, "
+                "role, dean_only, status) VALUES (:c, :u, :p, :n, :r, :d, 1)"),
+                {"c": cid, "u": username, "p": _hash("123456"),
+                 "n": "批量删探针", "r": role, "d": dean_only})
+            uid = int(c.execute(
+                _t("SELECT id FROM sys_user WHERE username = :u"), {"u": username}
+            ).scalar())
+            if adviser:
+                c.execute(_t(
+                    "INSERT INTO sys_user_class (user_id, class_id, is_adviser) "
+                    "VALUES (:u, :c, 1)"), {"u": uid, "c": cid})
+        return uid
+
+    def exists(username: str) -> bool:
+        with _engine.connect() as c:
+            return bool(c.execute(
+                _t("SELECT COUNT(*) FROM sys_user WHERE username = :u"),
+                {"u": username}).scalar())
+
+    def links_of(uid: int) -> int:
+        with _engine.connect() as c:
+            return int(c.execute(
+                _t("SELECT COUNT(*) FROM sys_user_class WHERE user_id = :i"),
+                {"i": uid}).scalar() or 0)
+
+    def purge() -> None:
+        with _engine.begin() as c:
+            for u in NAMES:
+                uid = c.execute(
+                    _t("SELECT id FROM sys_user WHERE username = :u"), {"u": u}
+                ).scalar()
+                if uid:
+                    c.execute(_t("DELETE FROM fee_payment WHERE user_id = :i"), {"i": uid})
+                    c.execute(_t("DELETE FROM sys_user_class WHERE user_id = :i"),
+                              {"i": uid})
+                    c.execute(_t("DELETE FROM sys_user WHERE id = :i"), {"i": uid})
+        _purge_user(D_ACC)
+        _purge_fixture_class(FIX)
+
+    purge()
+    fid = _fixture_class(FIX)
+    D = _insert_dean_probe(D_ACC, dean_only=1)
+    if not check("夹具班 + 院长探针可用", bool(fid) and bool(D), f"fid={fid}"):
+        purge()
+        return
+
+    try:
+        t1 = mk(NAMES[0], "TEACHER", int(fid), adviser=True)
+        t2 = mk(NAMES[1], "TEACHER", int(fid), adviser=True)
+        t3 = mk(NAMES[2], "TEACHER", int(fid), adviser=True)
+        t_ref = mk(NAMES[3], "TEACHER", int(fid), adviser=True)
+        stu = mk(NAMES[4], "MEMBER", int(fid))
+        pure = mk(NAMES[5], "DEAN", int(fid), dean_only=1)
+        d2 = mk(NAMES[6], "DEAN", int(fid), dean_only=0, adviser=True)
+        self_id = _probe_id(D_ACC)
+
+        # ---------- ① 仅院长 ----------
+        st, j = call("DELETE", f"/college/advisers?ids={t1}", None, T)
+        check("班主任删班主任账号 -> 403（学院页仅院长）", st == 403,
+              f"st={st} {msg_of(j)}")
+        check("被 403 挡下后账号还在", exists(NAMES[0]))
+
+        # ---------- ② 真删：账号 + 班级关联，班级不动 ----------
+        st, j = call("DELETE", f"/college/advisers?ids={t1},{t2}", None, D)
+        r = data_of(j) or {}
+        check("院长批量删除 2 个班主任账号 -> 200", st == 200,
+              f"st={st} {msg_of(j)}")
+        check("回执 deleted=2", int(r.get("deleted") or 0) == 2, str(r)[:200])
+        check("两个账号都从库里消失",
+              not exists(NAMES[0]) and not exists(NAMES[1]))
+        check("班级关联一并清掉（不留孤儿行）",
+              links_of(t1) == 0 and links_of(t2) == 0)
+        with _engine.connect() as c:
+            alive = c.execute(_t("SELECT COUNT(*) FROM cls_class WHERE id = :i"),
+                              {"i": int(fid)}).scalar()
+        check("★ 班级不受影响（删的是账号，不是班）", int(alive or 0) == 1,
+              f"alive={alive}")
+
+        # ---------- ③ 只删班主任账号：别的角色一律跳过 ----------
+        st, j = call("DELETE",
+                     f"/college/advisers?ids={t3},{stu},{pure},{d2},{self_id}", None, D)
+        r = data_of(j) or {}
+        skipped = r.get("skipped") or []
+        reasons = {int(s.get("userId") or 0): str(s.get("reason") or "") for s in skipped}
+        check("混合批量 -> 200 且只删掉那个真班主任",
+              st == 200 and int(r.get("deleted") or 0) == 1, str(r)[:200])
+        check("跳过 4 个并逐条给原因", len(skipped) == 4, str(skipped)[:300])
+        check("学生账号被跳过（不是班主任账号）",
+              "不是班主任账号" in reasons.get(stu, ""))
+        check("纯院长被跳过（不是班主任账号）",
+              "不是班主任账号" in reasons.get(pure, ""))
+        check("兼班主任院长被跳过（院长同级，不能互删）",
+              "权限不足" in reasons.get(d2, ""))
+        check("不能删除自己的账号", "自己" in reasons.get(self_id, ""))
+        check("被跳过的账号都还在",
+              exists(NAMES[4]) and exists(NAMES[5]) and exists(NAMES[6]))
+        check("没有被跳过的那个班主任已删掉", not exists(NAMES[2]))
+
+        # ---------- ④ 有引用的账号跳过（与单条删除同一口径） ----------
+        with _engine.begin() as c:
+            c.execute(_t("INSERT INTO fee_payment (batch_id, user_id, amount, status) "
+                         "VALUES (0, :u, 0, 'UNPAID')"), {"u": t_ref})
+        st, j = call("DELETE", f"/college/advisers?ids={t_ref}", None, D)
+        r = data_of(j) or {}
+        sk = (r.get("skipped") or [{}])[0]
+        check("有缴费记录的账号跳过并说明原因",
+              int(r.get("deleted") or 0) == 0 and "缴费记录" in str(sk.get("reason")),
+              str(r)[:220])
+        check("有引用的账号确实还在", exists(NAMES[3]))
+
+        # ---------- ⑤ 空选择 ----------
+        st, j = call("DELETE", "/college/advisers?ids=", None, D)
+        check("空选择 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    finally:
+        purge()
+
+
 ALL_TESTS = [
     test_a00_encoding_guards,
     test_a00_bootstrap,
@@ -7164,6 +7403,7 @@ ALL_TESTS = [
     test_a40_adviser_template_roundtrip,
     test_a41_one_teacher_per_class,
     test_a42_dean_accounts,
+    test_a43_adviser_batch_delete,
     test_a15_cleanup,
 ]
 

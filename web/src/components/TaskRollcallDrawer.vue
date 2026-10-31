@@ -39,8 +39,14 @@ const savingAll = ref(false)
 /** 未保存的草稿：recordId -> { value, note }。随时存，但改完没存的要有标记 */
 const drafts = reactive<Record<number, { value: string | null; note: string }>>({})
 
-/** BOOLEAN 题型的固定两个选项（SINGLE 用候选项） */
-const booleanOptions = ['是', '否']
+/**
+ * BOOLEAN 题型的三个固定选项（SINGLE 用候选项）。
+ *
+ * 「请假」是第五十五轮加的：只有是/否两档时，「没到但请假了」只能选否，
+ * 于是院长看板里的「请假」那一栏永远是 0——做了那一栏却没法填。
+ * 后端 `_dump_value` 同步放行这个词（只放行它，BOOLEAN 仍不是自由填空）。
+ */
+const booleanOptions = ['是', '否', '请假']
 
 /**
  * 把草稿里的显示值翻成**提交给后端的值**。

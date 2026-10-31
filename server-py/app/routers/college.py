@@ -422,7 +422,7 @@ def delete_students(
     return ok(college_service.delete_students(db, user, _parse_ids(ids)))
 
 
-def _parse_ids(raw: str) -> list[int]:
+def _parse_ids(raw: str, what: str = "学生") -> list[int]:
     """`"3,7,9"` → `[3, 7, 9]`；非法片段直接 400（不静默丢掉）。"""
     out: list[int] = []
     for part in raw.split(","):
@@ -432,7 +432,7 @@ def _parse_ids(raw: str) -> list[int]:
         try:
             out.append(int(part))
         except ValueError:
-            raise BizException.bad_request("学生 id 不合法") from None
+            raise BizException.bad_request(f"{what} id 不合法") from None
     return out
 
 
@@ -477,6 +477,25 @@ def advisers(
     """各班班主任名册。"""
     require_min_level(user, "DEAN", "学院成员管理")
     return ok(college_service.advisers(db, user))
+
+
+@router.delete("/advisers", summary="批量删除班主任账号")
+def delete_advisers(
+    ids: str = Query(..., description="要删除的账号 id，逗号分隔（如 12,19）"),
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批量删除**班主任账号**（不是班级）。
+
+    用户口径：名册上勾几行就能清掉误建/离职的班主任，不用去
+    「成员管理」一条条点——纯院长也没有那个入口。
+
+    删的是登录账号本身（`sys_user` + 他的班级关联）；**班级保留**，
+    名册上那个班回到「未建账号」。有流水 / 缴费 / 批次引用的账号
+    会被跳过并说明原因，规则与单条删除完全一致。
+    """
+    require_min_level(user, "DEAN", "班主任名册")
+    return ok(user_service.delete_adviser_accounts(db, user, _parse_ids(ids, "账号")))
 
 
 @router.post("/advisers/import", summary="导入班主任账号（Excel）")

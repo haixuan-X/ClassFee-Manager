@@ -508,6 +508,97 @@ def create_dean(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
     return create_user(db, user, payload)
 
 
+def delete_adviser_accounts(
+    db: Session, user: LoginUser, user_ids: list[int]
+) -> dict:
+    """批量删除**班主任账号**（第五十三轮）。
+
+    ## 为什么学院页需要一个删除入口
+
+    用户口径：班主任名册上要能一次删掉多个班主任账号（演示班、离职老师），
+    一条条去「成员管理」点太慢；而**纯院长根本没有「成员管理」**（那一组
+    对纯院长整个不显示，后端 `/api/users` 也 403）。名册是院长的本职页面，
+    删除放在这里才闭环。
+
+    ## 为什么不直接复用 `batch_users`
+
+    `batch_users` 的目标必须落在「我能管的班」里——纯院长没有班，用不了；
+    而且它允许对**任意角色**动手。这里把范围钉死在**班主任账号**
+    （`TEACHER`，或 `DEAN` 且 `dean_only=0`，与 `_adviser_role_condition`
+    同一口径），避免把名册页变成「按 id 删任意账号」的后门。
+
+    ## 删的是什么 / 不删什么
+
+    - 删：`sys_user` 那一行 + 他在 `sys_user_class` 里的全部关联
+      （班主任位、可管理班）。否则会留下指向已不存在账号的孤儿关联。
+    - 不删：班级本身。名册上那个班只是回到「未建账号」，仍占一行——
+      「哪个班还没人管」正是这份名册要看见的信息。
+    - 流水 / 缴费 / 批次有引用的账号**跳过**并说明原因，和单条删除
+      （`delete_user`）同一口径：`_reference_reasons` 只有一份实现。
+
+    ## 能做的做，做不了的跳过
+
+    批量删一半失败比全删成功更糟。逐条判定，能删的删，删不了的记原因，
+    最后一起汇报（与 `batch_users` 的约定一致）。
+    """
+    ids = list(dict.fromkeys(int(i) for i in user_ids))
+    if not ids:
+        raise BizException.bad_request("请先勾选要删除的班主任账号")
+    if len(ids) > BATCH_MAX:
+        raise BizException.bad_request(f"一次最多处理 {BATCH_MAX} 人，请分批操作")
+
+    deleted: list[int] = []
+    skipped: list[dict] = []
+    with db.begin():
+        targets = {
+            u.id: u
+            for u in db.scalars(select(SysUser).where(SysUser.id.in_(ids))).all()
+        }
+        doomed: list[SysUser] = []
+        for uid in ids:
+            target = targets.get(uid)
+            if target is None:
+                skipped.append({"userId": uid, "reason": "账号不存在"})
+                continue
+            if target.id == user.id:
+                skipped.append({"userId": uid, "reason": "不能删除自己的账号"})
+                continue
+            # 只认「能在名册上占班主任位」的账号：班主任，或兼班主任的院长。
+            # 纯院长/班长/生活委员/学生都不在这份名册的删除范围内。
+            if not (
+                target.role == "TEACHER"
+                or (target.role == DEAN_ROLE and not target.dean_only)
+            ):
+                skipped.append({"userId": uid, "reason": "不是班主任账号"})
+                continue
+            # 等级护栏与单条删除一致：必须**严格高于**目标。
+            # 院长之间同级，因此谁也删不掉另一位院长（哪怕他兼班主任）。
+            if role_level(user.role) <= role_level(target.role):
+                skipped.append({"userId": uid, "reason": "权限不足，不能删除该账号"})
+                continue
+            refs = _reference_reasons(db, target)
+            if refs:
+                skipped.append(
+                    {
+                        "userId": uid,
+                        "reason": f"已关联{'、'.join(refs)}，不能删除；可停用保留历史",
+                    }
+                )
+                continue
+            doomed.append(target)
+
+        if doomed:
+            doomed_ids = [t.id for t in doomed]
+            db.execute(
+                delete(SysUserClass).where(SysUserClass.user_id.in_(doomed_ids))
+            )
+            for target in doomed:
+                db.delete(target)
+            deleted = doomed_ids
+
+    return {"deleted": len(deleted), "ids": deleted, "skipped": skipped}
+
+
 def _apply_profile_fields(
     db: Session,
     target: SysUser,

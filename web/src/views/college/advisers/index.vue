@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
 import {
+  deleteCollegeAdviserAccounts,
   downloadAdviserTemplate,
   fetchCollegeAdvisers,
   fetchCollegeTeacherCandidates,
@@ -41,6 +42,14 @@ import type { CollegeAdviserList, CollegeAdviserRow } from '@/types'
  * 硬合成一个字段就会丢信息：名字对了但没有账号（没法通知），
  * 或者有账号但班级信息没填（名字是空的）。所以**两列分开摆**，
  * 缺哪个就留空，不编一个「待定」出来。
+ *
+ * ## 批量删除班主任账号（第五十三轮）
+ *
+ * 用户口径：名册上勾几行就能清掉误建/离职的班主任。删的是**登录账号**，
+ * 不是班级——那个班仍然占一行，只是回到「未建账号」。
+ *
+ * 为什么不做「批量删除班级」：班级是学生/任务/账目的归属，删一个班要
+ * 连带处理的东西太多，不能从一个「班主任名册」页顺手做掉。
  */
 const list = ref<CollegeAdviserList | null>(null)
 const loading = ref(true)
@@ -59,6 +68,14 @@ async function load() {
   try {
     list.value = await fetchCollegeAdvisers()
     loadError.value = false
+    // 勾选状态跟着名册走：别处删掉的账号不能还留在选择里，
+    // 否则「已选 3 个」点下去只删了 2 个，用户还得自己数。
+    const alive = new Set(
+      (list.value?.rows ?? [])
+        .map((r) => r.teacherId)
+        .filter((id): id is number => id !== null),
+    )
+    selectedTeacherIds.value = selectedTeacherIds.value.filter((id) => alive.has(id))
   } catch {
     list.value = null
     loadError.value = true
@@ -91,6 +108,116 @@ const uncovered = computed(() => {
   }
   return out
 })
+
+/* ==================== 勾选 + 批量删除班主任账号（第五十三轮） ==================== */
+
+/**
+ * 勾的是**账号**，不是行。
+ *
+ * 一个老师可以带好几个班，名册上就占好几行——按行勾会让人以为
+ * 「勾了两行 = 两个账号」。所以勾选状态存 `teacherId`，同一个人的
+ * 几行一起亮；提交时按 id 去重，删的是一个账号。
+ */
+const selectedTeacherIds = ref<number[]>([])
+
+/** 有账号的行才可勾（「未建账号」那些行没有东西可删） */
+const selectableTeacherIds = computed(() => {
+  const out: number[] = []
+  for (const r of rows.value) {
+    if (r.teacherId !== null && !out.includes(r.teacherId)) out.push(r.teacherId)
+  }
+  return out
+})
+
+const allSelected = computed(
+  () =>
+    selectableTeacherIds.value.length > 0 &&
+    selectedTeacherIds.value.length === selectableTeacherIds.value.length,
+)
+const isIndeterminate = computed(
+  () =>
+    selectedTeacherIds.value.length > 0 &&
+    selectedTeacherIds.value.length < selectableTeacherIds.value.length,
+)
+
+function toggleAllTeachers() {
+  selectedTeacherIds.value = allSelected.value ? [] : [...selectableTeacherIds.value]
+}
+
+function toggleTeacher(id: number | null) {
+  if (id === null) return
+  const i = selectedTeacherIds.value.indexOf(id)
+  if (i >= 0) selectedTeacherIds.value.splice(i, 1)
+  else selectedTeacherIds.value.push(id)
+}
+
+function isPicked(id: number | null): boolean {
+  return id !== null && selectedTeacherIds.value.includes(id)
+}
+
+const deleting = ref(false)
+
+/**
+ * 删除勾中的班主任账号。
+ *
+ * 确认框必须说清「删的是账号、班级还在」——否则用户会以为这个班
+ * 跟着从系统里消失了。有引用的账号后端会跳过，所以提示按**真正
+ * 删掉的数量**（`deleted`）说，不按勾了几个说。
+ */
+async function deleteSelected() {
+  const ids = [...selectedTeacherIds.value]
+  if (!ids.length || deleting.value) return
+  const labels = [
+    ...new Set(
+      rows.value
+        .filter((r) => r.teacherId !== null && ids.includes(r.teacherId))
+        .map((r) => `${r.realName || r.username}（${r.username}）`),
+    ),
+  ]
+  try {
+    await ElMessageBox.confirm(
+      `将删除 ${ids.length} 个班主任账号：${labels.join('、')}。\n` +
+        '删的是登录账号，班级保留（名册上变成「未建账号」）。' +
+        '有流水/缴费/批次记录的账号会被跳过。删除后不能撤销。',
+      '删除班主任账号',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return // 用户取消
+  }
+  deleting.value = true
+  try {
+    const r = await deleteCollegeAdviserAccounts(ids)
+    if (r.deleted > 0) ElMessage.success(`已删除 ${r.deleted} 个班主任账号`)
+    if (r.skipped.length > 0) {
+      // 跳过的账号可能已经被删掉了，名册里查不到名字——回退成 #id
+      const nameOf = new Map<number, string>()
+      for (const row of rows.value) {
+        if (row.teacherId !== null) {
+          nameOf.set(row.teacherId, `${row.realName || row.username}（${row.username}）`)
+        }
+      }
+      await ElMessageBox.alert(
+        r.skipped
+          .map((s) => `${nameOf.get(s.userId) ?? `#${s.userId}`}：${s.reason}`)
+          .join('\n'),
+        `${r.skipped.length} 个账号没删掉`,
+        { confirmButtonText: '知道了' },
+      )
+    }
+    selectedTeacherIds.value = []
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e, '删除失败'))
+  } finally {
+    deleting.value = false
+  }
+}
 
 /** 改班主任：打开弹窗，预填每个班现在的人 */
 async function openArrange() {
@@ -199,13 +326,27 @@ onMounted(load)
         <h2>班主任名册</h2>
         <p>
           各班班主任（导员）一览。<strong>一个老师可以带好几个班</strong>，
-          班主任本人也能在「个人信息」里改「我带的班」。账号的增删改请到「班级 → 成员管理」。
+          班主任本人也能在「个人信息」里改「我带的班」。
+          勾选表格左侧的复选框可以批量删除班主任账号（班级保留）；新增账号用「导入班主任」。
         </p>
       </div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap">
         <el-button :loading="templateLoading" @click="onDownloadTemplate">下载模板</el-button>
         <el-button :loading="importing" @click="pickFile">导入班主任</el-button>
         <el-button type="primary" @click="openArrange">改班主任安排</el-button>
+        <el-button
+          type="danger"
+          plain
+          :disabled="selectedTeacherIds.length === 0"
+          :loading="deleting"
+          @click="deleteSelected"
+        >
+          {{
+            selectedTeacherIds.length > 0
+              ? `删除选中的账号（${selectedTeacherIds.length}）`
+              : '删除选中的账号'
+          }}
+        </el-button>
         <input
           ref="fileInput"
           type="file"
@@ -221,6 +362,15 @@ onMounted(load)
         <table class="roster">
           <thead>
             <tr>
+              <th scope="col" class="pick">
+                <el-checkbox
+                  :model-value="allSelected"
+                  :indeterminate="isIndeterminate"
+                  :disabled="selectableTeacherIds.length === 0"
+                  aria-label="全选班主任账号"
+                  @change="toggleAllTeachers"
+                />
+              </th>
               <th scope="col">班级</th>
               <th scope="col">年级</th>
               <th scope="col">登记班主任</th>
@@ -233,6 +383,15 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="(row, i) in rows" :key="`${row.classId}-${row.teacherId ?? 'none'}-${i}`">
+              <td class="pick">
+                <el-checkbox
+                  v-if="row.teacherId !== null"
+                  :model-value="isPicked(row.teacherId)"
+                  :aria-label="`选择 ${row.realName || row.username}`"
+                  @change="toggleTeacher(row.teacherId)"
+                />
+                <span v-else class="muted" aria-hidden="true">—</span>
+              </td>
               <td>{{ row.className }}</td>
               <td>{{ row.grade || '—' }}</td>
               <td>
@@ -341,6 +500,15 @@ onMounted(load)
   background: var(--color-surface, #fff);
   font-weight: 600;
   color: var(--color-foreground);
+}
+
+/* 勾选列：窄、居中，且不参与「点行跳转」那种交互（这里本来就没有） */
+.roster th.pick,
+.roster td.pick {
+  width: 40px;
+  padding-right: 0;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .muted {

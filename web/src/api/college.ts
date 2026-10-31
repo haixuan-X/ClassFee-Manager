@@ -1,6 +1,7 @@
 import { request, service } from '@/api/request'
 import { downloadXlsx, exportFailure } from '@/utils/download'
 import type {
+  CollegeAdviserDeleteResult,
   CollegeAdviserList,
   CollegeDeanList,
   CollegeDeanRow,
@@ -43,6 +44,21 @@ export function fetchCollegeStudents(params: {
 /** 班主任（导员）名册：各班一行 */
 export function fetchCollegeAdvisers() {
   return request<CollegeAdviserList>({ url: '/college/advisers', method: 'get' })
+}
+
+/**
+ * 批量删除**班主任账号**（第五十三轮）。
+ *
+ * 删的是登录账号，班级保留——名册上那个班回到「未建账号」。
+ * 有流水/缴费/批次引用的账号后端会跳过并返回原因（`skipped`），
+ * 所以调用方要按 `deleted` 报数量，不能按传进去的 id 数报。
+ */
+export function deleteCollegeAdviserAccounts(ids: number[]) {
+  return request<CollegeAdviserDeleteResult>({
+    url: '/college/advisers',
+    method: 'delete',
+    params: { ids: ids.join(',') },
+  })
 }
 
 /**

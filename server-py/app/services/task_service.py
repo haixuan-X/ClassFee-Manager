@@ -106,6 +106,11 @@ QTYPE_TEXT = {
 
 BOOLEAN_LABELS = {"true": "是", "false": "否"}
 
+#: BOOLEAN 题**额外**接受的第三个答案（第五十五轮）。
+#: 存的是原文「请假」，`_display_value` 原样返回，前端 `taskStatus.ts`
+#: 把它归到「请假」桶——和发布人自己在 SINGLE 里写「请假」是同一套口径。
+EXCUSED_VALUE = "请假"
+
 MAX_OPTIONS = 12
 MAX_OPTION_LEN = 30
 MAX_VALUE_LEN = 255
@@ -320,6 +325,12 @@ def _dump_value(task: ClsTask, value) -> str | None:
         s = str(value).strip().lower()
         if s in ("true", "false"):
             return s
+        # 「请假」（第五十五轮）：是/否两档表达不了「没到，但请假了」，
+        # 于是院长的返校看板里那一栏永远是 0。只放行这**一个**词——
+        # 既能让请假单独成栏，又不至于让 BOOLEAN 变成自由填空
+        # （那会让 SINGLE 的候选项校验形同虚设）。
+        if str(value).strip() == EXCUSED_VALUE:
+            return EXCUSED_VALUE
         raise BizException.bad_request("这一题只能回答「是」或「否」")
 
     if task.qtype == "SINGLE":
