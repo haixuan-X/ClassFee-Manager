@@ -3412,11 +3412,13 @@ def _try_create_dean_via_api(token: str) -> bool:
     return False
 
 
-def _insert_dean_probe(username: str = DEAN_PROBE) -> str | None:
+def _insert_dean_probe(username: str = DEAN_PROBE, dean_only: int = 0) -> str | None:
     """直写库造一个院长探针 + 登录拿令牌。
 
     为什么不用 API：院长等级高于本用例的执行身份（班主任），API 必然拒绝——
     而那正是期望行为。见 `test_a20_dean_role` 的说明。
+
+    `dean_only=1` 造纯院长（第五十二轮：验证「纯院长也能再开院长」）。
     """
     root = pathlib.Path(__file__).resolve().parents[1]
     if str(root) not in sys.path:
@@ -3439,8 +3441,9 @@ def _insert_dean_probe(username: str = DEAN_PROBE) -> str | None:
                         {"i": uid}).scalar()
         c.execute(_t(
             "INSERT INTO sys_user (class_id, username, password, real_name, "
-            "role, status) VALUES (:c, :u, :p, :n, 'DEAN', 1)"),
-            {"c": cid, "u": username, "p": _hash("123456"), "n": "院长探针"})
+            "role, dean_only, status) VALUES (:c, :u, :p, :n, 'DEAN', :d, 1)"),
+            {"c": cid, "u": username, "p": _hash("123456"), "n": "院长探针",
+             "d": 1 if dean_only else 0})
     return login(username, "123456")
 
 
@@ -4205,7 +4208,8 @@ def test_a24_pure_dean() -> None:
 
     三条重点：
 
-    1. **默认必须是兼班主任**：存量账号一行都不用改，行为完全不变。
+    1. **老账号保持兼班主任**：`dean_only` 列默认 0，存量账号一行都不用改，
+       行为完全不变（第三十三轮起**新建**院长默认纯院长，见 `create_user`）。
     2. **白名单而不是黑名单**：纯院长能碰的接口是一张**允许清单**，
        将来加了新接口而忘了加进白名单，纯院长访问不到（可发现、可补）；
        反过来若用黑名单，漏一个就是**静默放行**（不可发现）。
@@ -4222,6 +4226,9 @@ def test_a24_pure_dean() -> None:
     for method, path in (
         ("GET", "/api/college/students"),
         ("GET", "/api/college/advisers"),
+        # 第五十二轮：院长账号可以有多个，纯院长也要能再开一个。
+        ("GET", "/api/college/deans"),
+        ("POST", "/api/college/deans"),
         ("GET", "/api/college/tasks"),
         # 名册是院长的本职：改一格 / 转班 / 删行都在这条前缀下
         ("PUT", "/api/college/students/1"),
@@ -7023,6 +7030,95 @@ def test_a41_one_teacher_per_class() -> None:
         purge()
 
 
+def test_a42_dean_accounts() -> None:
+    """院长账号（第五十二轮）：**可以有多位**，纯院长也能再开一个。
+
+    三条重点：
+
+    1. 纯院长虽然进不了「班级 → 成员管理」，但「再开一个院长」是**学院事务**，
+       所以单开 `/college/deans` 这组接口，而不是放开 `/api/users`；
+    2. 新院长一律建成**纯院长**——角色/班级字段由服务端钉死，请求体里塞
+       `role=TEACHER` 也只会建出院长（防止把这一页当成绕过等级校验的后门）；
+    3. 新账号能立刻登录、也拥有同一个入口——否则「最后一位院长」离职后，
+       系统里就再也没人能开新院长了。
+    """
+    print("\n--- 院长账号（可多位）---")
+    T = S["T"]
+    MAKER = DEAN_PROBE + "_maker"
+    MADE = DEAN_PROBE + "_made"
+    D = _insert_dean_probe(MAKER, dean_only=1)
+    _purge_user(MADE)
+    if not check("纯院长探针可用（直写库模拟部署声明）", bool(D), "建号失败"):
+        _purge_user(MAKER)
+        return
+
+    try:
+        st, j = call("GET", "/auth/me", None, D)
+        check("探针确实是纯院长（deanOnly=true）",
+              (data_of(j) or {}).get("deanOnly") is True, str(data_of(j))[:120])
+
+        # ---------- ① 班主任进不来：这是学院级入口 ----------
+        st, j = call("GET", "/college/deans", None, T)
+        check("班主任看院长账号列表 -> 403（仅院长）", st == 403,
+              f"st={st} {msg_of(j)}")
+        st, j = call("POST", "/college/deans",
+                     {"username": MADE, "realName": "班主任想建的院长"}, T)
+        check("班主任新增院长 -> 403（等级不够，不能开院长）", st == 403,
+              f"st={st} {msg_of(j)}")
+
+        # ---------- ② 纯院长能列、能建 ----------
+        st, j = call("GET", "/college/deans", None, D)
+        before = data_of(j) or {}
+        check("纯院长能看院长账号列表", st == 200, f"st={st} {msg_of(j)}")
+        check("列表里有自己",
+              any(r.get("username") == MAKER for r in (before.get("rows") or [])),
+              str(before)[:200])
+
+        st, j = call("POST", "/college/deans",
+                     {"username": MADE, "password": "dean123",
+                      "realName": "新院长", "phone": "13800000000",
+                      # 故意塞入别的角色：服务端必须仍按院长建
+                      "role": "TEACHER"},
+                     D)
+        made = data_of(j) or {}
+        check("纯院长新增院长 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        check("新增的一律是院长（请求体里的 role=TEACHER 被忽略）",
+              made.get("role") == "DEAN", str(made)[:200])
+        check("新院长默认纯院长（deanOnly=true）",
+              made.get("deanOnly") is True, str(made)[:200])
+
+        # ---------- ③ 列表可见 + 新账号能登录、也有同样的入口 ----------
+        st, j = call("GET", "/college/deans", None, D)
+        after = data_of(j) or {}
+        rows = after.get("rows") or []
+        row = next((r for r in rows if r.get("username") == MADE), None)
+        check("列表里出现新院长", row is not None, str(rows)[:200])
+        check("新院长在列表里也是纯院长", (row or {}).get("deanOnly") is True, str(row))
+        check("院长数量 +1（允许多位）",
+              int(after.get("total") or 0) == int(before.get("total") or 0) + 1,
+              f"{after.get('total')} vs {before.get('total')}")
+
+        P2 = login(MADE, "dean123")
+        check("新院长能立刻登录", bool(P2), "登录失败")
+        st, j = call("GET", "/auth/me", None, P2)
+        me2 = data_of(j) or {}
+        check("新院长的 role=DEAN / deanOnly=true",
+              me2.get("role") == "DEAN" and me2.get("deanOnly") is True,
+              str(me2)[:160])
+        st, j = call("GET", "/college/deans", None, P2)
+        check("新建的纯院长也能进同一个入口（不会出现「最后一位院长离职」死锁）",
+              st == 200, f"st={st} {msg_of(j)}")
+
+        # ---------- ④ 唯一登录名：复用 create_user 的校验 ----------
+        st, j = call("POST", "/college/deans",
+                     {"username": MADE, "realName": "重名院长"}, D)
+        check("重复登录名 -> 400", st == 400 and "已存在" in msg_of(j),
+              f"st={st} {msg_of(j)}")
+    finally:
+        _purge_user(MADE)
+        _purge_user(MAKER)
+
+
 ALL_TESTS = [
     test_a00_encoding_guards,
     test_a00_bootstrap,
@@ -7067,6 +7163,7 @@ ALL_TESTS = [
     test_a39_task_export_filter,
     test_a40_adviser_template_roundtrip,
     test_a41_one_teacher_per_class,
+    test_a42_dean_accounts,
     test_a15_cleanup,
 ]
 

@@ -18,8 +18,9 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..errors import BizException
 from ..responses import ok
+from ..schemas import UserCreateRequest
 from ..security import LoginUser, get_current_user, require_min_level
-from ..services import college_excel, college_service
+from ..services import college_excel, college_service, user_service
 
 router = APIRouter(prefix="/api/college", tags=["college"])
 
@@ -433,6 +434,39 @@ def _parse_ids(raw: str) -> list[int]:
         except ValueError:
             raise BizException.bad_request("学生 id 不合法") from None
     return out
+
+
+@router.get("/deans", summary="院长账号一览（可多位）")
+def deans(
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """院长账号一览。
+
+    **允许有多个院长**：系统没有「一个学院只能一位院长」的限制，
+    院长之间同级、互不管理（`require_role_higher` 要求严格更高）。
+
+    纯院长也能看：这是「再开一个院长」的入口页，属于学院事务，
+    不能挂在「班级 → 成员管理」下面（那一组对纯院长整个不显示）。
+    """
+    require_min_level(user, "DEAN", "院长账号")
+    return ok(user_service.list_deans(db))
+
+
+@router.post("/deans", summary="新增院长账号（纯院长）")
+def create_dean(
+    req: UserCreateRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """新增一位院长账号。
+
+    与 `/api/users` 的建号走**同一套** `user_service.create_user`（校验、
+    密码哈希、唯一登录名都不另写一份），只是把角色钉死成院长、默认纯院长。
+    详见 `user_service.create_dean`。
+    """
+    require_min_level(user, "DEAN", "院长账号")
+    return ok(user_service.create_dean(db, user, req))
 
 
 @router.get("/advisers", summary="班主任（导员）名册")

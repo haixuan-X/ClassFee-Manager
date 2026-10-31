@@ -219,7 +219,12 @@ const groups: NavGroup[] = [
     //  忘了标角色也不会漏到别人的侧栏里。
     title: '学院',
     roles: DEAN_ONLY,
-    items: [],
+    items: [
+      // 院长账号（第五十二轮）：系统允许**多位院长**，纯院长也要能再开一个。
+      // 所以入口放在学院这一组，而不是「班级 → 成员管理」——纯院长那一组
+      // 整个不显示，挂过去等于没有入口。
+      { index: '/college/deans', label: '院长账号', icon: 'UserFilled', roles: DEAN_ONLY },
+    ],
     subs: [
       {
         key: 'college-classes',

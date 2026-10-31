@@ -65,6 +65,8 @@ const COLLEGE_FREE_PATHS = new Set([
   'dashboard',
   'college-students',
   'college-advisers',
+  // 院长账号（第五十二轮）：纯院长也要能再开一个院长，这是学院事务。
+  'college-deans',
   'college-tasks',
   // 学院视角的班级任务（第三十二轮）：各班班主任发布的任务一览，
   // 和「学院任务」一样是学院事务，纯院长能看。
@@ -201,6 +203,15 @@ const routes: RouteRecordRaw[] = [
         name: 'college-advisers',
         component: () => import('@/views/college/advisers/index.vue'),
         meta: { title: '班主任名册', roles: ['DEAN'] },
+      },
+      {
+        // 院长账号（第五十二轮）：系统允许多位院长。纯院长进不了
+        // 「班级 → 成员管理」（那一组对纯院长整个不显示），所以「再开一个
+        // 院长」必须有独立入口。后端同样用 require_min_level("DEAN") 兜底。
+        path: 'college/deans',
+        name: 'college-deans',
+        component: () => import('@/views/college/deans/index.vue'),
+        meta: { title: '院长账号', roles: ['DEAN'] },
       },
       {
         // 学院任务（第三十二轮）：**院长发的**任务一览（scope=COLLEGE），

@@ -2,6 +2,8 @@ import { request, service } from '@/api/request'
 import { downloadXlsx, exportFailure } from '@/utils/download'
 import type {
   CollegeAdviserList,
+  CollegeDeanList,
+  CollegeDeanRow,
   CollegeFieldList,
   CollegeImportResult,
   CollegeRetypePreview,
@@ -41,6 +43,31 @@ export function fetchCollegeStudents(params: {
 /** 班主任（导员）名册：各班一行 */
 export function fetchCollegeAdvisers() {
   return request<CollegeAdviserList>({ url: '/college/advisers', method: 'get' })
+}
+
+/**
+ * 院长账号一览（第五十二轮）：只列 `role=DEAN`，不按班级过滤。
+ *
+ * 纯院长也能访问——「再开一个院长」是学院事务，不能挂在
+ * 「班级 → 成员管理」下面（那一组对纯院长整个不显示）。
+ */
+export function fetchCollegeDeans() {
+  return request<CollegeDeanList>({ url: '/college/deans', method: 'get' })
+}
+
+/**
+ * 新增院长账号。
+ *
+ * 请求体只带人（姓名/登录名/密码/手机号）：**角色与班级由后端钉死**，
+ * 一律建成纯院长——这一页不是绕过等级校验的建号后门。
+ */
+export function createCollegeDean(body: {
+  username: string
+  realName: string
+  password?: string
+  phone?: string
+}) {
+  return request<CollegeDeanRow>({ url: '/college/deans', method: 'post', data: body })
 }
 
 /** 导入班主任账号（Excel）：姓名 / 登录名 / 初始密码 / 手机号 / 带的班 */

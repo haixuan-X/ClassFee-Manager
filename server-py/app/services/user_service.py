@@ -446,6 +446,68 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
         return account_vo(row, managed_class_ids(db, row.id, row.role, row.class_id))
 
 
+def list_deans(db: Session) -> dict:
+    """院长账号一览（第五十二轮）。
+
+    **只列 `role=DEAN`，不按班级过滤**：院长是学院级账号，不属于某一个班。
+    这也正是它不能复用「成员管理」列表的原因——那份列表按「我能管的班」
+    过滤，是班级视角；纯院长不参与班级事务，看到一屏学生账号没有意义。
+    """
+    rows = db.scalars(
+        select(SysUser)
+        .where(SysUser.role == DEAN_ROLE)
+        .order_by(SysUser.id.asc())
+    ).all()
+    items = [
+        {
+            "id": u.id,
+            "username": u.username,
+            "realName": u.real_name or "",
+            "phone": u.phone or "",
+            "status": u.status,
+            "deanOnly": bool(u.dean_only),
+            "lastLoginAt": fmt_dt(u.last_login_at),
+        }
+        for u in rows
+    ]
+    return {"rows": items, "total": len(items)}
+
+
+def create_dean(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
+    """新增一位院长账号（第五十二轮）。
+
+    ## 为什么单独一个入口
+
+    纯院长的接口白名单里没有 `/api/users`，侧栏也不给「班级 → 成员管理」——
+    他不能参与班级账号的增删改。但「再开一个院长」是**学院级**的事，
+    不能因为这两道闸门就没有入口，否则院长账号只能靠改库或部署声明新增。
+
+    ## 为什么一律建成纯院长
+
+    新院长默认只管学院。若建出来就自动挂到某个班（`create_user` 对
+    兼班主任院长会写一条管理行），「他为什么能进这个班」会变成一个
+    没人记得的副作用，还可能和班主任安排纠缠。
+    需要兼班主任的，本人登录后在「个人信息 → 职务范围」切换即可
+    （第三十二轮起院长自己能改，立刻生效）。
+
+    ## 角色/班级字段不是调用方说了算
+
+    `role` 覆盖成 DEAN、`deanOnly` 覆盖成 True、`classIds`/`guestScopes`/
+    `studentNo` 清空：这个入口只建院长。即使请求体里塞了 `role=TEACHER`，
+    也只会建出院长——避免把「院长账号」页当成绕过等级校验的建号后门。
+    """
+    payload = req.model_copy(
+        update={
+            "role": DEAN_ROLE,
+            "deanOnly": True,
+            "classIds": None,
+            "guestScopes": None,
+            "studentNo": None,
+        }
+    )
+    return create_user(db, user, payload)
+
+
 def _apply_profile_fields(
     db: Session,
     target: SysUser,

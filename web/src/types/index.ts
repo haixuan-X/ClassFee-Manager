@@ -430,6 +430,28 @@ export interface CollegeAdviserList {
   total: number
 }
 
+/**
+ * 院长账号（第五十二轮）。
+ *
+ * 院长**可以有多位**：这里列的是 `role=DEAN` 的全部账号，不按班级过滤。
+ */
+export interface CollegeDeanRow {
+  id: number
+  username: string
+  realName: string
+  phone: string
+  /** 1=启用 0=停用 */
+  status: number
+  /** true = 纯院长（只管学院）；false = 院长 + 班主任 */
+  deanOnly: boolean
+  lastLoginAt: string | null
+}
+
+export interface CollegeDeanList {
+  rows: CollegeDeanRow[]
+  total: number
+}
+
 /** 学院任务一览的一行 */
 export interface CollegeTaskRow {
   id: number
