@@ -36,6 +36,12 @@ import urllib.request
 BASE = "http://127.0.0.1:8080/api"
 ROOT_U, ROOT_P = "test", "123456"
 
+# 让 `from app.db import engine` 在任何用例里都可用（守卫要直查库）。
+# 各用例里那句 `sys.path.insert` 只覆盖它们自己，模块级的一次就够。
+_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 # 固定学号的探针账号（跨轮复用，结尾清理）
 MEMBER_U, MEMBER_P = "20220103", "123456"
 MEMBER_NAME = "Wang Xiaoming"
@@ -147,6 +153,49 @@ def find_user(username: str, token: str):
         if u.get("username") == username:
             return u
     return None
+
+
+def root_class_links() -> list[tuple[int, int]]:
+    """常驻班主任 `test` 当前挂着的班 `[(class_id, is_adviser)]`（直查库，**不经过列表接口**）。
+
+    为什么不能用 `GET /users` 或 `/auth/me` 判断：那两个的口径是「我能管的班」，
+    而这里要查的是**关联表本身**——用例把它删掉了，接口只会更看不出来。
+    第五十一轮起关联表多了 `is_adviser`：一行可能只是「能管」，不占名册位。
+    守卫要连这个标志一起还原，否则会出现「班级对得上、名册却空了」。
+    """
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    with _engine.connect() as c:
+        return sorted(
+            (int(r[0]), int(r[1]))
+            for r in c.execute(
+                _t(
+                    "SELECT uc.class_id, uc.is_adviser FROM sys_user_class uc "
+                    "JOIN sys_user u ON u.id = uc.user_id WHERE u.username = 'test'"
+                )
+            )
+        )
+
+
+def restore_root_links(want: list[tuple[int, int]]) -> None:
+    """把 `test` 的班级关联**直接写回**给定的那几个（含班主任标志）。"""
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    with _engine.begin() as c:
+        uid = c.execute(_t("SELECT id FROM sys_user WHERE username = 'test'")).scalar()
+        if uid is None:
+            return
+        c.execute(_t("DELETE FROM sys_user_class WHERE user_id = :i"), {"i": uid})
+        for cid, flag in want:
+            c.execute(
+                _t("INSERT INTO sys_user_class (user_id, class_id, is_adviser) "
+                   "VALUES (:i, :c, :a)"),
+                {"i": uid, "c": int(cid), "a": int(flag)},
+            )
 
 
 def ensure_user(username: str, role: str, real_name: str, token: str):
@@ -348,6 +397,9 @@ def test_a00_bootstrap():
     S["users0"] = {
         u["username"] for u in (data_of(call("GET", "/users", None, T)[1]) or [])
     } - set(PROBE_USERS)
+    # 常驻班主任 test 的**班级关联**基线（第五十一轮）：
+    # 用例可以临时改（测「我带的班」），但收尾必须还原（见 main 里的守卫）。
+    S["root_classes0"] = root_class_links()
 
     # 普通成员：能登录就复用，否则建/修
     if not login(MEMBER_U, MEMBER_P):
@@ -4054,20 +4106,16 @@ def test_a23_college_views() -> None:
     # ---------- ⑤ 班主任名册 ----------
     #
     # 第三十二轮：名册按**关联表**（谁是哪个班的班主任）列，
-    # 不再按「账号的默认班」推。所以这里先按当前口径补齐关联：
-    # role=TEACHER 或兼班主任的院长 → 是他们默认班的班主任。
+    # 不再按「账号的默认班」推。
+    #
+    # ⚠ 第五十一轮：**不要再在这里「把每个老师的默认班补进关联表」**。
+    # 一个班只有一位班主任，把所有人的默认班都补一遍，正是
+    # 「一个班冒出两个班主任」的制造机（真机上 haixuan-ls 就这么被
+    # 重启时的 seed 挂回大数据2502 的）。默认班关联由 seed 在启动时
+    # 按规则回填；用例需要谁出现，就**单独**补谁（见下面的院长探针）。
     from sqlalchemy import text as _t2
     from app.db import engine as _engine2
 
-    with _engine2.begin() as c:
-        c.execute(
-            _t2(
-                "INSERT INTO sys_user_class (user_id, class_id) "
-                "SELECT id, class_id FROM sys_user "
-                "WHERE status = 1 AND (role = 'TEACHER' OR (role = 'DEAN' AND dean_only = 0)) "
-                "ON DUPLICATE KEY UPDATE class_id = VALUES(class_id)"
-            )
-        )
     st, j = call("GET", "/college/advisers", None, D)
     adv = data_of(j) or {}
     arows = adv.get("rows") or []
@@ -4099,25 +4147,33 @@ def test_a23_college_views() -> None:
           listed <= legit,
           f"名册里混进了不该有的账号：{sorted(listed - legit)}")
     # 兼班主任的院长：他就是那个班的班主任，只是职务是院长。
-    # 只按 role=TEACHER 筛的话他会从名册上消失——名册写着「这个班的班主任是某某」，
-    # 而某人在系统里明明管着这个班，那条信息就自相矛盾了。
-    # 第三十二轮：名册按**关联表**（谁是哪个班的班主任）列。
-    # 兼班主任的院长是班主任，所以也要在关联表里——直写库造探针时
-    # 得手动补上这一条（新建账号的路径会自动补）。
+    # 第五十一轮起**一个班只能有一位班主任**，院长也占这个名额——所以不能
+    # 再把他挂到 test 的班上（那会人为造出两个班主任）。用测试自己的夹具班
+    # 造一条干净的「院长是班主任」数据。
+    dean_fixture = _fixture_class("回归名册院长夹具班")
     with _engine2.begin() as c:
         c.execute(
-            _t2("INSERT INTO sys_user_class (user_id, class_id) "
-               "SELECT id, class_id FROM sys_user WHERE username = :u "
-               "ON DUPLICATE KEY UPDATE class_id = VALUES(class_id)"),
-            {"u": DEAN_PROBE + "_college"},
+            _t2("INSERT INTO sys_user_class (user_id, class_id, is_adviser) "
+                "SELECT id, :c, 1 FROM sys_user WHERE username = :u "
+                "ON DUPLICATE KEY UPDATE is_adviser = 1"),
+            {"c": int(dean_fixture), "u": DEAN_PROBE + "_college"},
         )
     st, j = call("GET", "/college/advisers", None, D)
     arows2 = data_of(j) or {}
-    dean_listed = any(
-        r.get("username") == DEAN_PROBE + "_college" for r in (arows2.get("rows") or [])
-    )
-    check("兼班主任的院长出现在班主任名册里", dean_listed,
-          "名册漏了兼班主任的院长")
+    dean_rows = [
+        r for r in (arows2.get("rows") or [])
+        if r.get("username") == DEAN_PROBE + "_college"
+    ]
+    check("兼班主任的院长出现在班主任名册里", len(dean_rows) == 1,
+          f"名册漏了兼班主任的院长：{dean_rows}")
+    check("院长占的就是那个班唯一的一位班主任",
+          bool(dean_rows) and dean_rows[0].get("classId") == int(dean_fixture),
+          str(dean_rows)[:200])
+    check("同一个班不会因为院长而多出一行",
+          len([r for r in (arows2.get("rows") or [])
+               if r.get("classId") == int(dean_fixture)]) == 1,
+          str([r for r in (arows2.get("rows") or [])
+               if r.get("classId") == int(dean_fixture)])[:200])
     # 第二个账号的手机号/最近登录**必须**也在（一人一行就是为了这个）
     two_teachers = [r for r in arows if r.get("username") == "test"]
     check("账号行的手机号/最近登录是它自己的（不是班里第一个人的）",
@@ -4137,6 +4193,7 @@ def test_a23_college_views() -> None:
 
     # 清理
     _purge_students_prefix("col_u_")
+    _purge_fixture_class("回归名册院长夹具班")
     _purge_user(DEAN_PROBE + "_college")
 
 
@@ -4182,6 +4239,11 @@ def test_a24_pure_dean() -> None:
         ("POST", "/api/tasks"),
         ("PUT", "/api/tasks/1"),
         ("DELETE", "/api/tasks/1"),
+        # 第四十九轮：**按状态筛选导出**是 GET /export 的 POST 兄弟。
+        # 漏在这里 = 纯院长点「导出（未返校 6 人）」直接 403，页面上就是
+        # 「点了没反应/报错」，而白名单默认方向是「关」，忘加不可见。
+        ("GET", "/api/tasks/1/export"),
+        ("POST", "/api/tasks/1/export"),
     ):
         check(f"纯院长允许 {method} {path}", pure_dean_allowed(method, path), "不在白名单里")
 
@@ -5179,6 +5241,11 @@ def test_a29_multi_class() -> None:
     teacher = next((u for u in items if u["username"] == "test"), None)
     if not check("成员列表里找得到班主任 test", teacher is not None, str(items)[:200]):
         return
+    # 第五十一轮：先记下 test 原本「能管的班」，收尾**原样还回去**。
+    # 只还原默认班（旧写法）会把库里本来就有的第二个班弄丢——
+    # 收尾的「账号回到基线」跟着红，而红的原因还不在本用例里，极难查。
+    orig_classes = [int(c) for c in
+                    (teacher.get("managedClassIds") or [teacher["classId"]])]
     st, j = call("PUT", "/users/%d" % teacher["id"],
                  {"classIds": [teacher["classId"], int(cid2)]}, D)
     check("给班主任加第二个班 -> 200", st == 200, f"st={st} {msg_of(j)}")
@@ -5212,7 +5279,8 @@ def test_a29_multi_class() -> None:
     check("★ 成员列表能看到另一个班的人（跨班）", bool(names), str(names)[:120])
 
     # ---------- 清理：撤掉那个班 + 删探针学生 ----------
-    call("PUT", "/users/%d" % teacher["id"], {"classIds": [teacher["classId"]]}, D)
+    # 还原成**进来时的样子**（一人可能带好几个班，别只留默认班）
+    call("PUT", "/users/%d" % teacher["id"], {"classIds": orig_classes}, D)
     with _engine.begin() as c:
         c.execute(_t("DELETE FROM student_record_value WHERE record_id IN "
                      "(SELECT id FROM student_record WHERE student_no LIKE 'Z98%')"))
@@ -5341,7 +5409,12 @@ def test_a31_class_teachers() -> None:
     teacher = next((t for t in cands if t["username"] == "test"), None)
     if not check("找得到 test 账号", teacher is not None, str(cands)[:160]):
         return
-    st, j = call("PUT", "/college/classes/%d/teachers" % c1, {"teacherIds": [teacher["id"]]}, D)
+    # 第五十一轮：记下 test **进来时**「能管的班」，收尾原样还回去。
+    # 这个账号在库里本来就可能带好几个班（一人带多班是允许的），
+    # 只还原默认班的旧写法会把别的班弄丢，最后「账号回到基线」莫名变红。
+    st, j = call("GET", "/auth/me", None, T)
+    orig_classes = [int(c) for c in ((data_of(j) or {}).get("classIds") or [])]
+    st, j = call("PUT", "/college/classes/%d/teachers" % c1, {"teacherId": teacher["id"]}, D)
     check("★ 学院成员管理里改班主任 -> 200", st == 200, f"st={st} {msg_of(j)}")
     st, j = call("GET", "/college/advisers", None, D)
     rows = (data_of(j) or {}).get("rows") or []
@@ -5407,21 +5480,18 @@ def test_a31_class_teachers() -> None:
 
     # ---------- 清理 ----------
     _purge_students_prefix("Z97")
-    # 恢复原状：c1 的班主任本来是 test + dean，别把下一轮的名册测试搞坏
+    # 恢复原状：c1 的班主任本来是 test，dean 只是「我带的班」（管理权）
     with _engine.begin() as c:
         c.execute(_t("DELETE FROM sys_user_class WHERE class_id = :c"), {"c": c1})
-        for un in ("test", "dean"):
+        for un, adv in (("test", 1), ("dean", 0)):
             c.execute(
-                _t("INSERT INTO sys_user_class (user_id, class_id) "
-                   "SELECT id, :c FROM sys_user WHERE username = :u"),
-                {"c": c1, "u": un},
+                _t("INSERT INTO sys_user_class (user_id, class_id, is_adviser) "
+                   "SELECT id, :c, :a FROM sys_user WHERE username = :u"),
+                {"c": c1, "u": un, "a": adv},
             )
-    # 夹具班删掉，顺带把「我带的班」恢复成只有本班
-    with _engine.connect() as c:
-        home_class = c.execute(
-            _t("SELECT class_id FROM sys_user WHERE username = 'test' LIMIT 1")
-        ).scalar()
-    call("PUT", "/users/%d" % teacher["id"], {"classIds": [int(home_class)]}, D)
+    # 夹具班删掉，顺带把「我带的班」**还原成进来时的样子**
+    # （第五十一轮：一人可带多班，只留默认班等于改动了用户数据）
+    call("PUT", "/users/%d" % teacher["id"], {"classIds": orig_classes}, D)
     _purge_fixture_class("回归班主任夹具班")
     _purge_user(DEAN_PROBE + "_tch")
 
@@ -5572,12 +5642,12 @@ def test_a32_task_scope() -> None:
     check("院长答自己发的学院任务 -> 403（你出的题你自己不算）", st == 403,
           f"st={st} {msg_of(j)}")
 
-    # ---------- ④ 明细的口径：班主任只看得到自己班那一份 ----------
-    st, j = call("GET", f"/tasks/{college_tid}/detail", None, T)
-    check("班主任看学院任务明细 -> 403（别人的班的情况不该给他看）", st == 403,
-          f"st={st} {msg_of(j)}")
+    # ---------- ④ 明细的口径：只有院长 / 发布人能看 ----------
+    # 学院任务的明细是院长看回收情况用的，班主任走点名页填自己班，同学一律 403
     st, j = call("GET", f"/tasks/{college_tid}/detail", None, D)
     check("院长看学院任务明细 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    st, j = call("GET", f"/tasks/{college_tid}/detail", None, M)
+    check("同学看学院任务明细 -> 403", st == 403, f"st={st} {msg_of(j)}")
 
     # ---------- ⑤ 可见性分三档 ----------
     st, j = call("GET", "/tasks?view=mine", None, T)
@@ -6352,6 +6422,607 @@ def test_a37_import_template() -> None:
         purge()
 
 
+def test_a38_user_batch() -> None:
+    """账号批量管理（第四十四轮）：停用 / 启用 / 删除 / 重置密码。
+
+    重点验三件事：
+    1. 规则和单条**同口径**（自己 / 等级护栏 / 零引用删除）
+    2. 「能做就做，做不了的跳过并说明」——跳过的要带原因回来
+    3. 重置密码回执带初始密码（前端要靠它提示老师通知学生）
+    """
+    print("\n--- 三十八. 账号批量管理 ---")
+    T = login("test", "123456")
+    if not check("班主任探针可用", bool(T), "登录失败"):
+        return
+
+    names = ["batch_a", "batch_b", "batch_c"]
+    ids = [ensure_user(n, "MEMBER", f"批量{n[-1]}", T) for n in names]
+    if not check("三个批量探针建好", all(ids), str(ids)):
+        return
+
+    # ---------- 入参层 ----------
+    st, j = call("POST", "/users/batch", {"action": "disable", "userIds": []}, T)
+    check("空 id 列表 -> 400", st == 400, f"st={st} {msg_of(j)}")
+    st, j = call("POST", "/users/batch", {"action": "nuke", "userIds": ids}, T)
+    check("非法动作 -> 400", st == 400, f"st={st} {msg_of(j)}")
+
+    # ---------- 批量停用 ----------
+    st, j = call("POST", "/users/batch", {"action": "disable", "userIds": ids}, T)
+    d = data_of(j) or {}
+    check("批量停用 -> 200 且三人全处理、无跳过",
+          st == 200 and d.get("changed") == 3 and not d.get("skipped"), f"st={st} {str(d)[:160]}")
+    st2, _ = call("POST", "/auth/login", {"username": names[0], "password": "123456"})
+    check("停用后本人登录失败", st2 != 200, f"st={st2}")
+
+    # ---------- 批量启用 ----------
+    st, j = call("POST", "/users/batch", {"action": "enable", "userIds": ids}, T)
+    d = data_of(j) or {}
+    check("批量启用 -> 200", st == 200 and d.get("changed") == 3, f"st={st} {str(d)[:120]}")
+    st2, _ = call("POST", "/auth/login", {"username": names[0], "password": "123456"})
+    check("启用后能登录", st2 == 200, f"st={st2}")
+
+    # ---------- 批量重置密码 ----------
+    st, j = call("POST", "/users/batch", {"action": "resetPassword", "userIds": [ids[0]]}, T)
+    d = data_of(j) or {}
+    check("重置密码回执带初始密码", st == 200 and d.get("password") == "123456", str(d)[:140])
+    st2, _ = call("POST", "/auth/login", {"username": names[0], "password": "123456"})
+    check("重置后可用初始密码登录", st2 == 200, f"st={st2}")
+    # 旧密码必须失效（否则「重置」只是个摆设）
+    st2, _ = call("POST", "/auth/login", {"username": names[0], "password": "Abc12345"})
+    check("重置后旧密码失效", st2 != 200, f"st={st2}")
+
+    # ---------- 跳过：自己 / 不存在的 id ----------
+    me = (data_of(call("GET", "/auth/me", None, T)[1]) or {}).get("id")
+    st, j = call("POST", "/users/batch", {"action": "disable", "userIds": [me, 999999999, ids[0]]}, T)
+    d = data_of(j) or {}
+    reasons = {s.get("userId"): s.get("reason") for s in d.get("skipped") or []}
+    check("自己被跳过并说明", me in reasons and "自己" in (reasons.get(me) or ""), str(reasons)[:160])
+    check("不存在的 id 被跳过并说明", 999999999 in reasons, str(reasons)[:160])
+    check("同批里能动的那条照常处理", d.get("changed") == 1, str(d)[:160])
+
+    # ---------- 等级护栏：低等级不能批量动高等级 ----------
+    mon = ensure_user("batch_mon", "MONITOR", "批量班长", T)
+    if mon:
+        # 班主任 > 班长：能停用
+        st, j = call("POST", "/users/batch", {"action": "disable", "userIds": [mon]}, T)
+        d = data_of(j) or {}
+        check("班主任能批量停用班长（等级更高）", st == 200 and d.get("changed") == 1, str(d)[:140])
+        call("POST", "/users/batch", {"action": "enable", "userIds": [mon]}, T)
+        # 反过来：班长动不了班主任
+        M = login("batch_mon", "123456")
+        if M:
+            st, j = call("POST", "/users/batch", {"action": "disable", "userIds": [me]}, M)
+            d = data_of(j) or {}
+            check("班长不能批量停用班主任（等级护栏）",
+                  st == 200 and d.get("changed") == 0 and bool(d.get("skipped")),
+                  f"st={st} {str(d)[:140]}")
+
+    # ---------- 批量删除 ----------
+    st, j = call("POST", "/users/batch", {"action": "delete", "userIds": ids}, T)
+    d = data_of(j) or {}
+    check("批量删除零引用账号 -> 三人全删", st == 200 and d.get("changed") == 3, str(d)[:160])
+    for n in names:
+        check(f"{n} 已从列表消失", find_user(n, T) is None, "")
+
+    # ---------- 清理 ----------
+    drop_user("batch_mon", T)
+    for n in names:
+        drop_user(n, T)
+
+
+def test_a39_task_export_filter() -> None:
+    """**按状态筛选的导出**（第四十九轮）：`POST /tasks/{id}/export`。
+
+    仪表盘的顶部卡片既是统计也是筛选器：点「已返校」只导已返校、
+    点「未返校」只导未返校。四条重点：
+
+    1. **文件 = 屏幕上的行**：传哪些 `recordIds` 就出哪些人，一个不多一个不少。
+       「哪些值算未返校」的关键词表只在前端 `utils/taskStatus.ts` 一份，
+       后端只做集合过滤**不认语义**——两处各写一份关键词迟早漂，
+       屏幕 6 人、文件 8 人，没人查得出来。
+    2. 筛选口径写进**副标题和文件名**：拿到文件的人得知道这不是全量，
+       否则会拿 6 行的名单去对 35 个人的班，对不上还以为是漏导。
+    3. 空列表 / 一个都没命中 → 400（全量请走 GET，别发一份空文件）。
+    4. 权限与 GET 同一道闸；执行身份用**纯院长**（dean_only=1），
+       顺带端到端验白名单——`_PURE_DEAN_ALLOWED` 漏一条就是 403。
+    """
+    print("\n--- 三十九. 按状态筛选导出 ---")
+    from io import BytesIO as _B  # noqa: PLC0415
+    from urllib.parse import unquote as _unq  # noqa: PLC0415
+
+    import urllib.request  # noqa: PLC0415
+
+    from openpyxl import load_workbook as _Lw  # noqa: PLC0415
+
+    def rows_of(blob: bytes) -> list[list]:
+        ws = _Lw(_B(blob)).active
+        return [[c.value for c in row] for row in ws.iter_rows()]
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    from sqlalchemy import text as _t  # noqa: PLC0415
+
+    from app.db import engine as _engine  # noqa: PLC0415
+
+    EXP_PROBE = DEAN_PROBE + "_exp"
+
+    def cleanup(task_id=None) -> None:
+        if task_id:
+            call("DELETE", f"/tasks/{task_id}", None, D)
+        with _engine.begin() as c:
+            c.execute(_t("DELETE FROM cls_task WHERE title = :p"),
+                      {"p": "regress 筛选导出"})
+        _purge_user(EXP_PROBE)
+
+    # ---------- 执行身份：纯院长（顺带验白名单） ----------
+    D = _insert_dean_probe(EXP_PROBE)
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+    with _engine.begin() as c:
+        c.execute(_t("UPDATE sys_user SET dean_only = 1 WHERE username = :u"),
+                  {"u": EXP_PROBE})
+
+    # ---------- ① 建一条学院任务（纯院长的本职） ----------
+    st, j = call("POST", "/tasks", {"title": "regress 筛选导出", "question": "返校了吗？",
+                                    "qtype": "SINGLE", "options": ["到校", "未到", "请假"],
+                                    "allowText": True, "scope": "COLLEGE"}, D)
+    if not check("纯院长发学院任务 -> 200（白名单没漏）", st == 200, f"st={st} {msg_of(j)}"):
+        cleanup()
+        return
+    tid = (data_of(j) or {}).get("id")
+
+    # ---------- ② 明细里取两行当「筛选命中」 ----------
+    st, j = call("GET", f"/tasks/{tid}/detail", None, D)
+    d = data_of(j) or {}
+    # 带上班名：断言「只输出命中的班」时不能假设两行一定同一个班
+    all_rows = [(cl.get("className"), r)
+                for cl in (d.get("classes") or []) for r in cl.get("rows") or []]
+    total = (d.get("answered") or 0) + (d.get("unanswered") or 0)
+    if not check("纯院长看明细 -> 200 且名册不空", st == 200 and len(all_rows) >= 3,
+                 f"st={st} rows={len(all_rows)}"):
+        cleanup(tid)
+        return
+    pick = all_rows[:2]
+    ids = [r["recordId"] for _, r in pick]
+    want_names = {r["name"] for _, r in pick}
+    want_nos = {r["studentNo"] for _, r in pick}
+    want_classes = {cn for cn, _ in pick}
+
+    # ---------- ③ 筛选拿文件（连响应头一起看，文件名是产品的一部分） ----------
+    req = urllib.request.Request(
+        f"http://127.0.0.1:8080/api/tasks/{tid}/export",
+        data=json.dumps({"recordIds": ids, "label": "未返校"},
+                        ensure_ascii=False).encode(),
+        headers={"Authorization": f"Bearer {D}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as x:
+            st, blob, hdr = x.status, x.read(), dict(x.headers)
+    except urllib.error.HTTPError as e:
+        st, blob, hdr = e.code, e.read(), dict(e.headers)
+    check("筛选拿文件 -> 200 且是 xlsx", st == 200 and blob[:2] == b"PK", f"st={st}")
+    disp = next((v for k, v in hdr.items() if k.lower() == "content-disposition"), "")
+    check("文件名带筛选名", _unq(disp).endswith("-未返校-回答.xlsx"), disp)
+
+    grid = rows_of(blob)
+    sub = grid[1][0] if len(grid) > 1 else ""
+    check("副标题写明筛选口径与人数", "筛选：未返校（2 人）" in (sub or ""), repr(sub))
+    data_rows = [r for r in grid[3:] if r[3]]  # 姓名列非空才是数据行（班小标题只占第 1 列）
+    check("恰好导出那两行（不多不少）", len(data_rows) == 2, f"n={len(data_rows)}")
+    check("就是屏幕上那两个人", {r[3] for r in data_rows} == want_names,
+          str([r[3] for r in data_rows]))
+    check("学号对得上", {r[2] for r in data_rows} == want_nos, str([r[2] for r in data_rows]))
+    heads = [r[0] for r in grid[3:] if r[0] and r[3] is None]  # 班小标题只占第 1 列
+    check("只输出命中的班（没命中的班整段不出现）",
+          len(heads) == len(want_classes), f"heads={heads}")
+    check("班标题是筛选口径而非全量口径",
+          bool(heads) and all("筛选出" in h for h in heads), str(heads)[:160])
+
+    # ---------- ④ 不带 label 也不能装成全量 ----------
+    st, blob = _download(f"/tasks/{tid}/export", D, payload={"recordIds": ids})
+    grid = rows_of(blob)
+    check("不带 label -> 200", st == 200, f"st={st}")
+    check("副标题仍有筛选字样（否则会被当成全量）",
+          "筛选：所选行（2 人）" in ((grid[1][0] if len(grid) > 1 else "") or ""),
+          repr(grid[1][0] if len(grid) > 1 else ""))
+
+    # ---------- ⑤ 该拒绝的 ----------
+    st, body = _download(f"/tasks/{tid}/export", D, payload={"recordIds": []})
+    check("空 recordIds -> 400（全量请走 GET）", st == 400, f"st={st} {body[:80]!r}")
+    st, body = _download(f"/tasks/{tid}/export", D, payload={"recordIds": [999999999]})
+    check("一个都没命中 -> 400（不发只有表头的空文件）", st == 400, f"st={st} {body[:80]!r}")
+
+    # 权限：和 GET 同一道闸，普通成员拿不到
+    TM = login("test", "123456")
+    M = ensure_user("exp_member_39", "MEMBER", "筛选导出探针", TM) if TM else None
+    MK = login("exp_member_39", "123456") if M else None
+    if MK:
+        st, body = _download(f"/tasks/{tid}/export", MK, payload={"recordIds": ids})
+        check("普通成员筛选拿文件 -> 403（和 GET 同闸）", st == 403, f"st={st}")
+    if TM:
+        drop_user("exp_member_39", TM)
+
+    # ---------- ⑥ GET 全量不受影响（老行为不能被这次改动带偏） ----------
+    st, blob = _download(f"/tasks/{tid}/export", D)
+    grid = rows_of(blob)
+    full_rows = [r for r in grid[3:] if r[3]]
+    check("GET 全量 -> 200", st == 200 and blob[:2] == b"PK", f"st={st}")
+    check("全量行数 = 名册人数", len(full_rows) == total,
+          f"got={len(full_rows)} total={total}")
+    check("全量没有筛选字样", "筛选：" not in ((grid[1][0] if len(grid) > 1 else "") or ""),
+          repr(grid[1][0] if len(grid) > 1 else ""))
+    check("全量仍是「已填/共」口径",
+          f"共 {total} 人" in ((grid[1][0] if len(grid) > 1 else "") or ""),
+          repr(grid[1][0] if len(grid) > 1 else ""))
+
+    cleanup(tid)
+
+
+def test_a40_adviser_template_roundtrip() -> None:
+    """**班主任导入模板必须「填完直接传回」**（第五十轮）。
+
+    起因：用户下载模板、填好数据导入，**必然**报「表格里必须有「姓名」和
+    「登录名」列」。根因是模板把标题/说明垫在表头前面（表头在第 3 行），
+    而导入只认第一行——模板自己把自己废了，用户填什么都没用。
+    `build_template_xlsx` 的 docstring 早把这条铁律写死了（「模板唯一的用途
+    是填完直接传回来」），班主任模板没照着做，而回归里没有「下载→填→导回」
+    的往返断言，于是它活到了用户手里。
+
+    四条重点：
+
+    1. **表头就在第 1 行**：下载 → 填一行 → 导入，全程不手改文件结构。
+    2. 说明文字放**第二张 sheet**（导入只读第一张表，说明写哪儿都不碍事）。
+    3. **旧布局也要能导**：表头在第 3 行的历史模板、用户自己加了标题行的
+       表——导入端往前扫几行找表头。用户手里**已经填好的文件**不能作废，
+       逼人家重新下载重填一遍说不过去。
+    4. 找不到表头时的报错要**说人话**（点明「前 N 行里没找到」，
+       别再让人以为是自己数据填错了位置）。
+    """
+    print("\n--- 四十. 班主任导入模板往返 ---")
+    from io import BytesIO as _B  # noqa: PLC0415
+
+    from openpyxl import load_workbook as _Lw  # noqa: PLC0415
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+
+    FIX = "回归班主任导入夹具班"
+    FIX_OLD = "回归班主任导入夹具班二"  # 旧布局那一行单独一个空班，见 ③
+    ADV_PROBE = DEAN_PROBE + "_adv"
+    TEACHER_U = "adv_rt_t1"     # 新模板导入建出来的账号
+    OLD_U = "adv_rt_t2"         # 旧布局文件导入建出来的账号
+
+    def purge() -> None:
+        for u in (TEACHER_U, OLD_U, ADV_PROBE):
+            _purge_user(u)
+        _purge_fixture_class(FIX)
+        _purge_fixture_class(FIX_OLD)
+
+    purge()
+    D = _insert_dean_probe(ADV_PROBE)
+    if not check("院长探针可用", bool(D), "建号失败"):
+        return
+    fid = _fixture_class(FIX)
+    fid_old = _fixture_class(FIX_OLD)
+    if not check("夹具班可用", bool(fid) and bool(fid_old), f"{fid}/{fid_old}"):
+        purge()
+        return
+
+    try:
+        # ---------- ① 下载模板：表头在第 1 行 ----------
+        st, body = _get_raw("/college/advisers/template", D)
+        check("下载模板 -> 200 且是 xlsx", st == 200 and body[:2] == b"PK", f"st={st}")
+        if not check("模板下载成功", st == 200, f"st={st}"):
+            return
+        wb = _Lw(_B(body))
+        check("模板两张表：班主任导入 + 填写说明",
+              wb.sheetnames == ["班主任导入", "填写说明"], str(wb.sheetnames))
+        hdr = [c.value for c in wb["班主任导入"][1]][:5]
+        check("★ 第 1 行就是表头（姓名/登录名/带的班都在）",
+              hdr == ["姓名", "登录名", "初始密码", "手机号", "带的班"], str(hdr))
+        hs = wb["填写说明"]
+        check("说明页讲清必填项与默认密码",
+              any("姓名、登录名必填" in str(hs.cell(row=r, column=1).value or "")
+                  for r in range(1, 6)), str(hs["A1"].value))
+
+        # ---------- ② 按模板填一行，原样导回去 ----------
+        ws = wb["班主任导入"]
+        ws.cell(row=2, column=1, value="往返老师")
+        ws.cell(row=2, column=2, value=TEACHER_U)
+        ws.cell(row=2, column=5, value=FIX)
+        buf = _B()
+        wb.save(buf)
+        st, j = _post_multipart(
+            "/college/advisers/import", "file", "班主任导入模板.xlsx", buf.getvalue(), D)
+        r = data_of(j) or {}
+        check("★ 按模板填的行能直接导入（created=1）",
+              st == 200 and int(r.get("created") or 0) == 1,
+              f"st={st} {str(r)[:160]}")
+        st, j = call("GET", "/college/advisers", None, D)
+        rows = (data_of(j) or {}).get("rows") or []
+        check("★ 名册里出现导入的班主任，「带的班」也对",
+              any(x.get("username") == TEACHER_U and x.get("classId") == fid
+                  for x in rows), str(rows)[:200])
+
+        # ---------- ③ 旧布局（标题垫在前面，表头在第 3 行）也要能导 ----------
+        #
+        # ⚠ 必须导到**另一个空班**：第五十一轮起一个班只有一位班主任，
+        # 往 FIX 里再导第二位老师会被正当地拦下（那正是 a41 要测的规则）。
+        # 这里测的是「表头能认出来」，不能让它撞在别的规则上。
+        old_file = _mk_xlsx([
+            ["班主任导入模板 · 填好传回「学院 → 成员管理 → 导入班主任」"],
+            ["姓名、登录名必填；班级必须已存在，多个用顿号/逗号分隔。"],
+            ["姓名", "登录名", "初始密码", "手机号", "带的班"],
+            ["旧版老师", OLD_U, "", "", FIX_OLD],
+        ])
+        st, j = _post_multipart(
+            "/college/advisers/import", "file", "旧版模板.xlsx", old_file, D)
+        r2 = data_of(j) or {}
+        check("★ 表头在第 3 行的旧文件也能导（用户已填好的不作废）",
+              st == 200 and int(r2.get("created") or 0) == 1,
+              f"st={st} {str(r2)[:160]}")
+        st, j = call("GET", "/college/advisers", None, D)
+        rows2 = (data_of(j) or {}).get("rows") or []
+        check("★ 旧布局导进来的老师挂在它自己那个班",
+              any(x.get("username") == OLD_U and x.get("classId") == fid_old
+                  for x in rows2), str(rows2)[:240])
+
+        # ---------- ④ 没有表头时的报错要说人话 ----------
+        bad = _mk_xlsx([["乱七八糟的表头"], ["第二行也是乱的"]])
+        st, j = _post_multipart(
+            "/college/advisers/import", "file", "乱表.xlsx", bad, D)
+        check("没找到表头 -> 400 且点明「前 N 行里没找到」",
+              st == 400 and "没找到" in msg_of(j), f"st={st} {msg_of(j)}")
+
+        # ---------- ⑤ 权限：学院层的东西，班主任拿不到 ----------
+        TM = login("test", "123456")
+        if TM:
+            st, _ = _get_raw("/college/advisers/template", TM)
+            check("班主任下载模板 -> 403（学院层）", st == 403, f"st={st}")
+    finally:
+        purge()
+
+
+def test_a41_one_teacher_per_class() -> None:
+    """**一个班一个班主任**（第五十一轮收紧）：安排=顶替，其余入口撞车报错。
+
+    起因：用户在「班主任名册」看到大数据2502挂着 test-ls 和 haixuan-ls
+    两个班主任账号，问「一个班不可能有两个班主任吧」。第三十二轮把
+    「班主任」做成班的多对多属性时顺手允许了一班多个（当时的口径是
+    「正、副班主任」）——现在收紧成**一个班一位**：
+
+    - 「一个老师带几个班」照旧（**人**的属性，多对多不动）
+    - 「一个班几个老师」不再允许；**改班主任安排是唯一允许覆盖的入口**
+      （显式点名顶替），其余入口撞车一律报错/跳过并指路到这里
+    - **院长兼班主任与普通班主任同权同额**：院长也占同一个名额，一个班
+      无论角色都只出现一位；院长被顶替后仍保留「能管这个班」，只是不占名册位
+
+    七条重点：
+    1. 安排 = 顶替：换人后名册只剩新的（旧的被摘掉）
+    2. 导入撞车 → 该行跳过 + 报错点名班和现任；**同一老师重导不算撞**（更新资料）
+    3. 本人「我带的班」加一个已被占的班 → 400，文案带班名和现任；
+       **默认班**撞车则静默不挂名册行（否则被顶替的班主任连个人信息都存不了）
+    4. 建班主任号时操作者所在班已有班主任 → 400（不静默变两个）
+    5. 给无班主任的班加人、一个老师带多个班 → 照常通过
+    6. `teacherId=null` 清空该班班主任
+    7. **院长占位**：先安排院长当班主任 → 别人导入/被安排时同样撞他；
+       换成普通班主任后，名册只剩一位，但院长**仍能管这个班**
+    """
+    print("\n--- 四十一. 一个班一个班主任 ---")
+    from sqlalchemy import text as _t  # noqa: PLC0415
+
+    from app.db import engine as _engine  # noqa: PLC0415
+    from app.security import hash_password as _hash  # noqa: PLC0415
+
+    FIX_A = "回归单师夹具班A"
+    FIX_B = "回归单师夹具班B"
+    A, B, C = "one_t_a", "one_t_b", "one_t_c"
+    NA, NB, NC = "探针甲", "探针乙", "探针丙"  # 真实姓名进报错文案，断言靠它
+
+    def purge() -> None:
+        for u in (A, B, C, "one_t_d", DEAN_PROBE + "_one"):
+            _purge_user(u)
+        _purge_fixture_class(FIX_A)
+        _purge_fixture_class(FIX_B)
+
+    def make_teacher(username: str, real_name: str, class_id: int, link: bool) -> None:
+        """直写库造班主任探针（API 建号会被「班里已有班主任」拦——那正是本次要测的）。"""
+        with _engine.begin() as c:
+            c.execute(_t("DELETE FROM sys_user WHERE username = :u"), {"u": username})
+            c.execute(
+                _t(
+                    "INSERT INTO sys_user (class_id, username, password, real_name, "
+                    "role, status) VALUES (:c, :u, :p, :n, 'TEACHER', 1)"
+                ),
+                {"c": class_id, "u": username, "p": _hash("123456"), "n": real_name},
+            )
+            if link:
+                c.execute(
+                    _t("INSERT INTO sys_user_class (user_id, class_id, is_adviser) "
+                       "SELECT id, :c, 1 FROM sys_user WHERE username = :u"),
+                    {"c": class_id, "u": username},
+                )
+
+    def uid_of(u: str) -> int:
+        with _engine.connect() as c:
+            return int(c.execute(_t("SELECT id FROM sys_user WHERE username = :u"),
+                                 {"u": u}).scalar() or 0)
+
+    def teachers_of(cid: int) -> list[str]:
+        """名册口径：该班 `is_adviser=1` 的账号（院长也占位，与 advisers 一致）。"""
+        with _engine.connect() as c:
+            return [str(r[0]) for r in c.execute(
+                _t("SELECT u.username FROM sys_user_class uc "
+                   "JOIN sys_user u ON u.id = uc.user_id "
+                   "WHERE uc.class_id = :c AND uc.is_adviser = 1 AND u.status = 1 "
+                   "AND (u.role = 'TEACHER' OR (u.role = 'DEAN' AND u.dean_only = 0)) "
+                   "ORDER BY u.id"), {"c": cid})]
+
+    purge()
+    fid_a = _fixture_class(FIX_A)
+    fid_b = _fixture_class(FIX_B)
+    if not check("夹具班可用", bool(fid_a and fid_b), f"a={fid_a} b={fid_b}"):
+        purge()
+        return
+    make_teacher(A, NA, int(fid_a), link=True)    # A 带 A 班
+    make_teacher(B, NB, int(fid_b), link=True)    # B 带 B 班
+    make_teacher(C, NC, int(fid_b), link=False)   # C 存在但不带班（默认班 B）
+
+    D = _insert_dean_probe(DEAN_PROBE + "_one")
+    if not check("院长探针可用", bool(D), "建号失败"):
+        purge()
+        return
+
+    try:
+        # ---------- ① 安排 = 顶替 ----------
+        st, j = call("PUT", f"/college/classes/{fid_a}/teachers",
+                     {"teacherId": uid_of(A)}, D)
+        check("安排甲当 A 班班主任 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        check("★ 名册口径：A 班的班主任是甲",
+              teachers_of(int(fid_a)) == [A], str(teachers_of(int(fid_a))))
+
+        st, j = call("PUT", f"/college/classes/{fid_a}/teachers",
+                     {"teacherId": uid_of(B)}, D)
+        check("换成乙 -> 200（顶替不报冲突——这是唯一允许覆盖的入口）",
+              st == 200, f"st={st} {msg_of(j)}")
+        check("★ 顶替生效：A 班只剩乙（甲被摘掉）",
+              teachers_of(int(fid_a)) == [B], str(teachers_of(int(fid_a))))
+        # 第五十一轮：换班主任**不许搬走老师的默认班**（登录落点属于账号本人）。
+        # 以前会「对齐」，于是一个老师带两个班时，改一次安排就被搬一次，
+        # 下次登录落在别的班，自己的账目/学生全看不到。
+        with _engine.connect() as c:
+            b_default = int(c.execute(
+                _t("SELECT class_id FROM sys_user WHERE username = :u"), {"u": B}
+            ).scalar() or 0)
+        check("★ 换班主任不改老师的默认班（登录落点不动）",
+              b_default == int(fid_b), f"默认班={b_default} 预期={fid_b}")
+        # 乙此时同时带 A、B 两个班（安排只重写目标班，另一班的关联不动）
+        check("★ 一个老师带两个班（人的属性不受限）",
+              teachers_of(int(fid_a)) == [B] and teachers_of(int(fid_b)) == [B],
+              f"a={teachers_of(int(fid_a))} b={teachers_of(int(fid_b))}")
+
+        # ---------- ② 导入撞车：整行跳过 + 指路；同一老师重导不算撞 ----------
+        wb = _mk_xlsx([
+            ["姓名", "登录名", "初始密码", "手机号", "带的班"],
+            [NC, C, "", "", FIX_A],  # A 班已有乙 → 撞
+        ])
+        st, j = _post_multipart("/college/advisers/import", "file", "撞车.xlsx", wb, D)
+        imp = data_of(j) or {}
+        check("撞车行的导入请求本身 -> 200（行级跳过，不是整单 400）",
+              st == 200, f"st={st} {msg_of(j)}")
+        check("★ 撞车行被跳过（没有新增）",
+              int(imp.get("created") or 0) == 0 and int(imp.get("skipped") or 0) == 1,
+              str(imp)[:200])
+        check("★ 报错点名班级、现任班主任、并指路改班主任安排",
+              any(FIX_A in str(e) and NB in str(e) and "改班主任安排" in str(e)
+                  for e in (imp.get("errors") or [])),
+              str(imp.get("errors"))[:300])
+        check("★ 名册没被导入改动：A 班还是乙",
+              teachers_of(int(fid_a)) == [B], str(teachers_of(int(fid_a))))
+
+        # 同一老师重导（乙换手机号、两个班都带上）：自己不算撞车
+        wb2 = _mk_xlsx([
+            ["姓名", "登录名", "初始密码", "手机号", "带的班"],
+            ["探针乙改", B, "", "13900000000", f"{FIX_A}、{FIX_B}"],
+        ])
+        st, j = _post_multipart("/college/advisers/import", "file", "重导.xlsx", wb2, D)
+        imp2 = data_of(j) or {}
+        check("★ 同一老师重导不算撞车（updated=1，无跳过无报错）",
+              st == 200 and int(imp2.get("updated") or 0) == 1
+              and int(imp2.get("skipped") or 0) == 0
+              and not (imp2.get("errors") or []),
+              f"st={st} {str(imp2)[:200]}")
+
+        # ---------- ③ 本人「我带的班」 ----------
+        Ta = login(A, "123456")
+        if check("探针甲可登录", bool(Ta), "登录失败"):
+            # a) 默认班（已归乙）撞车：**静默不挂名册行**，不能把人锁死在存不了个人信息上
+            st, j = call("PUT", "/auth/profile", {"classIds": [int(fid_a)]}, Ta)
+            up_a = data_of(j) or {}
+            check("★ 甲只勾默认班 A（已归乙）-> 200 不报错",
+                  st == 200, f"st={st} {msg_of(j)}")
+            check("★ 默认班不占名册位：甲不在 A 班名册",
+                  A not in teachers_of(int(fid_a)), str(teachers_of(int(fid_a))))
+            check("★ 但管理权保留：回执里仍含默认班（登录落点不受影响）",
+                  int(fid_a) in [int(x) for x in (up_a.get("classIds") or [])],
+                  str(up_a)[:200])
+            # b) **显式勾选**一个已被占的班（非默认班）-> 400 指路
+            st, j = call("PUT", "/auth/profile",
+                         {"classIds": [int(fid_a), int(fid_b)]}, Ta)
+            check("★ 甲显式勾已被乙占的 B 班 -> 400",
+                  st == 400, f"st={st} {msg_of(j)}")
+            check("★ 报错带班名、现任、指路",
+                  FIX_B in msg_of(j) and NB in msg_of(j)
+                  and "改班主任安排" in msg_of(j), msg_of(j)[:200])
+
+        # ---------- ④ 建号撞车 -> 400 ----------
+        T = S["T"]  # 班主任 test，本班=云计算2502（他就是该班班主任）
+        st, j = call("POST", "/users",
+                     {"username": "one_t_d", "realName": "建号撞车",
+                      "password": "123456", "role": "TEACHER"}, T)
+        check("★ 在已有班主任的班里建班主任号 -> 400",
+              st == 400, f"st={st} {msg_of(j)}")
+        check("★ 报错指路改班主任安排", "改班主任安排" in msg_of(j), msg_of(j)[:200])
+        with _engine.connect() as c:
+            gone = c.execute(_t("SELECT COUNT(*) FROM sys_user WHERE username = 'one_t_d'")
+                             ).scalar()
+        check("★ 被拒的账号没有残留", int(gone or 0) == 0, str(gone))
+
+        # ---------- ⑤ 清空 + 给无班主任的班加人 ----------
+        st, j = call("PUT", f"/college/classes/{fid_b}/teachers", {"teacherId": None}, D)
+        check("★ 清空 B 班班主任 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        check("★ 名册：B 班没有班主任了", teachers_of(int(fid_b)) == [],
+              str(teachers_of(int(fid_b))))
+        st, j = call("PUT", f"/college/classes/{fid_b}/teachers",
+                     {"teacherId": uid_of(C)}, D)
+        check("★ 给无班主任的 B 班安排丙 -> 200（不撞车）",
+              st == 200 and teachers_of(int(fid_b)) == [C],
+              f"st={st} {str(teachers_of(int(fid_b)))}")
+
+        # ---------- ⑥ 院长兼班主任也占同一个名额 ----------
+        # 用户口径：「院长+班主任这个权限的话，跟班主任一样的，一个班级
+        # 只能出现一个班主任」。所以院长不能是「额外的第二位」。
+        DEAN_U = DEAN_PROBE + "_one"
+        dean_uid = uid_of(DEAN_U)
+        st, j = call("PUT", f"/college/classes/{fid_a}/teachers",
+                     {"teacherId": dean_uid}, D)
+        check("★ 安排院长当 A 班班主任 -> 200（顶替乙）",
+              st == 200, f"st={st} {msg_of(j)}")
+        check("★ 名册：A 班只有院长一位（院长占的就是那个名额）",
+              teachers_of(int(fid_a)) == [DEAN_U], str(teachers_of(int(fid_a))))
+
+        # 别的入口撞上「院长班主任」也必须报错指路——不能只拦 TEACHER。
+        wb3 = _mk_xlsx([
+            ["姓名", "登录名", "初始密码", "手机号", "带的班"],
+            [NC, C, "", "", FIX_A],
+        ])
+        st, j = _post_multipart("/college/advisers/import", "file", "撞院长.xlsx", wb3, D)
+        imp3 = data_of(j) or {}
+        check("★ 班里已有院长时导入别人 -> 行级跳过",
+              st == 200 and int(imp3.get("created") or 0) == 0
+              and int(imp3.get("skipped") or 0) == 1, str(imp3)[:200])
+        check("★ 报错点名院长并指路改班主任安排",
+              any("院长探针" in str(e) and "改班主任安排" in str(e)
+                  for e in (imp3.get("errors") or [])),
+              str(imp3.get("errors"))[:300])
+        check("★ 名册没被导入改动：A 班还是院长",
+              teachers_of(int(fid_a)) == [DEAN_U], str(teachers_of(int(fid_a))))
+
+        # 换成普通班主任：院长让位，但「能管这个班」必须留着
+        st, j = call("PUT", f"/college/classes/{fid_a}/teachers",
+                     {"teacherId": uid_of(B)}, D)
+        check("★ 用普通班主任顶替院长 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        check("★ 名册：A 班只剩普通班主任（院长不再占位）",
+              teachers_of(int(fid_a)) == [B], str(teachers_of(int(fid_a))))
+        st, j = call("GET", "/auth/me", None, D)
+        dean_classes = [int(x) for x in ((data_of(j) or {}).get("classIds") or [])]
+        check("★ 院长被顶替后**仍然能管** A 班（管理行保留，只是不占名册位）",
+              int(fid_a) in dean_classes, str(dean_classes)[:200])
+    finally:
+        purge()
+
+
 ALL_TESTS = [
     test_a00_encoding_guards,
     test_a00_bootstrap,
@@ -6391,7 +7062,11 @@ ALL_TESTS = [
     test_a35_create_class,
     test_a36_reg_status,
     test_a37_import_template,
+    test_a38_user_batch,
     test_a28_college_transfer,
+    test_a39_task_export_filter,
+    test_a40_adviser_template_roundtrip,
+    test_a41_one_teacher_per_class,
     test_a15_cleanup,
 ]
 
@@ -6402,6 +7077,21 @@ def main() -> int:
     print("=" * 74)
     for fn in ALL_TESTS:
         fn()
+        # 第五十一轮：每个用例收尾后检查**常驻班主任 test 的班级关联**没被改坏。
+        #
+        # 为什么需要这道守卫：测「我带的班 / 改班主任安排」的用例会临时重写
+        # `sys_user_class`，而 `return` / 异常都会跳过它们自己的清理段——
+        # 那一刻丢的不是测试数据，是**用户真实账号带哪个班**。
+        # 曾经就这么丢过：跑完回归，test 少带了「大数据2502」，
+        # 最后只表现为「账号回到基线」红了一条，查了很久才定位。
+        # 发现被改坏时**当场写回基线**，让后面的用例继续跑得下去，同时记一条失败。
+        base = S.get("root_classes0")
+        if base is not None and fn.__name__ != "test_a00_bootstrap":
+            now = root_class_links()
+            if now != base:
+                check(f"用例 {fn.__name__} 没还原 test 的班级安排", False,
+                      f"现在={now} 基线={base}")
+                restore_root_links(base)
     print()
     print("=" * 74)
     print(f"RESULT: {len(_passed)} passed, {len(_failed)} failed")

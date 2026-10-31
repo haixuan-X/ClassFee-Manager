@@ -282,6 +282,57 @@ def migrate_role_enum() -> None:
         log.info("已升级 sys_user.role 枚举：新增 %s", "、".join(missing))
 
 
+def _backfill_adviser_flags(conn) -> None:
+    """`sys_user_class.is_adviser` 刚加上时的一次性回填（第五十一轮）。
+
+    **只在新库刚 ALTER 出这一列时调用**（见 `add_audit_columns`），不能放进
+    `bootstrap()` 每次启动跑：用户手动清空某个班的班主任（`teacherId=null`）
+    之后重启，「每班挑一位」会把留下的管理行又升成班主任——正是这一轮
+    在修的「第二个班主任复活」bug。
+
+    挑人规则：每班从「班主任（TEACHER）或兼班主任的院长（DEAN 且
+    dean_only=0）」里挑一位，**优先 TEACHER**，再按最小 user id。院长的行
+    在旧数据里是「我带的班」（可能只是管理），只有确实没有 TEACHER 时
+    才会被选为班主任——这与用户的安排一致（有班主任的班不该被院长顶掉）。
+    """
+    conn.execute(text("UPDATE sys_user_class SET is_adviser = 0"))
+    class_ids = [
+        int(r[0])
+        for r in conn.execute(
+            text("SELECT DISTINCT class_id FROM sys_user_class ORDER BY class_id")
+        )
+    ]
+    picked = 0
+    for cid in class_ids:
+        uid = conn.execute(
+            text(
+                """
+                SELECT uc.user_id
+                FROM sys_user_class uc
+                JOIN sys_user u ON u.id = uc.user_id
+                WHERE uc.class_id = :c
+                  AND u.status = 1
+                  AND (u.role = 'TEACHER'
+                       OR (u.role = 'DEAN' AND u.dean_only = 0))
+                ORDER BY (u.role = 'TEACHER') DESC, uc.user_id ASC
+                LIMIT 1
+                """
+            ),
+            {"c": cid},
+        ).scalar()
+        if uid is None:
+            continue
+        conn.execute(
+            text(
+                "UPDATE sys_user_class SET is_adviser = 1 "
+                "WHERE class_id = :c AND user_id = :u"
+            ),
+            {"c": cid, "u": int(uid)},
+        )
+        picked += 1
+    log.info("已回填 %d 个班的「班主任」标志（每班一位）", picked)
+
+
 def add_audit_columns() -> None:
     """第十九轮起：给几张表补列（后来名字就不叫「审计」了，见下）。
 
@@ -328,6 +379,12 @@ def add_audit_columns() -> None:
         # DEFAULT 'CLASS' = 存量任务全是班内任务，行为一行都不用改。
         ("cls_task", "scope", "VARCHAR(8) NOT NULL DEFAULT 'CLASS' "
                              "COMMENT 'CLASS=本班任务；COLLEGE=学院任务（全学院可见，班主任应答）'"),
+        # 第五十一轮：`sys_user_class.is_adviser` —— 「这个班的班主任」标志。
+        # DEFAULT 0 = 只是能管（存量行全是这个状态），加完列立刻做一次
+        # 「每班挑一位」的回填（见下面的 `_backfill_adviser_flags`）。
+        ("sys_user_class", "is_adviser",
+         "TINYINT(1) NOT NULL DEFAULT 0 "
+         "COMMENT '1=这个班的班主任（名册口径）；0=只是能管理这个班'"),
     ]
     added: list[str] = []
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
@@ -359,6 +416,12 @@ def add_audit_columns() -> None:
         log.info("已补列：%s", "、".join(added))
     else:
         log.info("列已齐全，跳过迁移")
+    # 只在这一列**刚刚被加出来**时回填：老库的所有行都还是 DEFAULT 0，
+    # 需要按旧语义（有行=班主任）还原一位；新库由建表语句直接带列，
+    # 不会走到这里（也不该走——那时还没有数据）。
+    if "sys_user_class.is_adviser" in added:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            _backfill_adviser_flags(conn)
 
 
 def backfill_payable_roster() -> None:
@@ -512,6 +575,24 @@ def backfill_user_classes() -> int:
     但**回填**能让「可管理的班级」在界面上一眼看到全，不用去猜默认班算不算。
 
     幂等：先查再插。
+
+    ## 第五十一轮：重启不能把「第二个班主任」塞回来
+
+    一个班只有一位班主任。老师的默认班如果正好是某个班，这条回填就会写一条
+    关联，而这个关联在名册上就等于「他是这个班的班主任」。于是：
+    A 老师被安排当某班班主任、B 老师（默认班也是这个班）只要**重启一次**
+    就又被写回去，名册上立刻变成两个班主任——用户看到的就是这个 bug。
+
+    所以：**role=TEACHER 且该班已有别的在世班主任时，不写这条**。
+    管理权一点不受影响（`managed_class_ids` 恒含默认班），少的只是
+    「在名册上占一个班主任位」。院长不在此列——院长的默认班行是
+    「我带的班」（管理权），`is_adviser=0`，不占名册位（第五十一轮）。
+
+    ## 第五十一轮：写进去的是「管理行」，班主任位单独标
+
+    回填的行以前等于「班主任」，现在只等于「能管这个班」：
+    教师的默认班若没有别的班主任，写 `is_adviser=1`（他就是该班班主任）；
+    院长一律 `is_adviser=0`——他要当班主任得走「改班主任安排」显式指定。
     """
     with SessionLocal() as db:
         with db.begin():
@@ -520,7 +601,7 @@ def backfill_user_classes() -> int:
             # ⚠ 普通同学和访客**不是班主任**——把他们的默认班也写进关联表，
             # 名册上就会变成「这个班的班主任是全班同学」（实测过，很怪）。
             rows = db.execute(
-                select(SysUser.id, SysUser.class_id).where(
+                select(SysUser.id, SysUser.class_id, SysUser.role).where(
                     SysUser.status == 1,
                     or_(
                         SysUser.role == "TEACHER",
@@ -528,19 +609,39 @@ def backfill_user_classes() -> int:
                     ),
                 )
             ).all()
+            from .services.user_service import _class_teacher_conflict  # noqa: PLC0415
+
             added = 0
-            for uid, cid in rows:
+            skipped = 0
+            for uid, cid, role in rows:
                 exists = db.scalar(
                     select(SysUserClass.user_id).where(
                         SysUserClass.user_id == uid, SysUserClass.class_id == cid
                     )
                 )
-                if exists is None:
-                    db.add(SysUserClass(user_id=int(uid), class_id=int(cid)))
-                    added += 1
+                if exists is not None:
+                    continue
+                if role == "TEACHER" and _class_teacher_conflict(
+                    db, int(cid), exclude_user_id=int(uid)
+                ) is not None:
+                    skipped += 1
+                    continue
+                db.add(
+                    SysUserClass(
+                        user_id=int(uid),
+                        class_id=int(cid),
+                        is_adviser=1 if role == "TEACHER" else 0,
+                    )
+                )
+                added += 1
             db.flush()
     if added:
         log.info("已回填 %d 个账号的默认班到「可管理班级」", added)
+    if skipped:
+        log.info(
+            "跳过 %d 条默认班回填：该班已有班主任（一个班只留一位，见第五十一轮）",
+            skipped,
+        )
     return added
 
 

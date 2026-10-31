@@ -6,6 +6,7 @@
 *.p12
 *.jks
 id_rsa*
+.playwright-mcp
 
 # ---- Python 后端 ----
 server-py/.venv/

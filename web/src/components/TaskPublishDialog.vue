@@ -12,6 +12,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
+import { useCloseGuard } from '@/composables/useCloseGuard'
 import { publishTask, updateTask, TASK_QTYPES } from '@/api/tasks'
 import { disablePastDates, isPastDateTime } from '@/utils/date'
 import dayjs from 'dayjs'
@@ -100,7 +101,38 @@ watch(
       originalDeadline.value = null
       Object.assign(form, blank())
     }
+    // 存一份快照，供「有未保存改动就不让随手关」比对
+    baseline.value = snapshot()
   },
+)
+
+/** 表单当前状态的快照（字符串化，直接比对） */
+function snapshot(): string {
+  return JSON.stringify({
+    title: form.title,
+    question: form.question,
+    qtype: form.qtype,
+    options: form.options,
+    allowText: form.allowText,
+    deadline: form.deadline,
+  })
+}
+
+/** 打开那一刻的表单状态 */
+const baseline = ref('')
+
+/** 有没有未保存的改动（点了遮罩 / ✕ / Esc 时用） */
+const isDirty = computed(() => snapshot() !== baseline.value)
+
+/**
+ * 关闭拦截：填了内容就不让随手关。
+ *
+ * 三条关闭路径（点遮罩 / 点 ✕ / Esc）都汇到 `before-close`，拦这一处就够。
+ */
+const { onBeforeClose } = useCloseGuard(
+  visible,
+  isDirty,
+  () => '填了内容还没保存，关闭会丢掉这些改动。确定关闭？',
 )
 
 const needsOptions = computed(() => form.qtype === 'SINGLE' || form.qtype === 'MULTI')
@@ -189,7 +221,8 @@ async function submit() {
     v-model="visible"
     :title="editing ? '修改任务' : isCollege ? '发布学院任务' : '发布任务'"
     width="560px"
-    :close-on-click-modal="false"
+    :close-on-click-modal="true"
+    :before-close="onBeforeClose"
   >
     <!-- 学院任务：说清楚「谁来答」，发错了要返工 -->
     <el-alert
@@ -290,7 +323,7 @@ async function submit() {
       />
     </el-form>
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
+      <el-button @click="onBeforeClose">取消</el-button>
       <el-button type="primary" :loading="loading" @click="submit">
         {{ editing ? '保存' : '发布' }}
       </el-button>

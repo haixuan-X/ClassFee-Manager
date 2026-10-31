@@ -10,7 +10,7 @@ import { GUEST_SCOPE_OPTIONS, STAFF_ROLES } from '@/types'
 /** 四项全开。后端把库里的 NULL 展开成这个，前端拿不到 scope 时也用它兜底。 */
 const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
 
-/** `v1.1.0`。拉不到就空串，模板不渲染——宁可少一行，不要挂个假版本号。 */
+/** `v1.2.0`。拉不到就空串，模板不渲染——宁可少一行，不要挂个假版本号。 */
 const versionLabel = ref('')
 /**
  * 学院名（部署时在 `.env` 里声明 `CLASSFEE_COLLEGE_NAME`）。
@@ -551,8 +551,12 @@ watch(
     </nav>
 
     <div class="sidenav-foot">
-      余额由流水实时对账<br />
       <!--
+        这里原来写的是「余额由流水实时对账」——那是班费系统的旧口径。
+        系统定位已经改成学生信息管理，这句话挂在导航底下既没人看，
+        又容易让人以为进错了系统；整行删掉，页脚只留版本号。
+        与其硬凑一句不痛不痒的话，不如少说一句。
+
         版本号取自后端，不写死。以前这里是硬编码的 `v1.0`——每加一轮功能就
         忘了改，界面上挂着一个假版本号，比不显示还糟。拉不到就不渲染。
       -->

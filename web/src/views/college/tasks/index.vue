@@ -5,6 +5,8 @@ import { getErrorMessage } from '@/api/request'
 import { deleteTask, exportTaskDetail, setTaskOpen, setTaskPinned } from '@/api/tasks'
 import { fetchCollegeTasks } from '@/api/college'
 import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
+import TaskRollcallDrawer from '@/components/TaskRollcallDrawer.vue'
+import TaskDetailDashboard from '@/components/TaskDetailDashboard.vue'
 import { useUserStore } from '@/stores/user'
 import type { CollegeTaskList, CollegeTaskRow, TaskScope } from '@/types'
 
@@ -197,7 +199,38 @@ async function batchRemove() {
 /** 正在导出的任务 id：点一次就够，别让人连点出三个下载 */
 const exportingId = ref<number | null>(null)
 
-/** 导出这一条任务的全部回答（谁填了什么、谁还没填） */
+/** 点名抽屉（第四十五轮）：班主任填自己班的学生状态 */
+const rollcallVisible = ref(false)
+const rollcallTaskId = ref<number | null>(null)
+
+function openRollcall(row: CollegeTaskRow) {
+  rollcallTaskId.value = row.id
+  rollcallVisible.value = true
+}
+
+/**
+ * 详情（第四十八轮）：返校情况仪表盘。
+ *
+ * 院长一眼看全校到校率 + 哪个班还没点完 + 谁没返校、**为什么没返校**（备注）。
+ * 和「导出」是两件事：那个下表给留档，这个是当场看。
+ *
+ * 权限沿用 `canSeeDetail`（院长 / 发布人）——后端 `_college_detail` 也拦，
+ * 纯班主任按了会 403，所以按钮跟着这个标志隐藏。
+ */
+const detailVisible = ref(false)
+const detailTaskId = ref<number | null>(null)
+
+function openDetail(row: CollegeTaskRow) {
+  detailTaskId.value = row.id
+  detailVisible.value = true
+}
+
+/**
+ * 导出这一条任务的全部回答（谁填了什么、谁还没填）。
+ *
+ * 学院任务的导出走的是**学生级**明细（按班分组，班里列学生），
+ * 和 `/detail` 同一个口径，见 `task_excel.export_detail`。
+ */
 async function onExport(row: CollegeTaskRow) {
   if (exportingId.value !== null) return
   exportingId.value = row.id
@@ -258,6 +291,16 @@ onMounted(load)
       scope="COLLEGE"
       @saved="load"
     />
+
+    <!-- 点名：班主任填自己班的学生状态（第四十五轮） -->
+    <TaskRollcallDrawer
+      v-model="rollcallVisible"
+      :task-id="rollcallTaskId"
+      @saved="load"
+    />
+
+    <!-- 详情：返校情况仪表盘（第四十八轮），院长看全校 + 各班未返校名单 -->
+    <TaskDetailDashboard v-model="detailVisible" :task-id="detailTaskId" />
 
     <!-- 编辑：复用发布对话框的「修改」模式（题型/候选项不给改） -->
     <TaskPublishDialog
@@ -366,6 +409,16 @@ onMounted(load)
               <td class="num">{{ fmtTime(row.deadline) }}</td>
               <td class="num">{{ fmtTime(row.createdAt) }}</td>
               <td>
+                <!-- 详情 = 返校情况仪表盘（第四十八轮）。
+                     和导出同一个权限（canSeeDetail），但一个是当场看、一个是下载留档 -->
+                <el-button
+                  v-if="row.canSeeDetail"
+                  size="small"
+                  type="primary"
+                  @click="openDetail(row)"
+                >
+                  详情
+                </el-button>
                 <!-- 导出 = 看明细，和「改/关/删」是**两个权限**：
                      纯院长能看学院任务明细，却看不到别人班级任务的明细（会 403），
                      所以按钮各自按后端下发的标志显示，不能共用一个 v-if -->
@@ -376,6 +429,18 @@ onMounted(load)
                   @click="onExport(row)"
                 >
                   导出
+                </el-button>
+                <!-- 点名：班主任填自己班的状态（第四十五轮）。
+                     判据是「这条是学院任务 + 我不是发布人 + 还在收答案」，
+                     不用 canEdit——那是「能不能改任务本身」，和「能不能填」无关 -->
+                <el-button
+                  v-if="row.scope === 'COLLEGE' && !row.canEdit && row.open"
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="openRollcall(row)"
+                >
+                  点名
                 </el-button>
                 <template v-if="row.canEdit">
                   <el-button size="small" @click="openEdit(row)">编辑</el-button>

@@ -130,11 +130,24 @@ export function fetchTaskDetail(id: number) {
 /**
  * xlsx 下载的两个小工具（触发下载 / 把失败翻成中文错误）共用一份，
  * 放在 `utils/download.ts`——学生名册、账本、学院名册的导出也在用。
+ *
+ * 不带 `filter` 走 GET（全量，和以前一样）；带 `filter` 走 POST（**按状态筛选**，
+ * 第四十九轮）——照 `/students/export` 的既有惯例：GET=全量、POST=子集。
+ * `recordIds` 是前端按状态算好的行 id，后端只做集合过滤、不认语义。
  */
-export async function exportTaskDetail(id: number): Promise<void> {
+export interface TaskExportFilter {
+  /** 只导这些行（仪表盘里当前筛选命中的学生） */
+  recordIds: number[]
+  /** 筛选名（「未返校」），只用于文件名和表内副标题 */
+  label: string
+}
+
+export async function exportTaskDetail(id: number, filter?: TaskExportFilter): Promise<void> {
   try {
-    const res = await service.get<Blob>(`/tasks/${id}/export`, { responseType: 'blob' })
-    downloadXlsx(res, '任务回答.xlsx')
+    const res = filter
+      ? await service.post<Blob>(`/tasks/${id}/export`, filter, { responseType: 'blob' })
+      : await service.get<Blob>(`/tasks/${id}/export`, { responseType: 'blob' })
+    downloadXlsx(res, filter ? `任务回答-${filter.label}.xlsx` : '任务回答.xlsx')
   } catch (error) {
     exportFailure(error)
   }
@@ -148,6 +161,106 @@ export async function exportTaskOverview(): Promise<void> {
   } catch (error) {
     exportFailure(error)
   }
+}
+
+/** 导出**自己班**的点名结果（班主任专用，第四十五轮）。 */
+export async function exportTaskRollcall(id: number, classId?: number): Promise<void> {
+  try {
+    const res = await service.get<Blob>(`/tasks/${id}/rollcall/export`, {
+      responseType: 'blob',
+      params: { classId: classId ?? undefined },
+    })
+    downloadXlsx(res, '点名结果.xlsx')
+  } catch (error) {
+    exportFailure(error)
+  }
+}
+
+/** 点名页的一个学生行（第四十五轮：学院任务按学生逐个标记） */
+export interface TaskRollcallRow {
+  recordId: number
+  studentNo: string
+  name: string
+  /** 这个学生当前的状态（未填 = null） */
+  value: string | null
+  raw: string | null
+  note: string | null
+  submittedAt: string | null
+}
+
+/** 点名页：一个班的学生名册 + 当前状态 */
+export interface TaskRollcall {
+  taskId: number
+  title: string
+  question: string
+  qtype: TaskQType
+  qtypeText: string
+  allowText: boolean
+  deadline: string | null
+  open: boolean
+  /** SINGLE/MULTI 的候选项（BOOLEAN/DATE 为空数组） */
+  options: string[]
+  classId: number
+  className: string
+  /** 我能管的、有学生的班（多个时前端给切换器） */
+  classes: { classId: number; className: string }[]
+  rows: TaskRollcallRow[]
+  total: number
+  answered: number
+  unanswered: number
+}
+
+/** 打开点名页（班主任视角）。`classId` 不传就取第一个有学生的班。 */
+export function fetchTaskRollcall(id: number, classId?: number) {
+  return request<TaskRollcall>({
+    url: `/tasks/${id}/rollcall`,
+    method: 'get',
+    params: { classId: classId ?? undefined },
+  })
+}
+
+/**
+ * 给**一个学生**打状态。一次一个人，标几个存几个，下次接着标。
+ *
+ * 重复提交是「改」（后端 `uk_task_record`），所以前端可以放心乐观更新。
+ */
+export function saveStudentAnswer(
+  taskId: number,
+  recordId: number,
+  value: unknown,
+  note?: string,
+) {
+  return request<{
+    taskId: number
+    recordId: number
+    value: string
+    raw: string | null
+    note: string | null
+    submittedAt: string
+  }>({
+    url: `/tasks/${taskId}/rollcall/${recordId}`,
+    method: 'put',
+    data: { value, note: note ?? null },
+  })
+}
+
+/**
+ * **批量**保存点名结果：一次请求存多个学生（第四十六轮）。
+ *
+ * 一个班几十人，逐个 PUT 是几十次往返；点名页的「保存全部」走这条。
+ *
+ * ⚠ 后端是**整批要么全成要么全不动**——任何一条不合法就 400，一条都不写。
+ * 所以调用方失败时**不能清本地草稿**，否则界面显示成已存、实际一个字没存。
+ */
+export function saveStudentAnswers(
+  taskId: number,
+  items: { recordId: number; value: unknown; note?: string }[],
+) {
+  return request<{ taskId: number; saved: number }>({
+    url: `/tasks/${taskId}/rollcall`,
+    method: 'put',
+    data: { items: items.map((it) => ({ recordId: it.recordId, value: it.value, note: it.note ?? null })) },
+  })
 }
 
 /** 题型枚举。与后端 `task_service.QTYPES` 一一对应。 */

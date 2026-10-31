@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echarts, { chartColors, prefersReducedMotion, type ECOption } from '@/utils/echarts'
+import { rafThrottle } from '@/utils/rafThrottle'
 import type { ECharts } from 'echarts/core'
 
 /**
@@ -92,9 +93,10 @@ function render() {
   chart.setOption(option)
 }
 
-function resize() {
+/** 同 TrendChart：拖窗口每帧触发，用 rafThrottle 对齐到下一帧，只画一次 */
+const resize = rafThrottle(() => {
   chart?.resize()
-}
+})
 
 /**
  * 需要时创建 ECharts 实例。

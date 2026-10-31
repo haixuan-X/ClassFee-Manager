@@ -272,7 +272,7 @@ def _find_or_create_fields(
 
 
 def _read_body(
-    rows, headers: list[str]
+    rows, headers: list[str], *, start_row: int = 2
 ) -> tuple[list[tuple[int, list[str]]], dict[str, list[str]]]:
     """把数据行读进内存，同时收集每列的非空样本。
 
@@ -281,11 +281,15 @@ def _read_body(
     MAX_ROWS 已经限死了体量（5000 行 × 几十列），一次性读进内存没问题。
 
     `samples` 每列最多留 200 个非空样本，够判出整列性质了。
+
+    `start_row` 是这批 `rows` 第一行的**真实 Excel 行号**（表头在第 1 行时
+    数据从第 2 行起，故默认 2）。报错文案里的「第 N 行」必须指对行，
+    用户按行号去表里找才发现是哪行填错了——行号错了这句报错就白写了。
     """
     body: list[tuple[int, list[str]]] = []
     samples: dict[str, list[str]] = {}
     processed = 0
-    for excel_row_no, raw in enumerate(rows, start=2):
+    for excel_row_no, raw in enumerate(rows, start=start_row):
         cells = [_cell_text(c) for c in raw]
         if not any(cells):
             continue

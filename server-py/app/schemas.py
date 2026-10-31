@@ -10,7 +10,7 @@ import math
 import re
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
@@ -454,6 +454,25 @@ class StudentExportRequest(_BodyModel):
     fieldKeys: list[str] = Field(default_factory=list)
 
 
+class TaskExportRequest(_BodyModel):
+    """**按状态筛选**的任务导出请求体（第四十九轮）。
+
+    仪表盘上的卡片既是统计也是筛选器：点「未返校」只导未返校那几个学生。
+    前端把**筛出来的 recordIds** 原样传上来——后端只做集合过滤，
+    **不认任何状态语义**（「未返校」的关键词表只在前端 `utils/taskStatus.ts` 一处）。
+
+    为什么不传「状态=未返校」让后端去判：那样判定逻辑就有两份，
+    改了关键词表忘了改后端，屏幕显示 6 个人、导出来却是 8 个，没人查得出来。
+    传 id 列表则屏幕和文件**不可能对不上**——文件就是屏幕上那些行。
+
+    - `recordIds`：只导这些行。上限 500（一个学院的学生数），全量导请走 `GET /export`。
+    - `label`：这份筛选的名字（「未返校」），只用于文件名和副标题，不参与过滤。
+    """
+
+    recordIds: list[int] = Field(default_factory=list)
+    label: str | None = None
+
+
 class FieldRetypeRequest(_BodyModel):
     """改字段类型。
 
@@ -554,6 +573,42 @@ class TaskAnswerRequest(_BodyModel):
     def _v_note(cls, v: str | None) -> str | None:
         if v is not None:
             _check_size(v, 255, "补充说明最多 255 字")
+        return v
+
+
+class TaskRollcallItem(_BodyModel):
+    """点名批量保存里的一条：一个学生一个状态。"""
+
+    recordId: int
+    value: Any = None
+    note: str | None = None
+
+    @field_validator("note")
+    @classmethod
+    def _v_note(cls, v: str | None) -> str | None:
+        if v is not None:
+            _check_size(v, 255, "补充说明最多 255 字")
+        return v
+
+
+class TaskRollcallBatchRequest(_BodyModel):
+    """批量保存点名结果（第四十六轮）。
+
+    一个班几十个学生，逐个 PUT 是几十次往返；点名页的「保存全部」走这条。
+
+    刻意**不做**「跳过失败的、能存的照存」：老师填表中途半保存，
+    会让他搞不清到底存了哪几个。整批要么全成要么全不动。
+    """
+
+    items: list[TaskRollcallItem]
+
+    @field_validator("items")
+    @classmethod
+    def _v_items(cls, v: list[TaskRollcallItem]) -> list[TaskRollcallItem]:
+        if not v:
+            _raise_constraint("没有要保存的内容")
+        if len(v) > 500:
+            _raise_constraint("一次最多保存 500 条，请分批操作")
         return v
 
 
@@ -738,6 +793,51 @@ class UserUpdateRequest(_BodyModel):
     def _v_password(cls, v: str | None) -> str | None:
         if v is not None and not v.strip():
             return None  # 空串=不修改
+        _check_size(v, 32, "密码长度需为 6-32 位", min_len=6)
+        return v
+
+
+class UserBatchRequest(_BodyModel):
+    """批量管理账号（第四十四轮）：停用 / 启用 / 删除 / 重置密码。
+
+    只放「同一个值套到 N 个人身上」的动作——改姓名、学号那种逐人不同的
+    字段不适合批量（一键把 N 个人改成同一个名字是灾难）。
+
+    `password` 只对 `resetPassword` 有意义（留空 = 统一重置成初始密码），
+    其它动作传了也会被忽略。
+    """
+
+    #: 允许的批量动作。和 `user_service.BATCH_ACTIONS` 同一份措辞来源。
+    #: 必须标 ClassVar：不标 pydantic 会当成模型字段去解析类型注解。
+    ACTIONS: ClassVar[tuple[str, ...]] = ("disable", "enable", "delete", "resetPassword")
+
+    action: str
+    userIds: list[int]
+    password: str | None = None
+
+    @field_validator("action")
+    @classmethod
+    def _v_action(cls, v: str) -> str:
+        if v not in cls.ACTIONS:
+            _raise_constraint("不支持的批量操作")
+        return v
+
+    @field_validator("userIds")
+    @classmethod
+    def _v_user_ids(cls, v: list[int]) -> list[int]:
+        if not v:
+            _raise_constraint("请先勾选要操作的成员")
+        # 上限在 service 里还有一道（那里能给出更完整的原因），这里先把明显的
+        # 超长请求挡在门口，别让几千个 id 进到业务层。
+        if len(v) > 500:
+            _raise_constraint("一次最多处理 500 人，请分批操作")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _v_password(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
         _check_size(v, 32, "密码长度需为 6-32 位", min_len=6)
         return v
 

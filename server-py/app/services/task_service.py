@@ -58,7 +58,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
-from ..models import ClsTask, ClsTaskAnswer, SysUser
+from ..models import ClsClass, ClsTask, ClsTaskAnswer, ClsTaskStudentAnswer, StudentRecord, SysUser
 from ..security import ROLE_LEVEL, LoginUser, role_level
 
 
@@ -195,8 +195,12 @@ def can_see_detail(task: ClsTask, user: LoginUser) -> bool:
     班主任**及以上**（含院长）都能看，不只是发布人自己。用等级判定而非
     `== TEACHER`：写成角色相等的话，院长就看不到明细了，而院长的等级比班主任高。
 
-    **学院任务**（第三十二轮）：只有**院长 / 发布人**能看到全院的明细；
-    班主任能看到，但**只限自己班那一份**（按班分组，见 `get_detail`）。
+    **学院任务**（第三十二轮）：只有**院长 / 发布人**能看到明细。
+    班主任**不能**看明细——他要填自己班的学生状态走点名页
+    （`get_rollcall`，那个只给他自己带的班），明细是院长看回收情况用的。
+    这条线不能松：班主任之间互相看别的班的返校情况，是隐私问题。
+    （第四十五轮加学生级点名后，`get_rollcall` 里会自己按 `managed_class_ids`
+    裁到自己带的班，所以导出点名结果也走这条路。）
     """
     if is_college_task(task):
         if task.created_by == user.id:
@@ -600,42 +604,184 @@ def pinned_tasks(db: Session, user: LoginUser, limit: int = PINNED_LIMIT) -> lis
     return _build_rows(db, user, open_ones[:limit])
 
 
+def _college_detail(db: Session, user: LoginUser, task: ClsTask) -> dict:
+    """学院任务的明细：**按班分组，每组列出学生**（第四十五轮）。
+
+    和班级任务的明细是两套口径——班级任务一行 = 一个学生账号，
+    学院任务一行 = 一个**班**，班里再列学生（因为答案是班主任按学生打的）。
+
+    **谁能看**：院长 / 发布人看全部班；班主任**不能**看明细（`can_see_detail` 拦），
+    他要用点名页填表（`get_rollcall`），那个只给他自己带的班。
+    这条线不能松——班主任之间互相看别的班的返校情况，是隐私问题。
+    """
+    # 院长 / 发布人看全部班；班主任走不到这里（can_see_detail 已经拦了）
+    if user.role == DEAN_ROLE or task.created_by == user.id:
+        pass
+    else:
+        raise BizException.forbidden("只有院长和发布人能看全院明细")
+
+    from .user_service import managed_class_ids
+
+    # 应答对象：全校的班主任（一人代表一个班）
+    everyone = (
+        db.execute(
+            select(SysUser).where(
+                SysUser.status == 1, SysUser.role.in_(list(_roles_at_least(TEACHER_ROLE)))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    everyone = [u for u in everyone if is_college_answer_target(u)]
+
+    # 每个班主任代表的班 = 他能管的班（和点名页同一个口径）
+    teacher_classes: dict[int, list[int]] = {}
+    for u in everyone:
+        teacher_classes[u.id] = managed_class_ids(db, u.id, u.role, u.class_id)
+
+    visible_class_ids = sorted({cid for ids in teacher_classes.values() for cid in ids})
+
+    if not visible_class_ids:
+        return {
+            "taskId": task.id,
+            "title": task.title,
+            "question": task.question,
+            "qtype": task.qtype,
+            "qtypeText": QTYPE_TEXT.get(task.qtype, task.qtype),
+            "allowText": bool(task.allow_text),
+            "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
+            "open": is_open(task),
+            "scope": SCOPE_COLLEGE,
+            "rows": [],
+            "classes": [],
+            "answered": 0,
+            "unanswered": 0,
+            "noteCount": 0,
+            "summary": {"counts": {}, "total": 0, "answered": 0},
+        }
+
+    class_names = _class_name_map(db, visible_class_ids)
+
+    # 学生名册：可见班里的所有人
+    students = list(
+        db.execute(
+            select(StudentRecord)
+            .where(StudentRecord.class_id.in_(visible_class_ids))
+            .order_by(StudentRecord.student_no)
+        ).scalars()
+    )
+    # 已打的状态
+    answers = {
+        a.record_id: a
+        for a in db.execute(
+            select(ClsTaskStudentAnswer).where(
+                ClsTaskStudentAnswer.task_id == task.id,
+                ClsTaskStudentAnswer.record_id.in_([s.id for s in students])
+                if students
+                else False,
+            )
+        ).scalars()
+    }
+
+    # 按班分组
+    by_class: dict[int, list[dict]] = {}
+    for s in students:
+        a = answers.get(s.id)
+        by_class.setdefault(s.class_id, []).append(
+            {
+                "recordId": s.id,
+                "studentNo": s.student_no,
+                "name": s.name,
+                "answered": a is not None,
+                "value": _display_value(task, a.value_json) if a else None,
+                "raw": a.value_json if a else None,
+                "note": a.note if a else None,
+                "submittedAt": a.submitted_at.strftime("%Y-%m-%d %H:%M")
+                if a and a.submitted_at
+                else None,
+            }
+        )
+
+    classes_out = []
+    total_students = 0
+    total_answered = 0
+    total_notes = 0
+    counts: dict[str, int] = {}
+    for cid in sorted(by_class):
+        rows = by_class[cid]
+        answered = sum(1 for r in rows if r["answered"])
+        notes = sum(1 for r in rows if r["note"])
+        # 这个班的班主任是谁（可能多个，也可能没有）
+        teachers = [
+            u.real_name or u.username
+            for u in everyone
+            if cid in teacher_classes.get(u.id, [])
+        ]
+        # 各状态分布（按选项原文计数）
+        c_counts: dict[str, int] = {}
+        for r in rows:
+            if r["value"]:
+                c_counts[r["value"]] = c_counts.get(r["value"], 0) + 1
+                counts[r["value"]] = counts.get(r["value"], 0) + 1
+        classes_out.append(
+            {
+                "classId": cid,
+                "className": class_names.get(cid, f"班级 #{cid}"),
+                "teachers": teachers,
+                "total": len(rows),
+                "answered": answered,
+                "unanswered": max(0, len(rows) - answered),
+                "noteCount": notes,
+                "counts": c_counts,
+                "rows": rows,
+            }
+        )
+        total_students += len(rows)
+        total_answered += answered
+        total_notes += notes
+
+    return {
+        "taskId": task.id,
+        "title": task.title,
+        "question": task.question,
+        "qtype": task.qtype,
+        "qtypeText": QTYPE_TEXT.get(task.qtype, task.qtype),
+        "allowText": bool(task.allow_text),
+        "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
+        "open": is_open(task),
+        "scope": SCOPE_COLLEGE,
+        # 班级任务那边用 rows；这里 rows 留空，前端按 scope 走 classes
+        "rows": [],
+        "classes": classes_out,
+        "answered": total_answered,
+        "unanswered": max(0, total_students - total_answered),
+        "noteCount": total_notes,
+        "summary": {"counts": counts, "total": total_students, "answered": total_answered},
+    }
+
+
 def get_detail(db: Session, user: LoginUser, task_id: int) -> dict:
     """明细：谁填了什么、谁还没填。**仅发布人和班主任**。
 
     这一页是整个模块里唯一出现别人答案的地方，也是催交和导出的依据。
+
+    **学院任务**（第四十五轮起）走学生级口径：按班分组、班里列学生，
+    见 `_college_detail`。班级任务仍是「一人一行」。
     """
     task = _require_task(db, user.class_id, task_id)
     if not can_see_detail(task, user):
         raise BizException.forbidden("只有任务发布人和班主任能查看每个人的回答")
 
-    # 学院任务：应答对象是**各班班主任**，明细**按班分组**。
-    # 班主任只能看**自己班**那一份（别的班的返校情况不该让他看见）；
-    # 院长 / 发布人看全部分组。
-    college_scope = is_college_task(task)
-    if college_scope:
-        everyone = (
-            db.execute(
-                select(SysUser).where(
-                    SysUser.status == 1, SysUser.role.in_(list(_roles_at_least(TEACHER_ROLE)))
-                )
-            )
-            .scalars()
-            .all()
+    if is_college_task(task):
+        return _college_detail(db, user, task)
+
+    everyone = (
+        db.execute(
+            select(SysUser).where(SysUser.class_id == task.class_id, SysUser.status == 1)
         )
-        # 纯院长不参与班级事务 → 不是应答对象
-        everyone = [u for u in everyone if is_college_answer_target(u)]
-        if user.role != DEAN_ROLE:
-            # 班主任：只看自己班
-            everyone = [u for u in everyone if u.class_id == user.class_id]
-    else:
-        everyone = (
-            db.execute(
-                select(SysUser).where(SysUser.class_id == task.class_id, SysUser.status == 1)
-            )
-            .scalars()
-            .all()
-        )
+        .scalars()
+        .all()
+    )
     answers = {
         a.user_id: a
         for a in db.execute(
@@ -680,7 +826,9 @@ def get_detail(db: Session, user: LoginUser, task_id: int) -> dict:
         "allowText": bool(task.allow_text),
         "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
         "open": is_open(task),
+        "scope": SCOPE_CLASS,
         "rows": rows,
+        "classes": [],
         "answered": answered,
         "unanswered": max(0, len(rows) - answered),
         "noteCount": with_note,
@@ -970,6 +1118,288 @@ def submit_answer(
     return {"taskId": task_id, "value": _display_value(task, stored), "raw": stored, "note": text}
 
 
+# ==================== 学院任务的**学生级**点名（第四十五轮） ====================
+#
+# 学院任务发给各班班主任，班主任打开任务看到**自己班的学生名册**，
+# 逐个学生标记状态（到校 / 请假 / 未到）。院长侧看全校到校率 + 每班明细。
+#
+# 一张表 `cls_task_student_answer` 按 (task_id, record_id) 记一行，
+# `class_id` 是冗余列（按班汇总不用 join，也防学生转班把历史答案搬走）。
+
+
+def _class_name_map(db: Session, class_ids: list[int]) -> dict[int, str]:
+    if not class_ids:
+        return {}
+    rows = db.execute(
+        select(ClsClass.id, ClsClass.class_name).where(ClsClass.id.in_(class_ids))
+    ).all()
+    return {int(cid): name for cid, name in rows}
+
+
+def _rollcall_guard(db: Session, user: LoginUser, task_id: int) -> ClsTask:
+    """点名操作的统一入口校验：任务存在、开放中、我是应答对象、我没出这题。"""
+    task = _require_task(db, user.class_id, task_id)
+    if not is_college_task(task):
+        raise BizException.bad_request("只有学院任务才需要逐个学生点名")
+    if not is_college_answer_target(user):
+        raise BizException.forbidden("学院任务由各班班主任应答")
+    if task.created_by == user.id:
+        raise BizException.forbidden("发布人可以查看答题情况，不用填自己的题")
+    if task.status != 1:
+        raise BizException.bad_request("这个任务已经关闭，不能再填")
+    if task.deadline is not None and datetime.now() > task.deadline:
+        raise BizException.bad_request("这个任务已经过截止时间了")
+    return task
+
+
+def _normalize_note(task: ClsTask, note: str | None) -> str | None:
+    """逐人备注的归一化：去空白、按开关决定要不要、限长。"""
+    text = (note or "").strip() or None
+    if text and not task.allow_text:
+        text = None  # 没开补充说明就忽略，不报错——多写的字没必要拦
+    if text and len(text) > MAX_NOTE_LEN:
+        raise BizException.bad_request(f"补充说明最多 {MAX_NOTE_LEN} 字")
+    return text
+
+
+#: 逐人备注的长度上限。和班级级答案的 `note` 同一个量级——
+#: 一句话说清「为什么没到」就够了，放开到 255 只会让备注变小作文。
+MAX_NOTE_LEN = 255
+
+
+def save_student_answer(
+    db: Session, user: LoginUser, task_id: int, record_id: int, value, note: str | None
+) -> dict:
+    """班主任给**一个学生**打一个状态。重复提交是「改」（uk_task_record）。"""
+    with db.begin():
+        task = _rollcall_guard(db, user, task_id)
+
+        # 学生必须在我能管的班里，且这个学生确实存在
+        student = db.get(StudentRecord, record_id)
+        if student is None:
+            raise BizException.bad_request("学生不存在")
+        from .user_service import managed_class_ids
+
+        if student.class_id not in managed_class_ids(
+            db, user.id, user.role, user.class_id
+        ):
+            raise BizException.forbidden("这个学生不在你带的班里")
+
+        stored = _dump_value(task, value)
+        text = _normalize_note(task, note)
+
+        existing = db.execute(
+            select(ClsTaskStudentAnswer).where(
+                ClsTaskStudentAnswer.task_id == task_id,
+                ClsTaskStudentAnswer.record_id == record_id,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            db.add(
+                ClsTaskStudentAnswer(
+                    task_id=task_id,
+                    record_id=record_id,
+                    class_id=student.class_id,
+                    value_json=stored,
+                    note=text,
+                )
+            )
+        else:
+            existing.value_json = stored
+            existing.note = text
+            existing.submitted_at = datetime.now()
+
+    return {
+        "taskId": task_id,
+        "recordId": record_id,
+        "value": _display_value(task, stored),
+        "raw": stored,
+        "note": text,
+        "submittedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def save_student_answers(
+    db: Session, user: LoginUser, task_id: int, items: list[dict]
+) -> dict:
+    """批量保存：一次存多个学生（第四十六轮）。
+
+    一个班几十个学生，逐个 PUT 是几十次往返；点名页的「保存全部」走这里。
+
+    ## 一次事务，要么全成要么全不动
+
+    和账号批量（`user_service.batch_users`）刻意不同：那个是**运营动作**，
+    一条删不掉就跳过、能删的照删；这个是**老师填表**，中途失败半保存
+    会让「我到底存了哪几个」变成糊涂账。所以先整体校验，任何一条不合法
+    就整批 400 并指名道姓（`「张三」的状态不合法`），一条都不写。
+    """
+    if not items:
+        raise BizException.bad_request("没有要保存的内容")
+
+    with db.begin():
+        task = _rollcall_guard(db, user, task_id)
+        from .user_service import managed_class_ids
+
+        managed = managed_class_ids(db, user.id, user.role, user.class_id)
+
+        # 一次取回所有涉及的学生，避免逐条 SELECT
+        ids = [int(it["recordId"]) for it in items]
+        students = {
+            r.id: r
+            for r in db.execute(
+                select(StudentRecord).where(StudentRecord.id.in_(ids))
+            ).scalars()
+        }
+        existing = {
+            a.record_id: a
+            for a in db.execute(
+                select(ClsTaskStudentAnswer).where(
+                    ClsTaskStudentAnswer.task_id == task_id,
+                    ClsTaskStudentAnswer.record_id.in_(ids),
+                )
+            ).scalars()
+        }
+
+        # 先把**全部**校验过一遍再动手：任何一条不合法就整批失败（见 docstring）。
+        # 值非法时把**学生名字**带上——「「XX」的状态不合法」比通用文案
+        # 好用得多：几十人里到底是哪一条错了，一眼就能看到。
+        plan: list[tuple[StudentRecord, str, str | None]] = []
+        now = datetime.now()
+        for it in items:
+            student = students.get(int(it["recordId"]))
+            if student is None:
+                raise BizException.bad_request("有学生已不在名册里，请刷新后重试")
+            if student.class_id not in managed:
+                raise BizException.forbidden("有学生不在你带的班里")
+            try:
+                stored = _dump_value(task, it.get("value"))
+            except BizException as e:
+                # 把学生名字塞进原错误信息里（BizException 的 message 是唯一对外出口）
+                raise BizException.bad_request(
+                    f"「{student.name}」{e.message}"
+                ) from e
+            plan.append((student, stored, _normalize_note(task, it.get("note"))))
+
+        saved = 0
+        for student, stored, text in plan:
+            hit = existing.get(student.id)
+            if hit is None:
+                db.add(
+                    ClsTaskStudentAnswer(
+                        task_id=task_id,
+                        record_id=student.id,
+                        class_id=student.class_id,
+                        value_json=stored,
+                        note=text,
+                    )
+                )
+            else:
+                hit.value_json = stored
+                hit.note = text
+                hit.submitted_at = now
+            saved += 1
+
+    return {"taskId": task_id, "saved": saved}
+
+
+def get_rollcall(
+    db: Session, user: LoginUser, task_id: int, class_id: int | None = None
+) -> dict:
+    """班主任的点名页数据：自己班（或指定班）的学生名册 + 当前状态。
+
+    `class_id` 不传就取我能管的班里**第一个有学生的班**；
+    班主任带多个班时，前端用 `classes` 列表让他切。
+    """
+    task = _require_task(db, user.class_id, task_id)
+    if not is_college_task(task):
+        raise BizException.bad_request("只有学院任务才需要逐个学生点名")
+    if not is_college_answer_target(user):
+        raise BizException.forbidden("学院任务由各班班主任应答")
+
+    from .user_service import managed_class_ids
+
+    managed = managed_class_ids(db, user.id, user.role, user.class_id)
+    if not managed:
+        raise BizException.forbidden("你还没有被分配到任何班级")
+
+    # 我能管的班（只列有学生的班，空班点了也没意义）
+    class_rows = db.execute(
+        select(ClsClass.id, ClsClass.class_name)
+        .where(ClsClass.id.in_(managed))
+        .order_by(ClsClass.id)
+    ).all()
+    class_names = {int(cid): name for cid, name in class_rows}
+    students_by_class: dict[int, list] = {}
+    for r in db.execute(
+        select(StudentRecord).where(StudentRecord.class_id.in_(managed)).order_by(
+            StudentRecord.student_no
+        )
+    ).scalars():
+        students_by_class.setdefault(r.class_id, []).append(r)
+    classes_with_students = [
+        {"classId": cid, "className": class_names.get(cid, f"班级 #{cid}")}
+        for cid in class_names
+        if students_by_class.get(cid)
+    ]
+    if not classes_with_students:
+        raise BizException.bad_request("你带的班还没有学生名册，请先导入名单")
+
+    # 没指定 class_id 就用第一个有学生的班
+    if class_id is None or class_id not in class_names or not students_by_class.get(class_id):
+        class_id = classes_with_students[0]["classId"]
+
+    students = students_by_class.get(class_id, [])
+    record_ids = [s.id for s in students]
+    answers = {
+        a.record_id: a
+        for a in db.execute(
+            select(ClsTaskStudentAnswer).where(
+                ClsTaskStudentAnswer.task_id == task_id,
+                ClsTaskStudentAnswer.record_id.in_(record_ids) if record_ids else False,
+            )
+        ).scalars()
+    }
+
+    rows = []
+    answered = 0
+    for s in students:
+        a = answers.get(s.id)
+        if a is not None:
+            answered += 1
+        rows.append(
+            {
+                "recordId": s.id,
+                "studentNo": s.student_no,
+                "name": s.name,
+                "value": _display_value(task, a.value_json) if a else None,
+                "raw": a.value_json if a else None,
+                "note": a.note if a else None,
+                "submittedAt": a.submitted_at.strftime("%Y-%m-%d %H:%M")
+                if a and a.submitted_at
+                else None,
+            }
+        )
+
+    return {
+        "taskId": task.id,
+        "title": task.title,
+        "question": task.question,
+        "qtype": task.qtype,
+        "qtypeText": QTYPE_TEXT.get(task.qtype, task.qtype),
+        "allowText": bool(task.allow_text),
+        "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
+        "open": is_open(task),
+        "options": _load_options(task),
+        "classId": class_id,
+        "className": class_names.get(class_id, f"班级 #{class_id}"),
+        "classes": classes_with_students,
+        "rows": rows,
+        "total": len(rows),
+        "answered": answered,
+        "unanswered": max(0, len(rows) - answered),
+    }
+
+
 def delete_task(db: Session, user: LoginUser, task_id: int) -> None:
     """删除任务，**连带回答**（发布人删题 = 这题的答案没有保留意义）。
 
@@ -982,4 +1412,11 @@ def delete_task(db: Session, user: LoginUser, task_id: int) -> None:
         task = _require_task(db, user.class_id, task_id)
         _require_publisher(task, user)
         db.execute(delete(ClsTaskAnswer).where(ClsTaskAnswer.task_id == task_id))
+        # 学院任务的学生级回答也要一起删（第四十五轮）。不删就是永久孤儿：
+        # 这个库一张外键都没有，删任务不会自动带走答案。
+        db.execute(
+            delete(ClsTaskStudentAnswer).where(
+                ClsTaskStudentAnswer.task_id == task_id
+            )
+        )
         db.execute(delete(ClsTask).where(ClsTask.id == task_id))

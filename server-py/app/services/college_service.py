@@ -32,7 +32,7 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
@@ -58,6 +58,7 @@ from .task_service import (
     is_open,
     is_pure_dean,
 )
+from .user_service import _adviser_role_condition
 
 #: 班主任角色。这个名册只列他们（以及兼班主任的院长）。
 TEACHER_ROLE = "TEACHER"
@@ -1379,25 +1380,21 @@ def advisers(db: Session, user: LoginUser) -> dict:
 
     名册是「按人排」的，所以一行 = 一个班主任账号，班级只是他的一列。
 
-    为什么不能一班一行：有的班有**两个**班主任（班主任本人 + 兼班主任的院长）。
-    一班一行就得把两个账号塞进一格，于是「账号状态」那列只能渲染两个「启用」，
-    看不出哪个配哪个；而手机号、最近登录这类**属于某个账号**的属性，
-    一行放不下两个账号时就只能取第一个——**第二个人的手机号永远不显示**。
+    ## 第五十一轮：一个班**只有一位**班主任
 
-    一人一行就没有这个问题：每行一个账号、一个状态、一个手机号。
-    一个班有几个人就占几行（班级那列重复），这是名册的正常样子。
+    名册按 `sys_user_class.is_adviser=1` 列人。一行关联只代表「能管这个班」
+    （院长的「我带的班」、被顶替后留下的管理行都在里面），不再等于班主任。
+    为什么必须拆：院长在个人信息里勾一个班就自动成了班主任，名册上于是
+    出现两个班主任——用户的原话是「一个班不可能有两个班主任吧」。
+
+    **院长兼班主任与普通班主任同权同额**：都占同一个名额，一个班无论
+    什么角色都只出现一位。纯院长（`dean_only=1`）不参与班级事务，不占位。
+
+    一人一行仍然保留：以后即使数据里出现历史遗留的多行（比如人工改库），
+    也能一行一人地看清楚，而不是塞进一格让第二个人消失。
 
     没有班主任账号的班**仍然占一行**（账号各列为空）——「哪个班还没人管」
     是这份名册最该被看见的信息，不能因为没有账号就让那个班从表上消失。
-
-    ## 谁算「班主任」
-
-    **role=TEACHER 的账号**，**加上兼班主任的院长**（role=DEAN 且
-    `dean_only=0`）——他就是那个班的班主任，只是职务是院长。
-    只按 role=TEACHER 筛的话，院长兼班主任会从名册里消失：
-    名册上写着「这个班的班主任是某某」，而某人在系统里明明管着这个班。
-
-    **纯院长**（`dean_only=1`）不算——他不担任任何班的班主任。
 
     ## 两个来源都要
 
@@ -1410,38 +1407,22 @@ def advisers(db: Session, user: LoginUser) -> dict:
     classes = _active_classes(db)
     # 第三十二轮：**班主任是「班」的属性**（多对多），不再由账号的默认班决定。
     #
-    # 以前是「sys_user.class_id 里有他 = 他是这个班的班主任」——一个账号只能
-    # 属于一个班，于是「一个老师带两个班」这件事在系统里**表达不出来**。
-    # 现在是 sys_user_class：谁带哪些班。
+    # 第五十一轮：真正决定「谁是班主任」的是 `is_adviser=1`；角色条件
+    # （班主任 / 兼班主任院长）和冲突判定共用 `_adviser_role_condition`，
+    # 避免出现「名册上看不见、安排时又说他占了位」。
     by_class: dict[int, list[SysUser]] = {}
     links = db.execute(
         select(SysUserClass.class_id, SysUser)
         .join(SysUser, SysUser.id == SysUserClass.user_id)
         .where(
             SysUserClass.class_id.in_([c.id for c in classes]) if classes else False,
+            SysUserClass.is_adviser == 1,
             SysUser.status == 1,
-            # **纯院长不算班主任**（docstring 里那条规则）：
-            # 他「只管学院、不参与班级事务」，一个班都不带。
-            # ⚠ 关联表里的行是**改职务范围之前**留下的（切回「院长 + 班主任」
-            # 还要用），所以这里必须按账号**当前的身份**过滤，不能只看关联表。
-            SysUser.role == "TEACHER",
+            _adviser_role_condition(),
         )
         .order_by(SysUserClass.class_id.asc(), SysUser.id.asc())
     ).all()
-    # 兼班主任的院长（role=DEAN 且 dean_only=0）也是班主任——单靠 role=TEACHER
-    # 筛的话他会从名册上消失，而名册恰恰是「这个班的班主任是谁」的地方。
-    deans = db.execute(
-        select(SysUserClass.class_id, SysUser)
-        .join(SysUser, SysUser.id == SysUserClass.user_id)
-        .where(
-            SysUserClass.class_id.in_([c.id for c in classes]) if classes else False,
-            SysUser.status == 1,
-            SysUser.role == "DEAN",
-            SysUser.dean_only == 0,
-        )
-        .order_by(SysUserClass.class_id.asc(), SysUser.id.asc())
-    ).all()
-    for cid, t in list(links) + list(deans):
+    for cid, t in links:
         by_class.setdefault(int(cid), []).append(t)
 
     rows = []
@@ -1483,40 +1464,70 @@ def advisers(db: Session, user: LoginUser) -> dict:
 
 
 def set_class_teachers(
-    db: Session, user: LoginUser, class_id: int, teacher_ids: list[int]
+    db: Session, user: LoginUser, class_id: int, teacher_id: int | None
 ) -> dict:
-    """设置某个班的**班主任**（可以多个）（第三十二轮）。
+    """设置某个班的班主任（**一个班一个**）（第五十一轮收紧）。
 
-    「班主任」是**班**的属性：一个人可以带好几个班，一个班也可以有
-    正、副两个班主任。这两件事以前都表达不出来——账号只有一个 class_id。
+    ## 为什么从「可以多个」收成「一个」
+
+    第三十二轮按「一个班可以有正、副两个班主任」做的多选，但用户的实际口径是
+    **一个班不可能有两个班主任**（名册上一个班挂出 test-ls 和 haixuan-ls 两个
+    账号，用户直接问「你有没有什么办法」）。所以：
+
+    - 这个接口是**唯一允许覆盖**的入口——换人 = 顶替，因为是操作者显式点的；
+    - 其余入口（导入 / 建号 / 本人改「我带的班」/ 学生名册的「班主任」列）
+      撞上已有班主任一律**报错指路到这里**，不静默改别人。
+    - 「一个老师带好几个班」不受影响——那是**人**的属性，依然多对多。
+    - **院长兼班主任与普通班主任同权同额**：院长占的是同一个名额，
+      这里也能把他换掉（他保留「能管这个班」，只是不再占名册位）。
 
     只给**运营角色以上**（含院长）能改：这是「谁管这个班」的分配。
     班主任本人也能改「我带的班」（见 update_profile），但那是**加自己**，
     不是改别人的安排。
+
+    `teacher_id=None` = 该班暂无班主任账号（清空）。
     """
     with db.begin():
         clazz = db.get(ClsClass, class_id)
         if clazz is None or clazz.status != 1:
             raise BizException.bad_request("班级不存在或已停用")
-        # 只能选**启用**的账号（停用的账号当班主任没有意义）
-        wanted = [int(t) for t in teacher_ids]
-        alive: list[int] = []
-        if wanted:
-            alive = [
-                int(uid)
-                for (uid,) in db.execute(
-                    select(SysUser.id).where(
-                        SysUser.id.in_(wanted), SysUser.status == 1
-                    )
+        uid: int | None = None
+        adviser = 0
+        if teacher_id is not None:
+            t = db.get(SysUser, int(teacher_id))
+            # 只能选**启用**的账号（停用的账号当班主任没有意义）
+            if t is None or t.status != 1:
+                raise BizException.bad_request("只能选启用的账号当班主任")
+            # 纯院长不参与班级事务：选他会写进一位名册上永远不显示的人，
+            # 用户看到的是「安排成功了，名册还是空的」。直接说清楚。
+            if t.role == DEAN_ROLE and t.dean_only:
+                raise BizException.bad_request(
+                    "纯院长不参与班级事务，不能当班主任；"
+                    "先在他的「职务范围」里切回「院长 + 班主任」再安排"
                 )
-            ]
+            uid = t.id
+            # 第五十一轮：只有名册口径里的角色才占班主任位。
+            # 班长/生活委员被安排「带班」只是管理权（和以前名册不列他们一致）；
+            # 班主任与兼班主任院长都标 1，一个班只允许一位。
+            adviser = 1 if (t.role == TEACHER_ROLE or t.role == DEAN_ROLE) else 0
         # 重写这个班的班主任安排。
         #
-        # ⚠ **院长那一行走不得**（第三十三轮）：`sys_user_class` 现在一身二职——
-        # 既是「这个班的班主任」（这里安排的），也是院长自己的「我带的班」
-        # （他在个人信息里勾的）。照旧整班删光的话，院长只要在
-        # 「班主任名册」里给这个班换一次人，自己就被顺手摘掉了。
-        # 所以只删非院长的行：院长带哪个班，只由院长自己说了算。
+        # ① 先把**这个班所有班主任标志**清掉——包括院长的那一行。
+        #    第五十一轮的口径是「院长也占同一个名额」，换人就是换掉他；
+        #    但**行不能删**：院长的行同时是他的「我带的班」（管理权），
+        #    删了他就进不去这个班了（用户明确要「顶替后仍能管」）。
+        db.execute(
+            update(SysUserClass)
+            .where(
+                SysUserClass.class_id == class_id,
+                SysUserClass.is_adviser == 1,
+            )
+            .values(is_adviser=0)
+        )
+        # ② 非院长的行删掉：普通老师被换掉 = 不再管这个班（原有语义）。
+        # ⚠ 院长那一行走不得（第三十三轮）：`sys_user_class` 一身二职——
+        # 既是班主任位，也是院长自己的「我带的班」。整班删光的话，院长只要
+        # 在「班主任名册」里给这个班换一次人，自己就被顺手摘掉了。
         db.execute(
             delete(SysUserClass).where(
                 SysUserClass.class_id == class_id,
@@ -1525,29 +1536,54 @@ def set_class_teachers(
                 ),
             )
         )
-        for uid in alive:
-            db.add(SysUserClass(user_id=uid, class_id=class_id))
+        if uid is not None:
+            # 兼班主任的院长可能**本来就在**这个班的关联里（上面特意没删）——
+            # 选中他当班主任时直接插会撞联合主键 (user_id, class_id)。
+            row = db.scalar(
+                select(SysUserClass).where(
+                    SysUserClass.user_id == uid, SysUserClass.class_id == class_id
+                )
+            )
+            if row is None:
+                db.add(
+                    SysUserClass(
+                        user_id=uid, class_id=class_id, is_adviser=adviser
+                    )
+                )
+            else:
+                row.is_adviser = adviser
         db.flush()
-        # 账号的**默认班**（sys_user.class_id）也一起对齐：
-        # 它是「登录后落在哪个班」，不能和实际安排矛盾。
-        for uid in alive:
-            u = db.get(SysUser, uid)
-            if u is not None and u.class_id != class_id:
-                u.class_id = class_id
+        # ⚠ 第五十一轮：**不再顺手改账号的默认班**（`sys_user.class_id`）。
+        #
+        # 以前这里会把被选中的老师「默认班」改成这个班，理由是
+        # 「默认班是登录落点，不能和实际安排矛盾」。但一个老师可以带好几个班，
+        # 这条就变成了：给 B 班换一次班主任，老师 C 的登录落点被搬走——
+        # 他下次登录落在 B 班，自己原来的班（账目/学生）一个都看不到，
+        # 而且**每改一次安排就搬一次**。用户实测就踩到了：test-ls 只是被
+        # 重新选中一次「大数据2502」的班主任，默认班就从云计算2502 跑了。
+        #
+        # 默认班属于**账号本人**（登录落在哪个班），安排班属于**班**
+        # （谁管这个班）——两件事，不该互相改写。管理权也不依赖这里：
+        # `managed_class_ids` 恒含默认班，新安排的班由上面那行关联表给。
         db.flush()
         return {
             "classId": class_id,
             "className": clazz.class_name,
-            "teacherIds": alive,
+            "teacherId": uid,
         }
 
 
 def teachers_of_class(db: Session, class_id: int) -> list[dict]:
-    """某个班的班主任账号（第三十二轮）。"""
+    """某个班的班主任账号（第三十二轮；第五十一轮起只认 is_adviser=1）。"""
     rows = db.execute(
         select(SysUser)
         .join(SysUserClass, SysUserClass.user_id == SysUser.id)
-        .where(SysUserClass.class_id == class_id, SysUser.status == 1)
+        .where(
+            SysUserClass.class_id == class_id,
+            SysUserClass.is_adviser == 1,
+            SysUser.status == 1,
+            _adviser_role_condition(),
+        )
         .order_by(SysUser.id.asc())
     ).all()
     return [

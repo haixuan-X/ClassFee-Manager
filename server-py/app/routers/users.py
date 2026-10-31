@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..responses import ok
-from ..schemas import UserCreateRequest, UserUpdateRequest
+from ..schemas import UserBatchRequest, UserCreateRequest, UserUpdateRequest
 from ..security import LoginUser, get_current_user
 from ..services import user_service
 
@@ -29,6 +29,31 @@ def create_user(
     db: Session = Depends(get_db),
 ):
     return ok(user_service.create_user(db, user, req))
+
+
+@router.post("/batch", summary="批量停用 / 启用 / 删除 / 重置密码")
+def batch_users(
+    req: UserBatchRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批量操作勾选的成员（第四十四轮）。
+
+    规则与单条完全同口径：目标须在**我能管的班**里、不能动自己、
+    操作者等级须**严格高于**目标、删除只对**零引用**账号生效。
+
+    「能做就做，做不了的跳过并说明」：不会因为一条删不掉就整批不动
+    （那在用户看来就是「点了没反应」），回执里逐条给出跳过原因。
+    """
+    return ok(
+        user_service.batch_users(
+            db,
+            user,
+            action=req.action,
+            user_ids=req.userIds,
+            password=req.password,
+        )
+    )
 
 
 @router.put("/{user_id}")

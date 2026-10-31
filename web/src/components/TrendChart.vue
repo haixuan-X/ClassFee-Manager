@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echarts, { chartColors, prefersReducedMotion, type ECOption } from '@/utils/echarts'
+import { rafThrottle } from '@/utils/rafThrottle'
 import type { ECharts } from 'echarts/core'
 import type { TrendPoint } from '@/types'
 
@@ -81,9 +82,14 @@ function render() {
   chart.setOption(option)
 }
 
-function resize() {
+/**
+ * 拖窗口时每帧都会触发 resize，`chart.resize()` 会整块重画图表。
+ * 用 `rafThrottle` 把重画对齐到下一帧——一帧内拖多少次都只画一次。
+ * 组件卸载时会 `removeEventListener`，之后这个函数不会再被调用。
+ */
+const resize = rafThrottle(() => {
   chart?.resize()
-}
+})
 
 /**
  * 需要时创建 ECharts 实例（幂等）。

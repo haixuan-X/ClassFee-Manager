@@ -13,7 +13,9 @@ import {
   TASK_QTYPES,
 } from '@/api/tasks'
 import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
+import TaskRollcallDrawer from '@/components/TaskRollcallDrawer.vue'
 import { useModal } from '@/composables/useModal'
+import { useCloseGuard } from '@/composables/useCloseGuard'
 import type {
   Task,
   TaskDetail,
@@ -166,7 +168,31 @@ function openAnswer(row: Task) {
       answerValue.value = row.myAnswer?.raw ?? null
   }
   answerVisible.value = true
+  // 存一份快照，供「有未保存改动就不让随手关」比对
+  answerBaseline.value = answerSnapshot()
 }
+
+/** 答案 + 备注的快照（字符串化，直接比对） */
+function answerSnapshot(): string {
+  return JSON.stringify({ v: answerValue.value, n: answerNote.value })
+}
+
+/** 打开那一刻的答案状态 */
+const answerBaseline = ref('')
+
+/** 答题弹窗有没有未保存的改动 */
+const answerDirty = computed(() => answerSnapshot() !== answerBaseline.value)
+
+/**
+ * 关闭拦截：答案改过就不让随手关。
+ *
+ * 三条关闭路径（点遮罩 / 点 ✕ / Esc）都汇到 `before-close`，拦这一处就够。
+ */
+const { onBeforeClose: onAnswerBeforeClose } = useCloseGuard(
+  answerVisible,
+  answerDirty,
+  () => '答案还没提交，关闭会丢掉这些改动。确定关闭？',
+)
 
 /** MULTI 的勾选由 el-checkbox-group 自己管数组，这里只判「有没有至少选一项」 */
 const canSubmitAnswer = computed(() => {
@@ -203,6 +229,15 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref<TaskDetail | null>(null)
 const { restoreFocus: restoreDetailFocus } = useModal(detailVisible)
+
+/** 点名抽屉（第四十五轮）：学院任务按学生逐个标记 */
+const rollcallVisible = ref(false)
+const rollcallTaskId = ref<number | null>(null)
+
+function openRollcall(row: Task) {
+  rollcallTaskId.value = row.id
+  rollcallVisible.value = true
+}
 
 async function openDetail(row: Task) {
   detailVisible.value = true
@@ -422,6 +457,14 @@ onMounted(async () => {
               {{ row.myAnswer ? '修改我的答案' : '填写答案' }}
             </el-button>
           </div>
+          <!-- 学院任务的点名入口（第四十五轮）。
+               canAnswer 对班主任是 true（他是应答对象），但学院任务要走**点名页**
+               而不是单选弹窗——所以这里单独判断 scope，不能复用 canAnswer -->
+          <div v-if="row.scope === 'COLLEGE' && row.open" class="head-right">
+            <el-button type="primary" size="small" @click="openRollcall(row)">
+              点名
+            </el-button>
+          </div>
         </header>
 
         <!-- 汇总：只有分布，没有具体是谁。所有角色看到的是同一份 -->
@@ -506,12 +549,21 @@ onMounted(async () => {
       @saved="load"
     />
 
+    <!-- ============================ 点名（第四十五轮） ============================
+         学院任务发给班主任，班主任打开看到自己班的学生名册，逐个标记状态。
+         和上面的「答题」弹窗是两套东西：那个是单选一题，这个是逐人点名。 -->
+    <TaskRollcallDrawer
+      v-model="rollcallVisible"
+      :task-id="rollcallTaskId"
+    />
+
     <!-- ============================ 答题 ============================ -->
     <el-dialog
       v-model="answerVisible"
       :title="current?.title ?? '填写答案'"
       width="480px"
-      :close-on-click-modal="false"
+      :close-on-click-modal="true"
+      :before-close="onAnswerBeforeClose"
       @closed="restoreAnswerFocus"
     >
       <template v-if="current">
@@ -577,7 +629,7 @@ onMounted(async () => {
         </p>
       </template>
       <template #footer>
-        <el-button @click="answerVisible = false">取消</el-button>
+        <el-button @click="onAnswerBeforeClose">取消</el-button>
         <el-button type="primary" :loading="answerLoading" @click="submitAnswer">提交</el-button>
       </template>
     </el-dialog>
@@ -600,7 +652,46 @@ onMounted(async () => {
             未填 {{ detail.unanswered }}
             <template v-if="detail.allowText">，带补充说明 {{ detail.noteCount }} 条</template>
           </p>
-          <el-table :data="detail.rows" size="small" max-height="420">
+
+          <!-- 学院任务：按班分组，每组列出学生（第四十五轮） -->
+          <template v-if="detail.scope === 'COLLEGE'">
+            <div v-for="cls in detail.classes" :key="cls.classId" class="class-group">
+              <h4 class="class-head">
+                {{ cls.className }}
+                <span class="muted">
+                  已填 {{ cls.answered }} / 共 {{ cls.total }} 人
+                  <template v-if="cls.teachers.length">　班主任 {{ cls.teachers.join('、') }}</template>
+                </span>
+              </h4>
+              <el-table :data="cls.rows" size="small" max-height="280">
+                <el-table-column label="学号" width="110">
+                  <template #default="{ row }">{{ row.studentNo }}</template>
+                </el-table-column>
+                <el-table-column label="姓名" width="100">
+                  <template #default="{ row }">{{ row.name }}</template>
+                </el-table-column>
+                <el-table-column label="是否已填" width="90">
+                  <template #default="{ row }">
+                    <el-tag :type="row.answered ? 'success' : 'info'" size="small" effect="plain">
+                      {{ row.answered ? '是' : '未填' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" min-width="110">
+                  <template #default="{ row }">{{ row.value || '—' }}</template>
+                </el-table-column>
+                <el-table-column v-if="detail.allowText" label="补充说明" min-width="140">
+                  <template #default="{ row }">{{ row.note || '—' }}</template>
+                </el-table-column>
+                <el-table-column label="提交时间" width="150">
+                  <template #default="{ row }">{{ row.submittedAt || '—' }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </template>
+
+          <!-- 班级任务：一人一行（原样） -->
+          <el-table v-else :data="detail.rows" size="small" max-height="420">
             <el-table-column label="姓名" width="100">
               <template #default="{ row }">{{ row.name }}</template>
             </el-table-column>
@@ -686,6 +777,23 @@ onMounted(async () => {
 .task-head .head-left {
   flex: 1;
   min-width: 0;
+}
+/* 学院任务明细：每个班一组，班头是浅蓝底的小标题 */
+.class-group {
+  margin-bottom: 14px;
+}
+.class-head {
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  background: #dbebf7;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f4e79;
+}
+.class-head .muted {
+  font-weight: 400;
+  font-size: 12px;
 }
 .task-head h3 {
   margin: 0 0 4px;

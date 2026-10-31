@@ -7,7 +7,7 @@ import {
   fetchCollegeAdvisers,
   fetchCollegeTeacherCandidates,
   importCollegeAdvisers,
-  setCollegeClassTeachers,
+  setCollegeClassTeacher,
 } from '@/api/college'
 import type { CollegeAdviserList, CollegeAdviserRow } from '@/types'
 
@@ -20,14 +20,17 @@ import type { CollegeAdviserList, CollegeAdviserRow } from '@/types'
  * **各班的班主任**，不是院里的全部账号——普通同学、班长、生活委员
  * 都不在这份名册里。
  *
- * ## 班主任是**班**的属性（第三十二轮）
+ * ## 班主任是**班**的属性（第三十二轮），**一个班一个**（第五十一轮收紧）
  *
  * 以前是「`sys_user.class_id` 里有他 = 他是这个班的班主任」——一个账号只能
  * 属于一个班，于是「一个老师带两个班」在系统里**表达不出来**。
- * 现在是 `sys_user_class`（多对多）：
- * - 院长在这里能**改**每个班的班主任（可以多个：正、副班主任）
- * - 班主任本人在「个人信息」里能改「我带的班」
- * - 导入的 Excel 里带「班主任」列时，也会按名字自动配上
+ * 现在是 `sys_user_class`（人 ↔ 班多对多）：
+ * - 院长在这里能**改**每个班的班主任（**一个班一位**，换人=顶替）
+ * - 班主任本人在「个人信息」里能改「我带的班」（撞车会 400，指路这里）
+ * - 导入的 Excel 里带「班主任」列时，也会按名字自动配上（撞车的行跳过）
+ *
+ * 「一个老师带好几个班」不受影响——那是**人**的属性；只有「一个班几个
+ * 班主任」被收成了一位（用户口径：一个班不可能有两个班主任）。
  *
  * ## 两个来源都给出
  *
@@ -46,8 +49,8 @@ const loadError = ref(false)
 /** 改班主任的弹窗 */
 const editOpen = ref(false)
 const editSaving = ref(false)
-/** 每个班选中的班主任账号 id */
-const editPicks = ref<Record<number, number[]>>({})
+/** 每个班选中的班主任账号 id（第五十一轮：一个班一个，null=暂无） */
+const editPicks = ref<Record<number, number | null>>({})
 /** 可被选的账号 */
 const candidates = ref<{ id: number; username: string; realName: string; role: string }[]>([])
 
@@ -98,12 +101,10 @@ async function openArrange() {
   } catch {
     candidates.value = []
   }
-  // 预填：按班分组，现有班主任账号 id
-  const picks: Record<number, number[]> = {}
-  for (const r of rows.value) {
-    if (r.teacherId === null) continue
-    const arr = picks[r.classId] ?? (picks[r.classId] = [])
-    if (!arr.includes(r.teacherId)) arr.push(r.teacherId)
+  // 预填：一个班一位（第五十一轮），没建账号的班是 null
+  const picks: Record<number, number | null> = {}
+  for (const r of uniqueClasses.value) {
+    picks[r.classId] = r.teacherId
   }
   editPicks.value = picks
 }
@@ -112,8 +113,10 @@ async function openArrange() {
 async function saveArrange() {
   editSaving.value = true
   try {
-    for (const [cid, ids] of Object.entries(editPicks.value)) {
-      await setCollegeClassTeachers(Number(cid), ids)
+    for (const [cid, id] of Object.entries(editPicks.value)) {
+      // el-select 点「清空」后 model 是 ''（不是 null），Number('') === 0 会
+      // 把 teacherId=0 发给后端 → 400。统一按 falsy 归成 null = 暂无班主任。
+      await setCollegeClassTeacher(Number(cid), id ? Number(id) : null)
     }
     editOpen.value = false
     ElMessage.success('班主任安排已保存')
@@ -277,19 +280,20 @@ onMounted(load)
       </span>
     </p>
 
-    <!-- 改班主任：一行一个班，可多选（正、副班主任） -->
+    <!-- 改班主任：一行一个班，**一个班一位**（第五十一轮：换人=顶替） -->
     <el-dialog v-model="editOpen" title="改班主任安排" width="560px" append-to-body>
       <p class="hint" style="margin: 0 0 12px">
         班主任是<strong>班</strong>的归属：一个老师可以同时带好几个班，
-        一个班也可以有正、副两个班主任。选中的老师登录后就能在左侧切换这些班。
+        但<strong>一个班只有一位班主任</strong>——换人直接重新选择（会顶替原来的安排）。
+        选中的老师登录后就能在左侧切换这些班。
       </p>
       <div v-for="r in uniqueClasses" :key="r.classId" class="arrange-row">
         <span class="arrange-name">{{ r.className }}</span>
         <el-select
           v-model="editPicks[r.classId]"
-          multiple
+          clearable
           filterable
-          placeholder="选班主任"
+          placeholder="暂无班主任"
           style="flex: 1"
         >
           <el-option

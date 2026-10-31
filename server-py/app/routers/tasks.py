@@ -11,6 +11,7 @@
 | PUT  /api/tasks/{id}/answer | 全员；**班主任与访客除外**（都不是被统计的同学） |
 | GET  /api/tasks/{id}/detail | **仅发布人和班主任**（唯一出现别人答案的出口） |
 | GET  /api/tasks/{id}/export | 同 detail |
+| POST /api/tasks/{id}/export | 同 detail；**按状态筛选导出**（只导屏幕勾中的那些行） |
 
 中间件 `_STAFF_ROUTES` **故意不放**这里任何一条：填答案是**全员**动作，
 拦在中间件会造成「同学连任务都答不了」。真正的闸门逐条在 service 层判。
@@ -21,8 +22,15 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..errors import BizException
 from ..responses import ok
-from ..schemas import TaskAnswerRequest, TaskCreateRequest, TaskUpdateRequest
+from ..schemas import (
+    TaskAnswerRequest,
+    TaskCreateRequest,
+    TaskExportRequest,
+    TaskRollcallBatchRequest,
+    TaskUpdateRequest,
+)
 from ..security import LoginUser, get_current_user, require_min_level
 from ..services import task_excel, task_service as svc
 
@@ -103,6 +111,23 @@ def task_detail(
     return ok(svc.get_detail(db, user, task_id))
 
 
+@router.get("/{task_id}/rollcall/export", summary="导出自己班的点名结果（班主任）")
+def export_rollcall(
+    task_id: int,
+    classId: int | None = Query(None, description="班主任带多个班时指定导哪个班"),
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """班主任导出**自己班**的点名结果。
+
+    和 `/export` 是两个端点：那个是院长看全院明细（`can_see_detail` 拦），
+    这个是班主任导自己填的那份（`get_rollcall` 里按 `managed_class_ids` 裁）。
+    """
+    return task_excel.xlsx_response(
+        task_excel.export_rollcall(db, user, task_id, classId)
+    )
+
+
 @router.get("/{task_id}/export")
 def export_detail(
     task_id: int,
@@ -110,6 +135,93 @@ def export_detail(
     db: Session = Depends(get_db),
 ):
     return task_excel.xlsx_response(task_excel.export_detail(db, user, task_id))
+
+
+@router.post("/{task_id}/export", summary="按状态筛选导出（点哪张卡导哪一批）")
+def export_detail_filtered(
+    task_id: int,
+    req: TaskExportRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """只导**屏幕上那个筛选**对应的行（第四十九轮）。
+
+    和 GET 那条是兄弟路由，跟 `/students/export` 一个惯例：GET=全量、POST=子集。
+    id 列表走 body 不走 query：几十个 id 塞 URL 放不下，还会进浏览历史和代理日志。
+
+    `recordIds` 是**前端按状态算好的行**（「未返校」的关键词表只在 `taskStatus.ts`），
+    这里不判语义——文件内容 = 屏幕上那些行，两处不可能对不上。
+    权限仍由 `get_detail` 把关，和 GET 完全一致。
+    """
+    ids = [int(i) for i in (req.recordIds or [])][:500]
+    if not ids:
+        # 空列表 = 一个都没筛中。要全量请走 GET（前端 0 人时按钮本来就是禁用的）
+        raise BizException.bad_request("这个筛选下没有可导出的学生")
+    label = str(req.label or "").strip()[:32] or None
+    return task_excel.xlsx_response(
+        task_excel.export_detail(db, user, task_id, only_ids=ids, label=label)
+    )
+
+
+# ---------------- 学院任务：学生级点名（第四十五轮） ----------------
+
+
+@router.get("/{task_id}/rollcall", summary="学院任务的点名页（班主任视角）")
+def task_rollcall(
+    task_id: int,
+    classId: int | None = Query(None, description="班主任带多个班时指定看哪个班"),
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """班主任打开学院任务，看到**自己班的学生名册**，逐个标记状态。
+
+    和 `/detail` 的区别：`/detail` 是**发布人/院长看结果**的汇总视角，
+    这里是**班主任填表**的视角——只给能管的班，只给能管的学生。
+    """
+    return ok(svc.get_rollcall(db, user, task_id, classId))
+
+
+@router.put("/{task_id}/rollcall", summary="批量保存点名结果（一次存多个学生）")
+def save_rollcall_batch(
+    task_id: int,
+    req: TaskRollcallBatchRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """一次保存多个学生。点名页的「保存全部」走这里。
+
+    整批要么全成要么全不动：校验不过就 400 并指名道姓，**一条都不写**
+    （半保存会让老师搞不清到底存了哪几个）。
+
+    声明在 `/{task_id}/rollcall/{record_id}` **之前**：路径段数不同本来不会撞，
+    但字面量路径排在参数路径前面是这个仓库的一贯写法。
+    """
+    return ok(
+        svc.save_student_answers(
+            db,
+            user,
+            task_id,
+            [it.model_dump() for it in req.items],
+        )
+    )
+
+
+@router.put(
+    "/{task_id}/rollcall/{record_id}", summary="给一个学生打状态（随时存，重复提交是改）"
+)
+def save_rollcall(
+    task_id: int,
+    record_id: int,
+    req: TaskAnswerRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """班主任给**一个学生**打一个状态。一次一个，标几个存几个，下次接着标。"""
+    return ok(
+        svc.save_student_answer(
+            db, user, task_id, record_id, req.value, req.note
+        )
+    )
 
 
 # ---------------- 写 ----------------

@@ -2,7 +2,8 @@
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
-import { createUser, deleteUser, fetchUsers, updateUser } from '@/api/users'
+import { batchUsers, createUser, deleteUser, fetchUsers, updateUser } from '@/api/users'
+import type { UserBatchAction } from '@/api/users'
 import { useModal } from '@/composables/useModal'
 import { useUserStore } from '@/stores/user'
 import type { GuestScope, Role, UserAccount } from '@/types'
@@ -49,6 +50,8 @@ async function load() {
     const data = await fetchUsers(keyword.value.trim() || undefined)
     if (s !== seq) return
     users.value = data
+    // 重载后把已经不在列表里的 id 从已选里剔掉（被删了、被搜索筛掉了）
+    pruneSelection()
   } catch {
     if (s === seq) users.value = []
   } finally {
@@ -358,6 +361,110 @@ async function onDelete(row: UserAccount) {
   }
 }
 
+/* ============================ 批量（第四十四轮） ============================ */
+
+/** 勾选中的成员 id。列表重新加载后会按 id 对齐，勾中的人还在就保留。 */
+const selectedIds = ref<number[]>([])
+const batchLoading = ref(false)
+
+/**
+ * 这一行能不能勾。
+ *
+ * 判据和后端 `batch_users` 的跳过规则**同一条**：自己不能动，
+ * 等级相同/更低的账号也不能动（否则班长能勾掉班主任）。
+ * 前端先挡一道是为了「勾了半天最后全被跳过」这种空欢喜，
+ * 真正的闸门仍然是后端。
+ */
+function selectable(row: UserAccount): boolean {
+  if (isSelf(row)) return false
+  return roleLevel(userStore.user?.role ?? null) > roleLevel(row.role)
+}
+
+/**
+ * 勾选变化回调。
+ *
+ * 直接采用 el-table 给的行列表：**全选框、半选态、可勾过滤全归表格自己管**
+ * （`type="selection"` + `:selectable`）。在这里另起一套 `allSelected`
+ * 去驱动表头，只会和表格内部状态打架——「全选后手动取消一个」就会对不上。
+ */
+function onSelectionChange(rows: UserAccount[]) {
+  selectedIds.value = rows.map((r) => r.id)
+}
+
+/**
+ * 列表重载后把已失效的 id 剔掉。
+ *
+ * 表格只对**当前这一页**的勾选负责，被搜索筛掉、被批量删掉的行
+ * 不会自动从 `selectedIds` 里消失——不剔的话「已选 3 人」里躺着两个查不到的人。
+ */
+function pruneSelection() {
+  const alive = new Set(users.value.map((u) => u.id))
+  selectedIds.value = selectedIds.value.filter((id) => alive.has(id))
+}
+
+/** 批量确认框的措辞按动作走：删除最重，重置密码要说清楚后果 */
+const BATCH_CONFIRM: Record<UserBatchAction, { title: string; confirm: string; type: 'warning' | 'error' }> = {
+  disable: { title: '批量停用', confirm: '停用', type: 'warning' },
+  enable: { title: '批量启用', confirm: '启用', type: 'warning' },
+  delete: { title: '批量删除', confirm: '确认删除', type: 'error' },
+  resetPassword: { title: '批量重置密码', confirm: '确认重置', type: 'warning' },
+}
+
+function confirmText(action: UserBatchAction, names: string[]): string {
+  const shown = names.slice(0, 5).join('、')
+  const more = names.length > 5 ? ` 等 ${names.length} 人` : ''
+  if (action === 'delete') {
+    return `确认删除「${shown}」${more}？删除后这些账号立即消失且不可恢复。` +
+      '已有流水、缴费或批次记录的账号会被跳过，逐条告诉你原因。'
+  }
+  if (action === 'resetPassword') {
+    return `把「${shown}」${more}的密码统一重置为初始密码 123456？` +
+      '原密码立即失效，重置后请务必通知本人尽快登录修改。'
+  }
+  if (action === 'disable') {
+    return `停用「${shown}」${more}？停用后无法登录，历史流水与缴费记录保持不变，随时可以启用。`
+  }
+  return `启用「${shown}」${more}？启用后即可正常登录。`
+}
+
+/** 把 skipped 拼成人话：「已处理 3 人；跳过 1 人：已关联 12 笔流水…」 */
+function reportBatch(actionText: string, changed: number, skipped: { userId: number; reason: string }[]): void {
+  const head = `已${actionText} ${changed} 人`
+  if (!skipped.length) {
+    ElMessage.success(head)
+    return
+  }
+  const reasons = [...new Set(skipped.map((s) => s.reason))]
+  ElMessage.warning(`${head}；跳过 ${skipped.length} 人：${reasons.join('；')}`)
+}
+
+async function onBatch(action: UserBatchAction) {
+  const ids = [...selectedIds.value]
+  if (!ids.length) return
+  const names = users.value.filter((u) => ids.includes(u.id)).map((u) => u.realName || u.username)
+  const meta = BATCH_CONFIRM[action]
+  try {
+    await ElMessageBox.confirm(confirmText(action, names), meta.title, {
+      type: meta.type,
+      confirmButtonText: meta.confirm,
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  batchLoading.value = true
+  try {
+    const res = await batchUsers(action, ids)
+    reportBatch(res.actionText, res.changed, res.skipped)
+    selectedIds.value = []
+    await load()
+  } catch {
+    /* 拦截器已统一提示 */
+  } finally {
+    batchLoading.value = false
+  }
+}
+
 /* ============================ 文案与权限等级 ============================ */
 
 const isSelf = (row: UserAccount) => row.id === userStore.user?.id
@@ -460,6 +567,35 @@ onMounted(async () => {
       <el-button @click="resetFilters">重置</el-button>
     </section>
 
+    <!--
+      批量条：勾中人才出现。和「查询/重置」分开一行，避免和筛选混在一起
+      （批量是**对人动手**的操作，误点代价比查询高得多）。
+    -->
+    <div
+      v-if="selectedIds.length"
+      class="glass-card batch-bar"
+      role="group"
+      aria-label="批量操作"
+    >
+      <span>已选 <strong>{{ selectedIds.length }}</strong> 人</span>
+      <el-button size="small" :loading="batchLoading" @click="onBatch('disable')">
+        批量停用
+      </el-button>
+      <el-button size="small" :loading="batchLoading" @click="onBatch('enable')">
+        批量启用
+      </el-button>
+      <el-button size="small" :loading="batchLoading" @click="onBatch('resetPassword')">
+        批量重置密码
+      </el-button>
+      <el-button size="small" type="danger" plain :loading="batchLoading" @click="onBatch('delete')">
+        批量删除
+      </el-button>
+      <el-button size="small" text @click="selectedIds = []">取消选择</el-button>
+      <span class="muted">
+        自己和等级相当的账号不能批量操作；删除只对没有任何流水/缴费/批次记录的账号生效。
+      </span>
+    </div>
+
     <!-- 桌面：表格 -->
     <section
       class="glass-card table-wrap desktop-only"
@@ -467,7 +603,12 @@ onMounted(async () => {
       :aria-busy="loading || listLoading"
       v-loading="loading || listLoading"
     >
-      <el-table :data="users" :empty-text="emptyText">
+      <el-table :data="users" :empty-text="emptyText" @selection-change="onSelectionChange">
+        <!--
+          勾选列。不可勾的行（自己、等级相同/更低的账号）由 `selectable` 关掉，
+          和后端 batch_users 的跳过规则同一条——否则勾半天最后全被跳过。
+        -->
+        <el-table-column type="selection" width="42" :selectable="selectable" />
         <el-table-column label="成员" min-width="180">
           <template #default="{ row }">
             <div class="who">
@@ -939,6 +1080,22 @@ onMounted(async () => {
 
 .f-keyword {
   width: 260px;
+}
+
+/* 批量条：勾中人才出现，样式和筛选条一致但用浅底色区分开
+   （这是「对人动手」的一排按钮，不该长得和查询条一样） */
+.batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--el-fill-color-light);
+}
+
+.batch-bar .muted {
+  font-size: 12px;
+  flex: 1 1 240px;
 }
 
 .table-wrap {

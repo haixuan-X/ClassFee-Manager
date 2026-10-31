@@ -72,10 +72,10 @@ class CollegeTransferRequest(BaseModel):
 
 
 class CollegeTeachersRequest(BaseModel):
-    """设置某个班的班主任（可以多个）。"""
+    """设置某个班的班主任（**一个班一个**，换人=顶替）。"""
 
-    #: 班主任账号 id 列表
-    teacherIds: list[int] = Field(default_factory=list)
+    #: 班主任账号 id；null = 该班暂无班主任账号
+    teacherId: int | None = None
 
 
 class CollegeClassCreateRequest(BaseModel):
@@ -493,13 +493,15 @@ def set_class_teachers(
     user: LoginUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """设置某个班的班主任（**可以多个**）。
+    """设置某个班的班主任（**一个班一个**，换人=顶替）（第五十一轮收紧）。
 
     「班主任」是**班**的属性——一个老师可以带好几个班，
     这在以前「一个账号只能属于一个班」的模型里表达不出来。
+    但一个班只有**一位**班主任：这里是唯一允许覆盖的入口（显式点名顶替），
+    其余入口撞上已有班主任一律报错指路到这里。
     """
     require_min_level(user, "DEAN", "学院成员管理")
-    return ok(college_service.set_class_teachers(db, user, class_id, req.teacherIds))
+    return ok(college_service.set_class_teachers(db, user, class_id, req.teacherId))
 
 
 @router.get("/tasks", summary="学院任务一览")

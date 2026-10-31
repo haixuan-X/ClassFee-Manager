@@ -43,7 +43,7 @@ from ..models import (
     SysUser,
     SysUserClass,
 )
-from ..security import LoginUser
+from ..security import DEAN_ROLE, LoginUser
 from . import student_excel as se
 from . import student_service as svc
 from .college_service import _active_classes, _grade_choices, _unified_columns
@@ -297,6 +297,11 @@ _ADVISER_PHONE_HEADERS = ("手机号", "电话", "手机")
 _ADVISER_CLASS_HEADERS = ("带的班", "班级", "班级名", "带班", "所带班级")
 _ADVISER_DEFAULT_PWD = "123456"
 
+#: 表头最多允许出现在第几行（1 起）。正常模板表头就在第 1 行；
+#: 往下扫几行是给「旧模板（表头垫在标题后）」和「用户自己加了标题行」
+#: 留的活路，见 `import_advisers` 里的注释。
+_ADVISER_HEADER_SCAN_ROWS = 5
+
 
 def _col_index(headers: list[str], names: tuple[str, ...]) -> int:
     for n in names:
@@ -306,29 +311,42 @@ def _col_index(headers: list[str], names: tuple[str, ...]) -> int:
 
 
 def adviser_template() -> bytes:
-    """班主任导入模板（表头 + 说明，不含示例数据，避免误导入）。"""
+    """班主任导入模板（表头 + 说明，不含示例数据，避免误导入）。
+
+    ## 表头必须在第 1 行
+
+    和 `student_excel.build_template_xlsx` 的铁律一致：**导入读的是第一行表头**，
+    模板里但凡在表头上面垫标题/说明行，用户填完传回来就必然报
+    「表格里必须有「姓名」和「登录名」列」—— 第一版就是这么写的，
+    等于模板自己把自己废了。说明文字挪到第二张「填写说明」sheet：
+    导入只读第一张表，说明写哪儿都不碍事。
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "班主任导入"
-    ws.cell(
-        row=1, column=1, value="班主任导入模板 · 填好传回「学院 → 成员管理 → 导入班主任」"
+
+    headers = ["姓名", "登录名", "初始密码", "手机号", "带的班"]
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=i, value=h)
+        c.font = _HEAD_FONT
+        c.fill = _HEAD_FILL
+        c.alignment = Alignment(horizontal="center")
+        ws.column_dimensions[get_column_letter(i)].width = 22
+
+    hs = wb.create_sheet("填写说明")
+    hs.cell(
+        row=1, column=1, value="班主任导入模板 · 填好传回「学院 → 班主任名册 → 导入班主任」"
     ).font = _TITLE_FONT
-    ws.cell(
-        row=2,
+    hs.cell(
+        row=3,
         column=1,
         value=(
             "姓名、登录名必填；班级必须已存在，多个用顿号/逗号分隔；"
             "密码留空默认 123456；登录名已存在的会更新资料。"
         ),
     ).font = Font(size=10, color="666666")
+    hs.column_dimensions["A"].width = 80
 
-    headers = ["姓名", "登录名", "初始密码", "手机号", "带的班"]
-    for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=3, column=i, value=h)
-        c.font = _HEAD_FONT
-        c.fill = _HEAD_FILL
-        c.alignment = Alignment(horizontal="center")
-        ws.column_dimensions[get_column_letter(i)].width = 22
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -343,7 +361,7 @@ def import_advisers(db: Session, user: LoginUser, content: bytes) -> dict:
     - 导入后把「带的班」写成该账号的管辖范围。
     """
     from ..security import hash_password
-    from .user_service import _set_managed_classes
+    from .user_service import _set_managed_classes, _teacher_conflict_msg
 
     if not content:
         raise BizException.bad_request("没有读到文件内容")
@@ -352,24 +370,48 @@ def import_advisers(db: Session, user: LoginUser, content: bytes) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise BizException.bad_request(f"无法解析 Excel 文件：{exc}") from exc
     ws = wb[wb.sheetnames[0]]
-    rows = ws.iter_rows(values_only=True)
-    try:
-        header_row = next(rows)
-    except StopIteration as exc:
-        raise BizException.bad_request("表格是空的，至少要有表头") from exc
+    all_rows = list(ws.iter_rows(values_only=True))
+    if not all_rows:
+        raise BizException.bad_request("表格是空的，至少要有表头")
 
-    headers = [se._canon_anchor(c) for c in header_row]
+    # 表头扫描：在前 _ADVISER_HEADER_SCAN_ROWS 行里找**同时认得出「姓名」和「登录名」**的
+    # 那一行。为什么不当第 1 行死读：
+    #
+    # - 历史版本的模板把标题/说明垫在表头前面（表头在第 3 行），用户手里
+    #   **已经填好的文件**不能作废——重新下载重填一遍说不过去；
+    # - 用户拿自己建的表来导（顶部加一行大标题「XX班班主任」）是常见操作，
+    #   为这个报「必须有姓名和登录名列」是难为人。
+    #
+    # 只认**两个必填列同时命中**才算表头：单看一列，说明行里出现「姓名」
+    # 两个字就会被误判成表头。
+    header_at = -1
+    headers: list[str] = []
+    for idx, raw in enumerate(all_rows[:_ADVISER_HEADER_SCAN_ROWS]):
+        hs = [se._canon_anchor(c) for c in raw]
+        if (
+            _col_index(hs, _ADVISER_NAME_HEADERS) >= 0
+            and _col_index(hs, _ADVISER_USER_HEADERS) >= 0
+        ):
+            header_at = idx
+            headers = hs
+            break
+    if header_at < 0:
+        raise BizException.bad_request(
+            f"表格前 {_ADVISER_HEADER_SCAN_ROWS} 行里没找到「姓名」和「登录名」列——"
+            "表头必须包含这两列（可以调顺序，别改列名）"
+        )
     col_name = _col_index(headers, _ADVISER_NAME_HEADERS)
     col_user = _col_index(headers, _ADVISER_USER_HEADERS)
     col_pwd = _col_index(headers, _ADVISER_PWD_HEADERS)
     col_phone = _col_index(headers, _ADVISER_PHONE_HEADERS)
     col_class = _col_index(headers, _ADVISER_CLASS_HEADERS)
-    if col_name < 0 or col_user < 0:
-        raise BizException.bad_request("表格里必须有「姓名」和「登录名」列")
     if col_class < 0:
         raise BizException.bad_request("表格里必须有「带的班」列")
 
-    body, _samples = se._read_body(rows, headers)
+    # 数据行从表头**下一行**起；行号照实传，报错里的「第 N 行」才是真行号
+    body, _samples = se._read_body(
+        all_rows[header_at + 1 :], headers, start_row=header_at + 2
+    )
 
     created = updated = skipped = 0
     errors: list[str] = []
@@ -403,6 +445,25 @@ def import_advisers(db: Session, user: LoginUser, content: bytes) -> dict:
                 continue
             if not matched:
                 errors.append(f"第 {excel_row_no} 行：没有填写有效的班")
+                skipped += 1
+                continue
+
+            # 第五十一轮：**一个班一个班主任**。这一行要挂的班里已有**别的**
+            # 班主任 → 整行跳过并报错（指路「改班主任安排」），**不静默顶替**。
+            # 同一份表重复导入不算冲突（exclude 自己的登录名——更新资料的常规路径）。
+            # ⚠ 必须在下面任何 `existing.xxx = ...` 赋值**之前**查：
+            # `continue` 只跳出循环，不会回滚 db.begin() 里已做的属性赋值，
+            # 先改再跳等于把「跳过」的行也改了。
+            self_id = db.scalar(select(SysUser.id).where(SysUser.username == uname))
+            conflict: str | None = None
+            for c in matched:
+                conflict = _teacher_conflict_msg(
+                    db, c.id, exclude_user_id=self_id, action=f"第 {excel_row_no} 行导入"
+                )
+                if conflict is not None:
+                    break
+            if conflict is not None:
+                errors.append(conflict)
                 skipped += 1
                 continue
 
@@ -443,7 +504,15 @@ def import_advisers(db: Session, user: LoginUser, content: bytes) -> dict:
                 uid = row.id
                 created += 1
 
-            _set_managed_classes(db, uid, matched[0].id, [c.id for c in matched])
+            # 导入的「带的班」= 这个老师当这些班的班主任（冲突已在上面的循环里
+            # 逐行确认过），所以标志写 1；否则名册上会一个班主任都没有。
+            _set_managed_classes(
+                db,
+                uid,
+                matched[0].id,
+                [c.id for c in matched],
+                adviser_class_ids={c.id for c in matched},
+            )
 
     return {
         "created": created,
@@ -729,8 +798,8 @@ def import_xlsx(
         teacher_links = 0
         for cid, names in teacher_by_class.items():
             for t_name in sorted(names):
-                uid = db.scalar(
-                    select(SysUser.id).where(
+                who = db.scalar(
+                    select(SysUser).where(
                         or_(
                             SysUser.real_name == t_name,
                             SysUser.username == t_name,
@@ -738,19 +807,51 @@ def import_xlsx(
                         SysUser.status == 1,
                     ).limit(1)
                 )
-                if uid is None:
+                if who is None:
                     errors.append(
                         f"班级「{by_id[cid].class_name if cid in by_id else cid}」的班主任"
                         f"「{t_name}」找不到对应账号（按姓名或登录名匹配），没配上"
                     )
                     continue
-                exists = db.scalar(
-                    select(SysUserClass.user_id).where(
+                uid = int(who.id)
+                # 第五十一轮：只有名册口径里的角色才占班主任位；
+                # 班长/生活委员被写成「班主任」只是管理权（和以前名册不列他们一致）。
+                adviser = 1 if (
+                    who.role == "TEACHER"
+                    or (who.role == DEAN_ROLE and not who.dean_only)
+                ) else 0
+                # **一个班一个班主任**：表格里填的人不是现任 → 不挂、报出来
+                # （指路「改班主任安排」）。不管匹配到的这位是什么角色：
+                # 表格这一列的意思就是「这个班的班主任是谁」，和系统里现任
+                # 对不上就该报出来，而不是把两个人都挂上。
+                from .user_service import _teacher_conflict_msg  # noqa: PLC0415
+
+                msg = _teacher_conflict_msg(
+                    db,
+                    cid,
+                    exclude_user_id=uid,
+                    action=f"班级「{by_id[cid].class_name if cid in by_id else cid}」的班主任「{t_name}」",
+                )
+                if msg is not None:
+                    errors.append(msg)
+                    continue
+                existing = db.scalar(
+                    select(SysUserClass).where(
                         SysUserClass.user_id == uid, SysUserClass.class_id == cid
                     )
                 )
-                if exists is None:
-                    db.add(SysUserClass(user_id=int(uid), class_id=cid))
+                if existing is None:
+                    db.add(
+                        SysUserClass(
+                            user_id=uid, class_id=cid, is_adviser=adviser
+                        )
+                    )
+                    teacher_links += 1
+                elif adviser and not existing.is_adviser:
+                    # 这位老师本来就「能管」这个班（比如院长的「我带的班」），
+                    # 表格现在明确说他是班主任 → 把标志补上，不要因为行已存在
+                    # 就静默跳过（那会表现为「导入成功，名册仍然没人」）。
+                    existing.is_adviser = 1
                     teacher_links += 1
                 # 班级信息里登记的班主任姓名也同步一下（那一栏是自由文本）
                 clazz = by_id.get(cid)

@@ -19,7 +19,7 @@ const loading = ref(false)
 const alertMessage = ref('')
 const alertRef = ref<HTMLElement>()
 
-/** 「学生信息管理系统 v1.1.0」。拉不到就是空串，模板整块不渲染。 */
+/** 「学生信息管理系统 v1.2.0」。拉不到就是空串，模板整块不渲染。 */
 const versionLabel = ref('')
 
 onMounted(async () => {

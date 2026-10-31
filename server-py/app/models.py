@@ -74,12 +74,29 @@ class SysUserClass(Base):
     要么让他管不全。这张表就是「一个账号管哪些班」的正解。
 
     `sys_user.class_id` 保留 = **默认班**（登录后先落在哪个班）。
+
+    ## 第五十一轮：`is_adviser` 把「班主任」和「能管的班」分开
+
+    这张表原来一身二职：**有行 = 能管这个班 = 名册上就是班主任**。
+    于是院长只要在个人信息里勾一个「我带的班」，就自动成了那个班的
+    班主任——名册上冒出两个班主任，用户直接问「一个班不可能有两个吧」。
+
+    现在拆成两层：
+
+    - 一行 = 这个账号**能管**这个班（默认班也算，见 `managed_class_ids`）
+    - `is_adviser=1` 才表示「他是这个班的班主任」——名册与冲突判定只看这一位
+
+    **院长兼班主任与普通班主任同权同额**：一个班无论角色如何，只能有
+    一位 `is_adviser=1`。院长被顶替后可以留着管理行（还能进这个班），
+    但标志清零、不再占名册位。
     """
 
     __tablename__ = "sys_user_class"
 
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     class_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 1 = 这个班的班主任（名册口径）；0 = 只是能管理这个班
+    is_adviser: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class FeeCategory(Base):
@@ -336,6 +353,45 @@ class ClsTaskAnswer(Base):
     task_id: Mapped[int] = mapped_column(Integer)
     user_id: Mapped[int] = mapped_column(Integer)
     value_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class ClsTaskStudentAnswer(Base):
+    """**学生级**回答（第四十五轮）：学院任务发给班主任，班主任按学生逐个标记。
+
+    ## 为什么不复用 `cls_task_answer`
+
+    那张表一行 = 「一个**账号**对一个任务的答案」。学院任务要的是
+    「**这个学生**到校了没」，而名册里的学生**不一定有登录账号**
+    （`student_record.user_id` 是可选的：老师可以只导名单不开账号）。
+    拿 `user_id` 当键，没账号的学生就永远进不了统计。
+
+    所以这里按 `record_id`（`student_record.id`）记，一人一行。
+    `class_id` 是**冗余列**——按班汇总、按班催交都要它，
+    存下来就不用每次回表 join，也让「这个学生的班变了」这种脏数据
+    不会把历史答案搬到别的班去。
+
+    `value_json` 的语义和 `cls_task_answer` **完全一致**（存选项原文，
+    不存下标），所以 `_dump_value` / `_display_value` 那两个转换函数
+    可以原样复用——题型的解析口径只有一份实现。
+    """
+
+    __tablename__ = "cls_task_student_answer"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(Integer)
+    #: `student_record.id` —— 名册里的一行，不一定是账号
+    record_id: Mapped[int] = mapped_column(Integer)
+    #: 冗余存学生当时所在的班（按班汇总用，见类 docstring）
+    class_id: Mapped[int] = mapped_column(Integer)
+    value_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: **这个学生**的补充说明（「未到，家里有事」），和班级级的 `note` 无关
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP")

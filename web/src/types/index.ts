@@ -1250,6 +1250,33 @@ export interface TaskDetailRow {
   submittedAt: string | null
 }
 
+/** 学院任务明细的一个班（第四十五轮：按班分组，班里列学生） */
+export interface TaskDetailClass {
+  classId: number
+  className: string
+  /** 这个班的班主任姓名（可能多个，也可能没有） */
+  teachers: string[]
+  total: number
+  answered: number
+  unanswered: number
+  noteCount: number
+  /** 各状态分布：状态名 -> 人数 */
+  counts: Record<string, number>
+  rows: TaskDetailStudentRow[]
+}
+
+/** 学院任务明细的一个学生行 */
+export interface TaskDetailStudentRow {
+  recordId: number
+  studentNo: string
+  name: string
+  answered: boolean
+  value: string | null
+  raw: string | null
+  note: string | null
+  submittedAt: string | null
+}
+
 /** 明细。**非发布人 / 非班主任拿不到**（后端 403） */
 export interface TaskDetail {
   taskId: number
@@ -1260,8 +1287,17 @@ export interface TaskDetail {
   allowText: boolean
   deadline: string | null
   open: boolean
-  /** 未填的人排在前面（后端已排序） */
+  /**
+   * `CLASS` = 班级任务（一人一行，`rows` 有值）；
+   * `COLLEGE` = 学院任务（按班分组，`classes` 有值，`rows` 是空数组）。
+   *
+   * 两套口径由后端 `task_service.get_detail` 分流，前端按 `scope` 选渲染路径。
+   */
+  scope: TaskScope
+  /** 未填的人排在前面（后端已排序）。学院任务这里是空数组，看 `classes` */
   rows: TaskDetailRow[]
+  /** 学院任务才有值；班级任务是空数组 */
+  classes: TaskDetailClass[]
   answered: number
   unanswered: number
   noteCount: number

@@ -279,6 +279,31 @@ const receiptPath = ref('')
 const receiptTitle = ref('')
 const receiptCache = new Map<string, string>()
 
+/**
+ * 凭证缓存的上限。
+ *
+ * 每看一张凭证就多一个 blob URL，**blob 数据会被钉在内存里直到 revoke**。
+ * 不设上限的话，一个长会话里来回翻流水，缓存会一路涨上去——
+ * 而这些 blob 是登记在**浏览器主进程**的 blob 注册表里的，
+ * 堆的是主进程内存，不是标签页的 JS 堆（页面上量 heap 反映不出来）。
+ *
+ * 24 张够用：正常核对凭证是「翻到哪看哪」，不会一次开几十张；
+ * 真要连续看，超出上限就淘汰最旧的那张（下次点开重新拉，代价是一次请求）。
+ */
+const RECEIPT_CACHE_MAX = 24
+
+/** 存一张：超上限就淘汰最早进来的那张（Map 保持插入顺序，第一个就是最旧的） */
+function cacheReceipt(path: string, url: string) {
+  if (receiptCache.size >= RECEIPT_CACHE_MAX) {
+    const oldest = receiptCache.keys().next().value
+    if (oldest !== undefined) {
+      URL.revokeObjectURL(receiptCache.get(oldest) as string)
+      receiptCache.delete(oldest)
+    }
+  }
+  receiptCache.set(path, url)
+}
+
 /** 弹层内根元素：供 useModal 判定本对话框是否处于最上层（Esc 归谁消费） */
 const dialogRef = ref<HTMLElement>()
 const { restoreFocus } = useModal(receiptVisible, dialogRef)
@@ -289,7 +314,7 @@ async function loadReceipt(path: string) {
   receiptLoading.value = true
   try {
     const url = URL.createObjectURL(await fetchReceipt(path))
-    receiptCache.set(path, url)
+    cacheReceipt(path, url)
     receiptSrc.value = url
   } catch {
     receiptFailed.value = true // 拦截器已提示；弹窗内保留重试入口

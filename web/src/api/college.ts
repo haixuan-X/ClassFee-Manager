@@ -84,16 +84,22 @@ export function fetchCollegeTeacherCandidates() {
 }
 
 /**
- * 设置某个班的班主任（**可以多个**）。
+ * 设置某个班的班主任（第五十一轮：**一个班一个班主任**，换人=顶替）。
  *
- * 顺带把账号的默认班（`sys_user.class_id`）对齐到这个班——
- * 它是「登录后落在哪个班」，不能和实际安排矛盾。
+ * 一个老师可以同时带好几个班，但一个班只有**一位**班主任。这是唯一允许
+ * 覆盖的入口（显式点名顶替）；其余入口（导入 / 建号 / 本人改「我带的班」）
+ * 撞上已有班主任会 400 指路到这里。
+ *
+ * `teacherId=null` = 该班暂无班主任账号。
+ *
+ * ⚠ **不动账号的默认班**（`sys_user.class_id`）：那是老师本人的登录落点。
+ * 一个老师带两个班时，改一次安排就搬一次登录落点，他会落在别人的班上。
  */
-export function setCollegeClassTeachers(classId: number, teacherIds: number[]) {
-  return request<{ classId: number; className: string; teacherIds: number[] }>({
+export function setCollegeClassTeacher(classId: number, teacherId: number | null) {
+  return request<{ classId: number; className: string; teacherId: number | null }>({
     url: `/college/classes/${classId}/teachers`,
     method: 'put',
-    data: { teacherIds },
+    data: { teacherId },
   })
 }
 

@@ -363,6 +363,11 @@ _STAFF_ROUTES: list[tuple[str, str]] = [
     ("GET", r"^/api/members$"),
     ("GET", r"^/api/users$"),
     ("POST", r"^/api/users$"),
+    # 第四十四轮：批量管理。**白名单是按「方法 + 精确路径」列的**，
+    # 所以新端点必须显式加进来，否则运营角色一调就是 403。
+    # 刻意不写成 `^/api/users/[^/]+$` 的 POST：那会顺带放行 `POST /api/users/{id}`
+    # 这种并不存在的路径，白名单宁可窄一点也不要做成「反正不存在」的放行。
+    ("POST", r"^/api/users/batch$"),
     ("PUT", r"^/api/users/[^/]+$"),
     ("DELETE", r"^/api/users/[^/]+$"),
     # 第十八轮：GET /api/batches 移出本表 —— 普通成员需要知道「有没有班费要交 / 我交了吗」。

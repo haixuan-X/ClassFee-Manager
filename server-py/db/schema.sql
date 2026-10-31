@@ -50,12 +50,23 @@ CREATE TABLE IF NOT EXISTS sys_user (
 -- ⚠ 不用「把 class_id 存成逗号分隔的字符串」那种省事写法：
 --   查「这个班有哪几个老师」「这个人管哪几个班」都得字符串拆分，
 --   而且没法加外键、没法建索引。
+--
+-- 第五十一轮拆成两层：
+--   - 有行  = 这个账号**能管理**这个班（默认班也算）
+--   - is_adviser = 1 才表示「他是这个班的班主任」
+--
+-- 为什么必须拆：院长在个人信息里勾「我带的班」只是「能管」，以前却
+-- 直接被当成班主任，名册上于是出现两个班主任。用户的口径是**一个班
+-- 只能有一位班主任**，院长兼班主任与普通班主任同权同额。
+--
+-- 被顶替的班主任/院长可以留着行（还能进这个班），只把 is_adviser 清 0。
 CREATE TABLE IF NOT EXISTS sys_user_class (
-  user_id  BIGINT NOT NULL,
-  class_id BIGINT NOT NULL,
+  user_id    BIGINT NOT NULL,
+  class_id   BIGINT NOT NULL,
+  is_adviser TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=这个班的班主任（名册口径）；0=只是能管理这个班',
   PRIMARY KEY (user_id, class_id),
   KEY idx_uc_class (class_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='账号可管理的班级（多对多）；sys_user.class_id 是默认班';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='账号可管理的班级（多对多）；is_adviser=1 才是班主任';
 
 CREATE TABLE IF NOT EXISTS fee_category (
   id       BIGINT       NOT NULL AUTO_INCREMENT,
@@ -261,3 +272,26 @@ CREATE TABLE IF NOT EXISTS cls_task_answer (
   UNIQUE KEY uk_task_user (task_id, user_id),
   KEY idx_answer_task (task_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='班级任务回答';
+
+-- 5) 学生级回答（第四十五轮）：学院任务发给班主任，班主任**按学生逐个标记**
+--    （「返校统计」→ 每个学生一个状态：到校 / 请假 / 未到）。
+--
+--    刻意不复用 cls_task_answer：那张表按**账号**（user_id）记一行，
+--    而名册里的学生**不一定有登录账号**（student_record.user_id 可空，
+--    老师可以只导名单不开账号）。拿账号当键，没账号的学生就永远进不了统计。
+--    这里按 student_record.id 记，一人一行。
+--
+--    class_id 是**冗余列**：按班汇总、按班催交都要它，存下来不用每次回表 join。
+CREATE TABLE IF NOT EXISTS cls_task_student_answer (
+  id           BIGINT       NOT NULL AUTO_INCREMENT,
+  task_id      BIGINT       NOT NULL,
+  record_id    BIGINT       NOT NULL COMMENT 'student_record.id —— 名册里的一行',
+  class_id     BIGINT       NOT NULL COMMENT '冗余：学生当时所在的班',
+  value_json   TEXT         NULL COMMENT '和 cls_task_answer 同口径：存选项原文',
+  note         VARCHAR(255) NULL COMMENT '**这个学生**的补充说明（未到，家里有事）',
+  submitted_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_task_record (task_id, record_id),
+  KEY idx_task_class (task_id, class_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='学院任务的学生级回答（按学生标记）';
