@@ -1755,7 +1755,7 @@ const accNothingToDo = computed(() => {
         <el-form-item label="姓名" required>
           <el-input
             v-model="addName"
-            placeholder="如 王浩然"
+            placeholder="如 张三"
             maxlength="32"
             @keyup.enter="submitAdd"
           />
