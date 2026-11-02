@@ -20,31 +20,10 @@
 
 ## 界面一览
 
-### 仪表盘 · 余额实时对账、近 6 月趋势、支出分类占比
-
-![仪表盘](docs/screenshots/02-dashboard.png)
-
-### 账本明细 · 多条件筛选、方向用 +/− 标注（不只靠颜色）
-
-![账本明细](docs/screenshots/03-records.png)
-
-### 收费批次 · 逐人标记缴费、自动生成流水、关闭留痕
-
-![收费批次](docs/screenshots/05-batches.png)
-
-### 我的缴费 · 同学能看到自己交没交、还剩几天截止
-
-![我的缴费](docs/screenshots/07-my-fees.png)
-
-### 审计留痕 · 已作废流水的「谁作废、什么时候」
-
-![审计留痕](docs/screenshots/04-void-audit.png)
-
-### 班级公告 · 置顶、下架可恢复、最后编辑人留痕
-
-![班级公告](docs/screenshots/06-notices.png)
-
-> 以上截图取自**演示数据**（`test` 账号 + 8 名虚拟同学）。真实部署时数据库是空的，由班主任自行建号与记账。
+> **截图已移除（脱敏）**：本仓库曾放过界面截图，其中带有真实姓名与学号。
+> 为避免个人信息外泄，`docs/screenshots/` 已整体删除，此处不再内嵌图片。
+> 想看效果请在本地跑起来自己点：前后端启动后用 `.env` 声明的账号登录即可
+> （空库首启只建班级与类别脚手架，不带任何真实数据）。
 
 ---
 
@@ -282,7 +261,6 @@ classfee-manager/
 
 | 文档 | 内容 | 适合谁 |
 |------|------|--------|
-| [`docs/screenshots/`](docs/screenshots/) | README 与文档用界面截图（演示数据） | 想先看效果 |
 | [`docs/系统设计文档.md`](docs/系统设计文档.md) | **权威设计文档**：角色权限矩阵、模块清单、7 张表 DDL、全部 REST 接口与错误码、目录结构、安全方案、**22 轮交付记录（含踩坑与教训）** | 改代码前必读 |
 | [`docs/部署-Linux.md`](docs/部署-Linux.md) | Linux 手动部署、Docker Compose、复用已有数据库、生产注意事项、故障排查、备份更新 | 部署运维 |
 | [`design-system/classfee-manager/MASTER.md`](design-system/classfee-manager/MASTER.md) | **UI 规范**：色彩 token、字号、间距、组件规格、响应式断点、动效、**交付前检查清单** | 改界面样式 |
