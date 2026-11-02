@@ -246,6 +246,13 @@ def template_xlsx(db: Session) -> tuple[bytes, str]:
             "hint": "填班名（要和库里一致）；整列不填就按导入时选的班",
         },
         {
+            "label": "年级",
+            "type": svc.FT_TEXT,
+            "format": "@",
+            "example": "2024级",
+            "hint": "整班一个值：新建的班按它定年级；已有的班只补空着的",
+        },
+        {
             "label": "学号",
             "type": svc.FT_TEXT,
             "format": "@",
@@ -262,6 +269,8 @@ def template_xlsx(db: Session) -> tuple[bytes, str]:
             "hint": "必填",
         },
     ]
+    # 「年级」是**班**的属性（第五十八轮）：上面已经单列一列，合并列里那份
+    # 同名的学生字段要去掉——否则模板里会出现两个「年级」，用户不知道填哪个。
     headers += [
         {
             "label": c["label"],
@@ -270,6 +279,7 @@ def template_xlsx(db: Session) -> tuple[bytes, str]:
             "hint": se.FIELD_HINTS.get(c["key"], ""),
         }
         for c in columns
+        if c["key"] != _GRADE_FIELD_KEY
     ]
     return se.build_template_xlsx(
         headers,
@@ -583,14 +593,47 @@ def _shared_key_maker(db: Session, class_ids: list[int]) -> "Callable[[str], str
     return make
 
 
-#: 文件里可能出现的「年级」列名（用来给自动新建的班级定年级）
-GRADE_HEADERS = ("年级", "年级/届别", "入学年级")
+#: 文件里可能出现的「年级」列名（用来给班级定年级）
+#:
+#: 第五十八轮补了「届别 / 年级名称 / 级」这几个别名：用户的原始名册是从
+#: 学校系统导出的，表头不一定就叫「年级」——原来只认三个写法，认不出
+#: 就把整列当普通字段导进去，`cls_class.grade` 一直是空的（名册上显示「—」）。
+GRADE_HEADERS = (
+    "年级",
+    "年级/届别",
+    "入学年级",
+    "年级名称",
+    "所属年级",
+    "届别",
+    "级",
+)
+
+#: 「年级」是**班**的属性，不是学生的属性。
+#:
+#: 导出的学院名册里，班级年级走 `__grade__` 锚点列，且会把同名的学生字段
+#: 去掉（见 `export_xlsx` 里的 `grade_dup`）——也就是说学生身上那份「年级」
+#: 在导出时是**看不见**的。既然导出不认，导入也不该建这份字段，否则
+#: 「导进去看不到、删了又怕丢」。
+_GRADE_FIELD_KEY = "grade"
+
+
+def _norm_grade(v: str) -> str:
+    """年级归一：`2024` → `2024级`（别的写法原样保留）。
+
+    为什么补这个「级」字：库里既有班级存的是 `2022级`，而学校系统导出的
+    原始名册写的是 `2024`。不归一的话，年级筛选里会同时出现 `2024` 和
+    `2022级` 两种口径，看着像两个年级。
+    """
+    s = (v or "").strip()
+    if len(s) == 4 and s.isdigit():
+        s = f"{s}级"
+    return s[:32]
 
 
 def _row_grade_of(cells: list[str], headers: list[str]) -> str:
     """这一行的年级（文件里有「年级」列的话）。
 
-    给**自动新建**的班级定年级用的：名单里写「2026级」，这个班就该是 2026级。
+    给班级定年级用的：名单里写「2026级」，这个班就该是 2026级。
     """
     for h in GRADE_HEADERS:
         if h in headers:
@@ -608,7 +651,7 @@ def _create_class(db: Session, name: str, grade: str) -> ClsClass:
     """
     c = ClsClass(
         class_name=name,
-        grade=grade or "",
+        grade=_norm_grade(grade),
         head_teacher=None,
         balance=Decimal("0.00"),
         status=1,
@@ -674,6 +717,14 @@ def import_xlsx(
             col_teacher = headers.index(name)
             break
 
+    # 「年级」列（第五十八轮）：可选。它是**班**的属性——用来给班定年级，
+    # 不建成学生字段（导出时本来也会被去掉，见 `_GRADE_FIELD_KEY` 的注释）。
+    col_grade = -1
+    for name in GRADE_HEADERS:
+        if name in headers:
+            col_grade = headers.index(name)
+            break
+
     created = updated = skipped = 0
     errors: list[str] = []
     new_fields: list[dict] = []
@@ -714,6 +765,9 @@ def import_xlsx(
         created_classes: list[str] = []
         # 班 → 这一行里出现的班主任名字（第三十二轮）
         teacher_by_class: dict[int, set[str]] = {}
+        # 班 → 文件里写的年级（第五十八轮）。先收着，等学生写完再落到
+        # `cls_class.grade`——**只填空的**，已有的年级不覆盖。
+        grade_by_class: dict[int, str] = {}
         for excel_row_no, cells in body:
             if unassigned:
                 # 「导入默认没有班」：一律进未分班（class_id=0），
@@ -745,6 +799,12 @@ def import_xlsx(
                     t_name = cells[col_teacher].strip()
                     if t_name:
                         teacher_by_class.setdefault(cid, set()).add(t_name)
+                # 第五十八轮：年级也是**班**的元信息。取这一行的值
+                # （同班各行的年级一般一样，以先出现的为准）。
+                if col_grade >= 0 and cid and cid not in grade_by_class:
+                    g_val = cells[col_grade].strip()
+                    if g_val:
+                        grade_by_class[cid] = g_val
             samples = groups.setdefault(cid, ([], {}))[1]
             g_body = groups[cid][0]
             g_body.append((excel_row_no, cells))
@@ -760,7 +820,7 @@ def import_xlsx(
         for cid, (g_body, g_samples) in groups.items():
             # 班级列本身不是字段（它是分发依据），不参与建字段
             g_headers = headers
-            drop = {i for i in (col_class, col_teacher) if i >= 0}
+            drop = {i for i in (col_class, col_teacher, col_grade) if i >= 0}
             if drop:
                 g_headers = [h for i, h in enumerate(headers) if i not in drop]
                 # cells 也要同步去掉那一列，否则列位会错位
@@ -783,6 +843,23 @@ def import_xlsx(
             for h in r["unmatchedColumns"]:
                 if h not in unmatched:
                     unmatched.append(h)
+
+        # ---------- 第五十八轮：把年级落到班上 ----------
+        #
+        # 为什么不在建班时一次写死：**班可能是早就建好的**（上一次导入没带
+        # 年级列，或者院长手建的）。建班那一刻写年级只覆盖「新建」这一种，
+        # 存量班永远补不上——用户在名册上看到的就是一列「—」。
+        #
+        # 只填空的：已经有年级的班不覆盖。文件里的年级是整班一个值，
+        # 但用户可能已经在「班级信息」里手工改过（比如写成「2024级」），
+        # 导入不该把手工的改动冲掉。
+        grade_filled: list[str] = []
+        for cid, g_val in grade_by_class.items():
+            clazz = by_id.get(cid)
+            if clazz is None or (clazz.grade or "").strip():
+                continue
+            clazz.grade = _norm_grade(g_val)
+            grade_filled.append(clazz.class_name)
 
         # ---------- 第三十二轮：按「班主任」列建立师生关系 ----------
         #
@@ -866,6 +943,9 @@ def import_xlsx(
         "rows": processed,
         "skippedEmptyCells": skipped,
         "newFields": new_fields,
+        # 这次按文件里的「年级」列给多少个班补上了年级（第五十八轮）。
+        # 前端拿它提示一句，否则用户不知道「那列年级到底有没有用」。
+        "gradeFilled": grade_filled,
         "duplicateRows": len([e for e in errors if "重复" in e]),
         "unmatchedColumns": unmatched,
         "errors": errors[:50],

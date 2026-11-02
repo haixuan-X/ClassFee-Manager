@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -276,13 +277,25 @@ def close_task(
     return ok(svc.set_status(db, user, task_id, False))
 
 
+class ReopenRequest(BaseModel):
+    """重开时可选的新截止时间（`YYYY-MM-DD HH:mm`）。
+
+    截止时间已过的任务只把 status 打开是没用的（`is_open` 还要看 deadline），
+    所以允许一次请求把两个闸门都打开。
+    """
+
+    deadline: str | None = None
+
+
 @router.post("/{task_id}/reopen")
 def reopen_task(
     task_id: int,
+    body: ReopenRequest | None = None,
     user: LoginUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return ok(svc.set_status(db, user, task_id, True))
+    """重新开放；`deadline` 传了就把截止时间一起往后延。"""
+    return ok(svc.set_status(db, user, task_id, True, deadline=(body.deadline if body else None)))
 
 
 @router.post("/{task_id}/pin")

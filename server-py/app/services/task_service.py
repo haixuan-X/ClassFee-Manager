@@ -1055,14 +1055,44 @@ def update_task(
     return {"id": task.id, "open": is_open(task)}
 
 
-def set_status(db: Session, user: LoginUser, task_id: int, open_: bool) -> dict:
-    """关闭 / 重新开放。已收回的回答保留，重新开放后还在。"""
+def set_status(
+    db: Session, user: LoginUser, task_id: int, open_: bool, deadline: str | None = None
+) -> dict:
+    """关闭 / 重新开放。已收回的回答保留，重新开放后还在。
+
+    ## 重开可以顺手把截止时间往后延（第五十七轮）
+
+    「能不能答题」是**两个闸门**：`status`（人手动开的）**和** `deadline`
+    （到点自动关，不用有人去点关闭）。所以只把 status 打开、而截止时间已经
+    过了的任务，重开后**照样填不了**——列表仍显示「已关闭」，提示却说
+    「已重新开放」，用户只会觉得点了没反应。
+
+    这里允许重开时一起给新截止时间：一次请求把两个闸门都打开。
+    新截止必须**晚于当前时间**（给一个过去的等于白改）。
+    """
     with db.begin():
         task = _require_task(db, user.class_id, task_id)
         _require_publisher(task, user)
+        new_deadline: datetime | None = None
+        if deadline is not None and str(deadline).strip():
+            new_deadline = _parse_deadline(str(deadline))
+            if new_deadline <= datetime.now():
+                raise BizException.bad_request("新的截止时间必须晚于当前时间")
         task.status = 1 if open_ else 0
+        if new_deadline is not None:
+            if not open_:
+                raise BizException.bad_request("只有重开时才能改截止时间")
+            task.deadline = new_deadline
     db.refresh(task)
     return {"id": task.id, "open": is_open(task)}
+
+
+def _parse_deadline(raw: str) -> datetime:
+    """截止时间：`YYYY-MM-DD HH:mm`。格式不对直接 400，不静默丢掉。"""
+    try:
+        return datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise BizException.bad_request("截止时间格式应为 YYYY-MM-DD HH:mm") from None
 
 
 def set_pinned(db: Session, user: LoginUser, task_id: int, pinned: bool) -> dict:

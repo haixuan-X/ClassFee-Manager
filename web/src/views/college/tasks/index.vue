@@ -2,7 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
-import { deleteTask, exportTaskDetail, setTaskOpen, setTaskPinned } from '@/api/tasks'
+import { deleteTask, exportTaskDetail, setTaskPinned } from '@/api/tasks'
+import { toggleTaskOpen } from '@/composables/useReopenTask'
 import { fetchCollegeTasks } from '@/api/college'
 import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
 import TaskRollcallDrawer from '@/components/TaskRollcallDrawer.vue'
@@ -135,12 +136,9 @@ function toggleSelectAll() {
 }
 
 async function toggleOpen(row: CollegeTaskRow) {
-  try {
-    await setTaskOpen(row.id, !row.open)
-    await load()
-  } catch (e) {
-    ElMessage.error(getErrorMessage(e, '操作失败'))
-  }
+  // 重开的「截止已过要先延时」那一段在 useReopenTask 里（两个任务页共用）
+  await toggleTaskOpen(row)
+  await load()
 }
 
 async function togglePin(row: CollegeTaskRow) {

@@ -1226,6 +1226,13 @@ async function onImport(file: File) {
   try {
     const r = await importCollegeStudents(file, importClassId.value)
     ElMessage.success(`导入完成：新增 ${r.created} 人，更新 ${r.updated} 人`)
+    // 第五十八轮：年级是**班**的属性，文件里那一列不一定早就用过——
+    // 老班一直是空年级，补上了就说一句，否则用户不知道那列到底认没认。
+    if (r.gradeFilled?.length) {
+      const names = r.gradeFilled.slice(0, 5).join('、')
+      const more = r.gradeFilled.length > 5 ? ` 等 ${r.gradeFilled.length} 个班` : ''
+      ElMessage.success(`已按名单里的「年级」补上：${names}${more}`)
+    }
     if (r.newFields.length) {
       const detail = r.newFields.map((f) => `${f.label}（${f.typeText}）`).join('、')
       ElMessageBox.alert(

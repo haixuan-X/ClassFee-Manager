@@ -25,7 +25,12 @@ from ..models import (
     SysUser,
     SysUserClass,
 )
-from ..schemas import ProfileUpdateRequest, UserCreateRequest, UserUpdateRequest
+from ..schemas import (
+    ProfileUpdateRequest,
+    TeacherCreateRequest,
+    UserCreateRequest,
+    UserUpdateRequest,
+)
 from ..security import (
     DEAN_ROLE,
     STAFF_ROLES,
@@ -506,6 +511,83 @@ def create_dean(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
         }
     )
     return create_user(db, user, payload)
+
+
+def create_teacher(db: Session, user: LoginUser, req: TeacherCreateRequest) -> dict:
+    """新增班主任（第五十六轮）：先选班，再填人。
+
+    ## 为什么单开这个入口
+
+    演示班被清空之后，班级要由院长自己一个个搭起来。老路子是「去成员管理建号
+    → 再去班主任名册安排」两步，纯院长还没有「成员管理」。这里合成一步：
+    建出来的账号**当场就是这个班的班主任**。
+
+    ## 班级不是调用方说了算的部分
+
+    `classId` 只接受库里**存在且启用**的班；角色钉死 TEACHER；能管的班只有这一个。
+    一班一位（第五十一轮）——该班已有班主任就直接报错并指路「改班主任安排」，
+    不静默顶替（顶替只在那个显式入口允许，见 `set_class_teachers`）。
+
+    ## 为什么不复用 `create_user`
+
+    它是给「班主任给自己/本班建号」用的，里面有一条「操作者默认班已有班主任」
+    的闸门。院长给**别的班**建号时那条闸门会误伤：它查的是院长自己的班，
+    于是「计科2201班已有 test-ls」把谁也建不出来。这里自己建号，
+    班、角色、班主任标志都由上面那几条校验钉死。
+    """
+    # ⚠ 校验必须各自收在 `with db.begin()` 里：`create_user` 自己也要
+    # `db.begin()`，前面若留着一个开着的事务，它会直接抛
+    # 「A transaction is already begun on this Session」（500）。
+    with db.begin():
+        clazz = db.get(ClsClass, req.classId)
+        if clazz is None or clazz.status != 1:
+            raise BizException.bad_request("班级不存在或已停用")
+
+        hit = _class_teacher_conflict(db, req.classId)
+        if hit is not None:
+            raise BizException.bad_request(
+                f"该班已有班主任「{hit.real_name or hit.username}」，"
+                "请到「班主任名册 → 改班主任安排」改人"
+            )
+
+    # ⚠ 不走 `create_user`：它是给「班主任给自己/本班建号」用的，里面有一条
+    # 「操作者默认班已有班主任」的闸门。院长给**别的班**建号时那条闸门会
+    # 误伤——它查的是院长自己的班（计科2201班已有 test-ls），于是建谁都 400。
+    # 这里直接建号，班/角色/标志都由上面的校验钉死。
+    username = (req.username or "").strip()
+    real_name = (req.realName or "").strip()
+    password = (req.password or "").strip() or DEFAULT_INITIAL_PASSWORD
+    if not username:
+        raise BizException.bad_request("请输入登录名")
+    if not real_name:
+        raise BizException.bad_request("请输入姓名")
+
+    with db.begin():
+        # 登录名全局唯一（和 `create_user` 同一条规则）
+        if db.scalar(
+            select(func.count())
+            .select_from(SysUser)
+            .where(SysUser.username == username)
+        ):
+            raise BizException.bad_request("账号已存在")
+
+        row = SysUser(
+            class_id=req.classId,
+            username=username,
+            password=hash_password(password),
+            real_name=real_name,
+            phone=(req.phone or "").strip() or None,
+            role="TEACHER",
+            guest_scopes=None,
+            dean_only=0,
+            status=1,
+        )
+        db.add(row)
+        db.flush()
+        # 班主任标志：没有它名册上不占位，下一个人还能被安排进来 → 两个班主任
+        db.add(SysUserClass(user_id=row.id, class_id=req.classId, is_adviser=1))
+        db.flush()
+    return account_vo(row, managed_class_ids(db, row.id, "TEACHER", req.classId))
 
 
 def delete_adviser_accounts(

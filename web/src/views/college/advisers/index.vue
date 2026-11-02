@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
 import {
-  deleteCollegeAdviserAccounts,
+  createCollegeTeacher,
+  deleteCollegeClasses,
   downloadAdviserTemplate,
   fetchCollegeAdvisers,
   fetchCollegeTeacherCandidates,
@@ -68,14 +69,10 @@ async function load() {
   try {
     list.value = await fetchCollegeAdvisers()
     loadError.value = false
-    // 勾选状态跟着名册走：别处删掉的账号不能还留在选择里，
+    // 勾选状态跟着名册走：别处删掉的班不能还留在选择里，
     // 否则「已选 3 个」点下去只删了 2 个，用户还得自己数。
-    const alive = new Set(
-      (list.value?.rows ?? [])
-        .map((r) => r.teacherId)
-        .filter((id): id is number => id !== null),
-    )
-    selectedTeacherIds.value = selectedTeacherIds.value.filter((id) => alive.has(id))
+    const alive = new Set((list.value?.rows ?? []).map((r) => r.classId))
+    selectedClassIds.value = selectedClassIds.value.filter((id) => alive.has(id))
   } catch {
     list.value = null
     loadError.value = true
@@ -84,7 +81,31 @@ async function load() {
   }
 }
 
-const rows = computed(() => list.value?.rows ?? [])
+/**
+ * 名册的默认顺序：**年级从新到旧，同年级按班名排**。
+ *
+ * 后端 `advisers()` 按 `_active_classes`（建班先后）给，于是「检测2406、
+ * 大数据2402、检测2402…」年级一样却交错着排，看着像没排过。
+ *
+ * 排序放在展示层、不改后端，是因为 `_active_classes` 还被全站的班级下拉
+ * 和筛选共用——动它会连带改掉别处的顺序，那不在这次要修的范围内。
+ * 年级空着的排最后：它表示「还不知道」，不是「最老」。
+ *
+ * 班级名用 `zh-Hans-CN` + `numeric`：中文按拼音、数字按大小，
+ * 这样「检测2402」排在「检测2410」前面（默认字典序会反过来）。
+ */
+const rows = computed(() => {
+  const gradeOf = (r: CollegeAdviserRow): number => {
+    const n = Number.parseInt(r.grade, 10)
+    return Number.isNaN(n) ? Number.NEGATIVE_INFINITY : n
+  }
+  return [...(list.value?.rows ?? [])].sort((a, b) => {
+    const ga = gradeOf(a)
+    const gb = gradeOf(b)
+    if (ga !== gb) return gb - ga
+    return a.className.localeCompare(b.className, 'zh-Hans-CN', { numeric: true })
+  })
+})
 
 /**
  * 有班主任账号的班级数 / 总班级数。
@@ -109,77 +130,70 @@ const uncovered = computed(() => {
   return out
 })
 
-/* ==================== 勾选 + 批量删除班主任账号（第五十三轮） ==================== */
+/* ==================== 勾选 + 批量删除班级（第五十六轮） ==================== */
 
 /**
- * 勾的是**账号**，不是行。
+ * 勾的是**班级**（一行一个班），不是账号。
  *
- * 一个老师可以带好几个班，名册上就占好几行——按行勾会让人以为
- * 「勾了两行 = 两个账号」。所以勾选状态存 `teacherId`，同一个人的
- * 几行一起亮；提交时按 id 去重，删的是一个账号。
+ * 上一版按账号勾：一个老师带两个班，点一行会把两行一起勾上——用户
+ * 「明明只选了一个」。删班级是按班删的，所以勾选状态就该存 `classId`。
  */
-const selectedTeacherIds = ref<number[]>([])
+const selectedClassIds = ref<number[]>([])
 
-/** 有账号的行才可勾（「未建账号」那些行没有东西可删） */
-const selectableTeacherIds = computed(() => {
+/** 名册里出现过的班（一个老师带两班 = 两行，班只算一个） */
+const selectableClassIds = computed(() => {
   const out: number[] = []
   for (const r of rows.value) {
-    if (r.teacherId !== null && !out.includes(r.teacherId)) out.push(r.teacherId)
+    if (!out.includes(r.classId)) out.push(r.classId)
   }
   return out
 })
 
 const allSelected = computed(
   () =>
-    selectableTeacherIds.value.length > 0 &&
-    selectedTeacherIds.value.length === selectableTeacherIds.value.length,
+    selectableClassIds.value.length > 0 &&
+    selectedClassIds.value.length === selectableClassIds.value.length,
 )
 const isIndeterminate = computed(
   () =>
-    selectedTeacherIds.value.length > 0 &&
-    selectedTeacherIds.value.length < selectableTeacherIds.value.length,
+    selectedClassIds.value.length > 0 &&
+    selectedClassIds.value.length < selectableClassIds.value.length,
 )
 
-function toggleAllTeachers() {
-  selectedTeacherIds.value = allSelected.value ? [] : [...selectableTeacherIds.value]
+function toggleAllClasses() {
+  selectedClassIds.value = allSelected.value ? [] : [...selectableClassIds.value]
 }
 
-function toggleTeacher(id: number | null) {
-  if (id === null) return
-  const i = selectedTeacherIds.value.indexOf(id)
-  if (i >= 0) selectedTeacherIds.value.splice(i, 1)
-  else selectedTeacherIds.value.push(id)
+function toggleClass(cid: number) {
+  const i = selectedClassIds.value.indexOf(cid)
+  if (i >= 0) selectedClassIds.value.splice(i, 1)
+  else selectedClassIds.value.push(cid)
 }
 
-function isPicked(id: number | null): boolean {
-  return id !== null && selectedTeacherIds.value.includes(id)
+function isPickedClass(cid: number): boolean {
+  return selectedClassIds.value.includes(cid)
 }
 
 const deleting = ref(false)
 
 /**
- * 删除勾中的班主任账号。
+ * 删除勾中的**班级**（连同它的字段模板）。
  *
- * 确认框必须说清「删的是账号、班级还在」——否则用户会以为这个班
- * 跟着从系统里消失了。有引用的账号后端会跳过，所以提示按**真正
- * 删掉的数量**（`deleted`）说，不按勾了几个说。
+ * 只有空班删得掉：有学生/账目/任务/账号挂着的，后端跳过并给原因，
+ * 界面把原因逐条列出来——不然用户只会看到「少删了几个」而不知道为什么。
  */
-async function deleteSelected() {
-  const ids = [...selectedTeacherIds.value]
+async function deleteSelectedClasses() {
+  const ids = [...selectedClassIds.value]
   if (!ids.length || deleting.value) return
-  const labels = [
-    ...new Set(
-      rows.value
-        .filter((r) => r.teacherId !== null && ids.includes(r.teacherId))
-        .map((r) => `${r.realName || r.username}（${r.username}）`),
-    ),
-  ]
+  const names = uniqueClasses.value
+    .filter((c) => ids.includes(c.classId))
+    .map((c) => c.className)
   try {
     await ElMessageBox.confirm(
-      `将删除 ${ids.length} 个班主任账号：${labels.join('、')}。\n` +
-        '删的是登录账号，班级保留（名册上变成「未建账号」）。' +
-        '有流水/缴费/批次记录的账号会被跳过。删除后不能撤销。',
-      '删除班主任账号',
+      `将删除 ${ids.length} 个班级：${names.join('、')}。\n` +
+        '连同这些班的学生、字段模板、任务一起删。' +
+        '班里还有学生、账目或账号的会被跳过。删除后不能撤销。',
+      '删除班级',
       {
         type: 'warning',
         confirmButtonText: '删除',
@@ -192,30 +206,101 @@ async function deleteSelected() {
   }
   deleting.value = true
   try {
-    const r = await deleteCollegeAdviserAccounts(ids)
-    if (r.deleted > 0) ElMessage.success(`已删除 ${r.deleted} 个班主任账号`)
+    const r = await deleteCollegeClasses(ids)
+    if (r.deleted > 0) ElMessage.success(`已删除 ${r.deleted} 个班级`)
     if (r.skipped.length > 0) {
-      // 跳过的账号可能已经被删掉了，名册里查不到名字——回退成 #id
-      const nameOf = new Map<number, string>()
-      for (const row of rows.value) {
-        if (row.teacherId !== null) {
-          nameOf.set(row.teacherId, `${row.realName || row.username}（${row.username}）`)
-        }
-      }
       await ElMessageBox.alert(
-        r.skipped
-          .map((s) => `${nameOf.get(s.userId) ?? `#${s.userId}`}：${s.reason}`)
-          .join('\n'),
-        `${r.skipped.length} 个账号没删掉`,
+        r.skipped.map((s) => `${s.className || `#${s.classId}`}：${s.reason}`).join('\n'),
+        `${r.skipped.length} 个班没删掉`,
         { confirmButtonText: '知道了' },
       )
     }
-    selectedTeacherIds.value = []
+    selectedClassIds.value = []
     await load()
   } catch (e) {
     ElMessage.error(getErrorMessage(e, '删除失败'))
   } finally {
     deleting.value = false
+  }
+}
+
+/* ==================== 新增班主任（第五十六轮） ====================
+ *
+ * 用户口径：演示班清掉之后，班主任由院长自己建——而且要知道
+ * 「这个班从哪来」：就从名册里现有的班中选。
+ *
+ * 建完**当场就是这个班的班主任**（后端一班一位，已有人会 400 指路
+ * 「改班主任安排」），省掉「去成员管理建号 → 回来安排」两步。
+ */
+
+const createOpen = ref(false)
+const creating = ref(false)
+const createForm = ref({
+  classId: null as number | null,
+  realName: '',
+  username: '',
+  password: '',
+  phone: '',
+})
+
+/** 可选的班：名册里现有的班（**优先给还没建账号的班**，那是最常见的情形） */
+const createClassOptions = computed(() => {
+  const has = new Set(rows.value.filter((r) => r.teacherId !== null).map((r) => r.classId))
+  return uniqueClasses.value
+    .map((c) => ({ id: c.classId, name: c.className, taken: has.has(c.classId) }))
+    .sort((a, b) => Number(a.taken) - Number(b.taken))
+})
+
+function openCreate() {
+  createForm.value = { classId: null, realName: '', username: '', password: '', phone: '' }
+  createOpen.value = true
+}
+
+async function submitCreate() {
+  const f = createForm.value
+  const realName = f.realName.trim()
+  const username = f.username.trim()
+  const password = f.password.trim()
+  const phone = f.phone.trim()
+  // 前端先挡一遍明显问题，省一次往返；真正的边界（登录名唯一、一班一位、
+  // 密码长度）仍在后端，两边不是重复实现，是同一套规则的两道门。
+  if (!f.classId) {
+    ElMessage.warning('请选择这个班主任带的班')
+    return
+  }
+  if (!realName) {
+    ElMessage.warning('请输入姓名')
+    return
+  }
+  if (!username) {
+    ElMessage.warning('请输入登录名')
+    return
+  }
+  if (username.length > 32) {
+    ElMessage.warning('登录名最多 32 字')
+    return
+  }
+  if (password && password.length < 6) {
+    ElMessage.warning('密码长度需为 6-32 位')
+    return
+  }
+  creating.value = true
+  try {
+    await createCollegeTeacher({
+      classId: f.classId,
+      realName,
+      username,
+      password: password || undefined,
+      phone: phone || undefined,
+    })
+    ElMessage.success(password ? '班主任已创建' : '班主任已创建，初始密码 123456')
+    createOpen.value = false
+    await load()
+  } catch (e) {
+    // 登录名重复、该班已有班主任等：后端文案已经够具体，直接透出
+    ElMessage.error(getErrorMessage(e))
+  } finally {
+    creating.value = false
   }
 }
 
@@ -327,24 +412,25 @@ onMounted(load)
         <p>
           各班班主任（导员）一览。<strong>一个老师可以带好几个班</strong>，
           班主任本人也能在「个人信息」里改「我带的班」。
-          勾选表格左侧的复选框可以批量删除班主任账号（班级保留）；新增账号用「导入班主任」。
+          点「新增班主任」选一个班建号；勾选左侧复选框可以批量删除空班。
         </p>
       </div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap">
+        <el-button type="primary" @click="openCreate">新增班主任</el-button>
         <el-button :loading="templateLoading" @click="onDownloadTemplate">下载模板</el-button>
         <el-button :loading="importing" @click="pickFile">导入班主任</el-button>
-        <el-button type="primary" @click="openArrange">改班主任安排</el-button>
+        <el-button @click="openArrange">改班主任安排</el-button>
         <el-button
           type="danger"
           plain
-          :disabled="selectedTeacherIds.length === 0"
+          :disabled="selectedClassIds.length === 0"
           :loading="deleting"
-          @click="deleteSelected"
+          @click="deleteSelectedClasses"
         >
           {{
-            selectedTeacherIds.length > 0
-              ? `删除选中的账号（${selectedTeacherIds.length}）`
-              : '删除选中的账号'
+            selectedClassIds.length > 0
+              ? `删除选中的班级（${selectedClassIds.length}）`
+              : '删除选中的班级'
           }}
         </el-button>
         <input
@@ -366,9 +452,9 @@ onMounted(load)
                 <el-checkbox
                   :model-value="allSelected"
                   :indeterminate="isIndeterminate"
-                  :disabled="selectableTeacherIds.length === 0"
-                  aria-label="全选班主任账号"
-                  @change="toggleAllTeachers"
+                  :disabled="selectableClassIds.length === 0"
+                  aria-label="全选班级"
+                  @change="toggleAllClasses"
                 />
               </th>
               <th scope="col">班级</th>
@@ -385,12 +471,10 @@ onMounted(load)
             <tr v-for="(row, i) in rows" :key="`${row.classId}-${row.teacherId ?? 'none'}-${i}`">
               <td class="pick">
                 <el-checkbox
-                  v-if="row.teacherId !== null"
-                  :model-value="isPicked(row.teacherId)"
-                  :aria-label="`选择 ${row.realName || row.username}`"
-                  @change="toggleTeacher(row.teacherId)"
+                  :model-value="isPickedClass(row.classId)"
+                  :aria-label="`选择 ${row.className}`"
+                  @change="toggleClass(row.classId)"
                 />
-                <span v-else class="muted" aria-hidden="true">—</span>
               </td>
               <td>{{ row.className }}</td>
               <td>{{ row.grade || '—' }}</td>
@@ -466,6 +550,49 @@ onMounted(load)
       <template #footer>
         <el-button @click="editOpen = false">取消</el-button>
         <el-button type="primary" :loading="editSaving" @click="saveArrange">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 新增班主任（第五十六轮）：先选班，再填人。
+         建完当场就是这个班的班主任——省掉「去成员管理建号 → 回来安排」两步 -->
+    <el-dialog v-model="createOpen" title="新增班主任" width="480px" append-to-body>
+      <p class="hint" style="margin: 0 0 14px">
+        新账号<strong>当场就是所选班级的班主任</strong>（一个班只有一位）。
+        班级还没建的，先在「班级管理 → 新建班级」里建好再回来。
+      </p>
+      <el-form label-width="80px" @submit.prevent>
+        <el-form-item label="带的班" required>
+          <el-select v-model="createForm.classId" filterable placeholder="从现有班级里选" style="width: 100%">
+            <el-option
+              v-for="c in createClassOptions"
+              :key="c.id"
+              :label="c.taken ? `${c.name}（已有班主任）` : c.name"
+              :value="c.id"
+              :disabled="c.taken"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="姓名" required>
+          <el-input v-model="createForm.realName" maxlength="32" placeholder="班主任姓名" />
+        </el-form-item>
+        <el-form-item label="登录名" required>
+          <el-input v-model="createForm.username" maxlength="32" placeholder="用于登录，全局唯一" />
+        </el-form-item>
+        <el-form-item label="初始密码">
+          <el-input
+            v-model="createForm.password"
+            maxlength="32"
+            show-password
+            placeholder="留空 = 123456"
+          />
+        </el-form-item>
+        <el-form-item label="手机号">
+          <el-input v-model="createForm.phone" maxlength="20" placeholder="选填" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createOpen = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button>
       </template>
     </el-dialog>
   </div>

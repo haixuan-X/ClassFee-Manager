@@ -82,11 +82,18 @@ export function updateTask(id: number, payload: TaskUpdatePayload) {
   })
 }
 
-/** 关闭 / 重新开放。已收回的回答保留，重新开放后还在。 */
-export function setTaskOpen(id: number, open: boolean) {
+/**
+ * 关闭 / 重新开放。已收回的回答保留，重新开放后还在。
+ *
+ * 重开可以顺手把截止时间往后延（`deadline`，`YYYY-MM-DD HH:mm`）——
+ * 截止已过的任务只把 status 打开是没用的，`is_open` 还要看 deadline。
+ * 逻辑（含「已过期就先问延到什么时候」的弹框）见 `composables/useReopenTask`。
+ */
+export function setTaskOpen(id: number, open: boolean, deadline?: string) {
   return request<{ id: number; open: boolean }>({
     url: `/tasks/${id}/${open ? 'reopen' : 'close'}`,
     method: 'post',
+    data: open && deadline ? { deadline } : undefined,
   })
 }
 

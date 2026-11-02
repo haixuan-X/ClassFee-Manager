@@ -7,7 +7,6 @@ import {
   exportTaskDetail,
   fetchTaskDetail,
   fetchTasks,
-  setTaskOpen,
   setTaskPinned,
   submitTaskAnswer,
   TASK_QTYPES,
@@ -16,6 +15,7 @@ import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
 import TaskRollcallDrawer from '@/components/TaskRollcallDrawer.vue'
 import { useModal } from '@/composables/useModal'
 import { useCloseGuard } from '@/composables/useCloseGuard'
+import { toggleTaskOpen } from '@/composables/useReopenTask'
 import type {
   Task,
   TaskDetail,
@@ -271,13 +271,9 @@ async function onExportDetail() {
 /* ============================ 关闭 / 重开 / 删除 ============================ */
 
 async function onToggleOpen(row: Task) {
-  try {
-    await setTaskOpen(row.id, !row.open)
-    ElMessage.success(row.open ? '任务已关闭' : '任务已重新开放')
-    await load()
-  } catch (e) {
-    ElMessage.error(getErrorMessage(e, '操作失败'))
-  }
+  // 重开的「截止已过要先延时」那一段在 useReopenTask 里（两个任务页共用）
+  await toggleTaskOpen(row)
+  await load()
 }
 
 async function onTogglePin(row: Task) {

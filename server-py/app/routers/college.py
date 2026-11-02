@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..errors import BizException
 from ..responses import ok
-from ..schemas import UserCreateRequest
+from ..schemas import TeacherCreateRequest, UserCreateRequest
 from ..security import LoginUser, get_current_user, require_min_level
 from ..services import college_excel, college_service, user_service
 
@@ -101,6 +101,36 @@ def create_class(
     """
     require_min_level(user, "DEAN", "新建班级")
     return ok(college_service.create_class(db, user, req.className, req.grade))
+
+
+@router.delete("/classes", summary="批量删除班级（只删空班）")
+def delete_classes(
+    ids: str = Query(..., description="要删除的班级 id，逗号分隔（如 3,7,9）"),
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批量删除**空班**（连同它的字段模板）。
+
+    只删**没有学生 / 没有账目 / 没有任务 / 没有账号挂着**的班；
+    不满足的一律跳过并说明原因——误删一班学生和账目是找不回来的。
+    """
+    require_min_level(user, "DEAN", "删除班级")
+    return ok(college_service.delete_classes(db, user, _parse_ids(ids, "班级")))
+
+
+@router.post("/teachers", summary="新增班主任（选班 + 填资料）")
+def create_teacher(
+    req: TeacherCreateRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """新增一位班主任账号，**建完当场就是这个班的班主任**。
+
+    班级从名册里现有的班中选（`classId`）；一班一位，该班已有班主任会 400
+    并指路「改班主任安排」。仅院长。
+    """
+    require_min_level(user, "DEAN", "新增班主任")
+    return ok(user_service.create_teacher(db, user, req))
 
 
 @router.get("/students", summary="学院学生名册")

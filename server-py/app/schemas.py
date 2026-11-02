@@ -728,6 +728,21 @@ class UserCreateRequest(_BodyModel):
         return v
 
 
+class TeacherCreateRequest(UserCreateRequest):
+    """新增班主任（第五十六轮）：**先选班，再填人**。
+
+    用户口径：演示班清空之后，班主任由院长自己建——但这个班从哪来？
+    从名册里现有的班级中选（下拉），不要求院长先去别处建好再回来指定。
+
+    继承 `UserCreateRequest` 是为了**复用同一套校验**（登录名唯一、密码长度、
+    姓名必填），不另写一份；但角色相关字段在这里没有意义——`classId` 之外
+    的班级/角色由服务端钉死成「班主任 + 这个班」，见 `create_teacher`。
+    """
+
+    #: 目标班。**必填**：不知道建给谁的账号，建出来也是野账号
+    classId: int = Field(..., ge=1)
+
+
 class UserUpdateRequest(_BodyModel):
     """编辑账号：字段均可选（None=不修改）；password=重置密码；status=0/1 停用启用。
 

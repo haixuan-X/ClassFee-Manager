@@ -41,6 +41,11 @@ from ..models import (
     ClsClass,
     ClsTask,
     ClsTaskAnswer,
+    ClsTaskStudentAnswer,
+    FeeBatch,
+    FeeCategory,
+    FeePayment,
+    FeeRecord,
     StudentField,
     StudentRecord,
     StudentRecordValue,
@@ -1461,6 +1466,147 @@ def advisers(db: Session, user: LoginUser) -> dict:
                 }
             )
     return {"rows": rows, "total": len(rows)}
+
+
+def delete_classes(db: Session, user: LoginUser, class_ids: list[int]) -> dict:
+    """批量删除**空班**（第五十六轮）。
+
+    ## 为什么删的是班
+
+    用户口径：把演示班整批清掉、只留真正要用的，班级之后由院长按需搭。
+    上一轮做的是「批量删班主任账号」，删完班还在——名册上还是一屏
+    「未建账号」的班，删不干净。
+
+    ## 只删空班：有内容的**跳过并说明**
+
+    删一个班会连带它的学生、字段模板、任务、账目。有这些的一律不删：
+    「班里还有 38 名学生」比静默删掉安全得多——误点一下把一学期的学生和
+    账目带走是找不回来的，跳过至少还能看到原因再决定。
+
+    账号挂在上面的（班主任的默认班 / 能管这个班）也跳过：账号的
+    `class_id` 会变成悬空引用，登录后没有班可落。先去「改班主任安排」
+    清空，或删掉那个账号。
+
+    ## 逐条判定，能删的删
+
+    与批量删除账号同一套约定（`delete_adviser_accounts`）：
+    不因为一个班卡住整批，最后一起汇报。
+    """
+    ids = list(dict.fromkeys(int(i) for i in class_ids))
+    if not ids:
+        raise BizException.bad_request("请先勾选要删除的班级")
+    if len(ids) > BATCH_MAX_CLASSES:
+        raise BizException.bad_request(f"一次最多处理 {BATCH_MAX_CLASSES} 个班，请分批操作")
+
+    deleted: list[int] = []
+    skipped: list[dict] = []
+    with db.begin():
+        classes = {
+            c.id: c
+            for c in db.scalars(
+                select(ClsClass).where(ClsClass.id.in_(ids))
+            ).all()
+        }
+        for cid in ids:
+            clazz = classes.get(cid)
+            if clazz is None:
+                skipped.append({"classId": cid, "className": "", "reason": "班级不存在"})
+                continue
+
+            def cnt(model, col) -> int:
+                return int(
+                    db.scalar(
+                        select(func.count()).select_from(model).where(col == cid)
+                    )
+                    or 0
+                )
+
+            n_student = cnt(StudentRecord, StudentRecord.class_id)
+            if n_student:
+                skipped.append({
+                    "classId": cid, "className": clazz.class_name,
+                    "reason": f"班里还有 {n_student} 名学生，先删学生再删班",
+                })
+                continue
+            n_fee = (
+                cnt(FeeRecord, FeeRecord.class_id)
+                + cnt(FeeBatch, FeeBatch.class_id)
+                + cnt(FeeCategory, FeeCategory.class_id)
+            )
+            if n_fee:
+                skipped.append({
+                    "classId": cid, "className": clazz.class_name,
+                    "reason": f"班里还有 {n_fee} 条账目/批次/类别，不能删",
+                })
+                continue
+            n_task = cnt(ClsTask, ClsTask.class_id)
+            if n_task:
+                skipped.append({
+                    "classId": cid, "className": clazz.class_name,
+                    "reason": f"班里还有 {n_task} 个任务，先删任务再删班",
+                })
+                continue
+            # 账号挂着的（默认班 / 能管这个班）不能删——删了账号就悬空了
+            n_link = db.scalar(
+                select(func.count())
+                .select_from(SysUser)
+                .where(
+                    or_(
+                        SysUser.class_id == cid,
+                        SysUser.id.in_(
+                            select(SysUserClass.user_id).where(
+                                SysUserClass.class_id == cid
+                            )
+                        ),
+                    )
+                )
+            ) or 0
+            if int(n_link):
+                skipped.append({
+                    "classId": cid, "className": clazz.class_name,
+                    "reason": "还有账号挂在这个班上，先在「改班主任安排」清空班主任",
+                })
+                continue
+
+            # 连带清理：这个库**没有外键**，孤儿行不会自己消失
+            db.execute(
+                delete(StudentRecordValue).where(
+                    StudentRecordValue.record_id.in_(
+                        select(StudentRecord.id).where(StudentRecord.class_id == cid)
+                    )
+                )
+            )
+            db.execute(
+                delete(ClsTaskStudentAnswer).where(
+                    ClsTaskStudentAnswer.task_id.in_(
+                        select(ClsTask.id).where(ClsTask.class_id == cid)
+                    )
+                )
+            )
+            db.execute(
+                delete(ClsTaskAnswer).where(
+                    ClsTaskAnswer.task_id.in_(
+                        select(ClsTask.id).where(ClsTask.class_id == cid)
+                    )
+                )
+            )
+            for model in (StudentRecord, StudentField, ClsTask, SysUserClass,
+                          FeeCategory):
+                db.execute(delete(model).where(model.class_id == cid))
+            # ⚠ ClsClass 的主键是 `id`，不是 `class_id`——和上面那批
+            # 混在一个循环里会 AttributeError（500）。
+            db.execute(delete(ClsClass).where(ClsClass.id == cid))
+            deleted.append(cid)
+
+    return {
+        "deleted": len(deleted),
+        "ids": deleted,
+        "skipped": skipped,
+    }
+
+
+#: 一次最多删多少个班（和账号批量同一量级，防误点）
+BATCH_MAX_CLASSES = 200
 
 
 def set_class_teachers(

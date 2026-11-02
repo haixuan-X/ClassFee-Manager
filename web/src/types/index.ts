@@ -443,6 +443,25 @@ export interface CollegeAdviserDeleteResult {
 }
 
 /**
+ * 批量删除**空班**的回执（第五十六轮）。
+ *
+ * 有学生/账目/任务/账号挂着的班会被跳过，所以要按 `deleted` 报数量。
+ */
+export interface CollegeClassDeleteResult {
+  deleted: number
+  ids: number[]
+  skipped: { classId: number; className: string; reason: string }[]
+}
+
+/** 新增班主任回的账号（第五十六轮，后端 account_vo 的关键字段） */
+export interface CollegeTeacherCreated {
+  id: number
+  username: string
+  realName: string
+  role: string
+}
+
+/**
  * 院长账号（第五十二轮）。
  *
  * 院长**可以有多位**：这里列的是 `role=DEAN` 的全部账号，不按班级过滤。
@@ -564,6 +583,13 @@ export interface CollegeImportResult {
   rows: number
   skippedEmptyCells: number
   newFields: { label: string; type: string; typeText: string }[]
+  /**
+   * 这次按文件里的「年级」列**补上年级**的班级名（第五十八轮）。
+   *
+   * 年级是班的属性：老班建的时候没有这一列，再导一次也不会自己冒出来——
+   * 后端会把文件里的年级落到这些空着的班上，这份名单就是「补了哪几个」。
+   */
+  gradeFilled: string[]
   duplicateRows: number
   unmatchedColumns: string[]
   errors: string[]

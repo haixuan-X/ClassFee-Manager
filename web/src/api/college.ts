@@ -3,6 +3,7 @@ import { downloadXlsx, exportFailure } from '@/utils/download'
 import type {
   CollegeAdviserDeleteResult,
   CollegeAdviserList,
+  CollegeClassDeleteResult,
   CollegeDeanList,
   CollegeDeanRow,
   CollegeFieldList,
@@ -11,6 +12,7 @@ import type {
   CollegeStudentColumn,
   CollegeStudentList,
   CollegeTaskList,
+  CollegeTeacherCreated,
   StudentFieldType,
 } from '@/types'
 
@@ -58,6 +60,40 @@ export function deleteCollegeAdviserAccounts(ids: number[]) {
     url: '/college/advisers',
     method: 'delete',
     params: { ids: ids.join(',') },
+  })
+}
+
+/**
+ * 批量删除**空班**（第五十六轮）。
+ *
+ * 只删没有学生/账目/任务/账号挂着的班；不满足的跳过并给原因。
+ * 所以报数量要看 `deleted`，不是勾了几个。
+ */
+export function deleteCollegeClasses(ids: number[]) {
+  return request<CollegeClassDeleteResult>({
+    url: '/college/classes',
+    method: 'delete',
+    params: { ids: ids.join(',') },
+  })
+}
+
+/**
+ * 新增班主任（第五十六轮）：先选班，再填人。
+ *
+ * 建完**当场就是这个班的班主任**（一班一位，已有班主任会 400）。
+ * 角色/能管的班由后端钉死，请求里不用传。
+ */
+export function createCollegeTeacher(body: {
+  classId: number
+  realName: string
+  username: string
+  password?: string
+  phone?: string
+}) {
+  return request<CollegeTeacherCreated>({
+    url: '/college/teachers',
+    method: 'post',
+    data: body,
   })
 }
 
