@@ -22,11 +22,19 @@ service.interceptors.request.use((config) => {
   // 切完之后所有请求都带上 `classId`，后端在鉴权中间件里把它当成
   // 「本次操作的是哪个班」——所以页面里每个接口都不用自己记这件事。
   //
-  // ⚠ **学院口径的接口不带**：学院名册、仪表盘总览那些是全校的，
+  // ⚠ **学院口径的接口不带**：学院名册、仪表盘总览、任务总览那些是全校的，
   // 带上 classId 反而会把口径搞乱（后端会把它当成「当前班」）。
+  //
+  // 第六十五轮补 `/tasks/overview`：任务总览是**全学院**看板，但页面自己
+  // 有「按班级筛选」的下拉（选中时才显式传 classId）。拦截器无脑补一个
+  // 当前班进去，等于每打开一次就先筛成那个班——用户实测「任务总览看不见任务」。
   const store = useUserStore()
   const cid = store.currentClassId
-  if (cid && !config.url?.includes('/college/') && !config.url?.includes('/dashboard/students')) {
+  const skipClassId =
+    config.url?.includes('/college/') ||
+    config.url?.includes('/dashboard/students') ||
+    config.url?.includes('/tasks/overview')
+  if (cid && !skipClassId) {
     config.params = { ...(config.params ?? {}), classId: cid }
   }
   return config
