@@ -9,6 +9,7 @@ import TaskPublishDialog from '@/components/TaskPublishDialog.vue'
 import TaskRollcallDrawer from '@/components/TaskRollcallDrawer.vue'
 import TaskDetailDashboard from '@/components/TaskDetailDashboard.vue'
 import { useUserStore } from '@/stores/user'
+import { progressUnit } from '@/utils/taskStatus'
 import type { CollegeTaskList, CollegeTaskRow, TaskScope } from '@/types'
 
 /**
@@ -341,7 +342,11 @@ onMounted(load)
       </div>
       <p class="filter-hint">
         共 {{ rows.length }} 条任务，其中 {{ openCount }} 条开放中、{{ pinnedCount }} 条置顶。
-        <template v-if="isCollege">应答对象是<strong>各班班主任</strong>，一人代表一个班。</template>
+        <template v-if="isCollege">
+          应答对象是<strong>各班班主任</strong>，<strong>一班一个名额</strong>：
+          分母取自<strong>班主任名册</strong>里已登记班主任的班（两个班共用一个班主任算两个），
+          班里学生<strong>全部点完名</strong>才算这个班已填。
+        </template>
         <template v-else>「已填 / 共」的分母是<strong>该任务自己那个班</strong>的人数。</template>
       </p>
     </section>
@@ -405,7 +410,10 @@ onMounted(load)
                   color="var(--color-accent-text)"
                   aria-hidden="true"
                 />
-                <span class="progress-text num">已填 {{ row.answered }} / 共 {{ row.total }} 人</span>
+                <span class="progress-text num">
+                  已填 {{ row.answered }} / 共 {{ row.total }}
+                  {{ progressUnit(row.scope) }}
+                </span>
               </td>
               <td class="num">{{ fmtTime(row.deadline) }}</td>
               <td class="num">{{ fmtTime(row.createdAt) }}</td>

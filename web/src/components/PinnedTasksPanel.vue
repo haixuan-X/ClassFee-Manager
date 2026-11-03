@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
 import type { Task } from '@/types'
+import { progressUnit } from '@/utils/taskStatus'
 
 /**
  * 置顶任务面板（第二十五轮）。仪表盘两个总览共用。
@@ -57,7 +58,10 @@ const myPending = computed(() => props.tasks.filter((t) => t.canAnswer && !t.myA
         </div>
         <div class="task-q">{{ t.question }}</div>
         <div class="task-meta">
-          <span>已填 {{ t.summary.answered }} / 共 {{ t.summary.total }} 人</span>
+          <span>
+            已填 {{ t.summary.answered }} / 共 {{ t.summary.total }}
+            {{ progressUnit(t.scope) }}
+          </span>
           <span v-if="t.deadline"> · 截止 {{ fmtTime(t.deadline) }}</span>
         </div>
         <!-- 只在「我还欠着」时给入口：已经填过的再摆一个「去填写」是噪音 -->

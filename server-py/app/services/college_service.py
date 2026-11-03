@@ -57,6 +57,7 @@ from ..serializers import fmt_dt
 from . import student_service as svc
 from .task_service import (
     can_see_detail,
+    college_recovery,
     is_answer_target,
     is_college_answer_target,
     is_college_task,
@@ -1817,10 +1818,9 @@ def tasks(
     里的 30 是那个班的应答人数，不是全院人数。跨班混算会得出
     「已填 3 / 共 60 人」这种没人看得懂的数。
 
-    学院任务的分母是**全校的班主任**（一人代表一个班）。
-
-    分母的算法与班级任务页**完全一致**（`task_service.is_answer_target`），
-    两处各算一次必然漂。
+    学院任务的分母是**班主任名册里已登记班主任的班数**（一人代表一个班，
+    两个班共用一个班主任就算两个名额），分子是**学生已全部点完名的班数**。
+    口径只有一份，在 `task_service.college_recovery`——两处各算一次必然漂。
     """
     classes = _active_classes(db)
     target = [c for c in classes if class_id is None or c.id == class_id]
@@ -1873,29 +1873,14 @@ def tasks(
         ):
             answers_by_task[int(tid)] = int(cnt)
 
-    # 学院任务的答案在**点名表**（一人一学生），`cls_task_answer` 里那几行是
-    # 班主任自己的废答案——拿它当「已答」会出现「点了名却不涨、自己乱答反而涨」。
-    # 分母同理换成学生：全校在册学生都要被点到名。
+    # 学院任务的进度按**班主任名册**算（第六十一轮）：
+    #   分母 = 名册里已登记班主任的班数（一人一班一个名额，兼班主任的院长也算）
+    #   分子 = 这些班里学生**全部**点完名的班数
+    # 口径只有一份，在 `task_service.college_recovery`；点名表只用来判
+    # 「哪个班填完了」。拿 `cls_task_answer` 当已答会得出「点了名却不涨」。
     college_ids = [t.id for t in task_list if is_college_task(t)]
-    student_answers_by_task: dict[int, int] = {}
-    if college_ids:
-        for tid, cnt in db.execute(
-            select(ClsTaskStudentAnswer.task_id, func.count())
-            .where(ClsTaskStudentAnswer.task_id.in_(college_ids))
-            .group_by(ClsTaskStudentAnswer.task_id)
-        ):
-            student_answers_by_task[int(tid)] = int(cnt)
-    college_total = (
-        int(
-            db.scalar(
-                select(func.count())
-                .select_from(StudentRecord)
-                .where(StudentRecord.class_id.in_(class_ids))
-            )
-            or 0
-        )
-        if college_ids and class_ids
-        else 0
+    college_base, college_filled = (
+        college_recovery(db, college_ids) if college_ids else (0, {})
     )
 
     class_by_id = {c.id: c for c in classes}
@@ -1912,9 +1897,9 @@ def tasks(
     for t in task_list:
         cls = class_by_id.get(t.class_id)
         if (t.scope or "CLASS") == "COLLEGE":
-            # 学院任务：分母 = 全校在册学生，分子 = 点名表里已填的学生数
-            base = college_total
-            answered = student_answers_by_task.get(t.id, 0)
+            # 学院任务：分母 = 名册班数，分子 = 已交的班数（见 college_recovery）
+            base = college_base
+            answered = college_filled.get(t.id, 0)
         else:
             base = sum(
                 1

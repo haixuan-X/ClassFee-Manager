@@ -546,15 +546,17 @@ export interface CollegeTaskRow {
   canFill: boolean
   deadline: string | null
   createdAt: string | null
-  /** 已答人数 */
+  /** 已答数：学院任务是**已交的班数**，班级任务是**已答人数** */
   answered: number
   /**
-   * 应答总人数。
+   * 应答总数。
    *
    * 班级任务 = **该任务自己那个班**的应答人数；
-   * 学院任务 = **全校班主任**的人数（一人代表一个班）。
+   * 学院任务 = **班主任名册里已登记班主任的班数**（一人一班一个名额，
+   * 两个班共用一个班主任算两个；分子是学生**全部**点完名的班数，第六十一轮）。
    */
   total: number
+  /** 还差多少（和 total 同单位） */
   unanswered: number
 }
 
@@ -1322,15 +1324,25 @@ export interface TaskOverviewPayload {
   classTasks: number
   /** 学院任务数 */
   collegeTasks: number
-  /** 已答份数 */
+  /** 已答份数（⚠ 合计：班级任务按人 + 学院任务按班，**单位不同**，页面别直接用） */
   answered: number
-  /** 应答对象总数（分母为 0 的任务不算） */
+  /** 应答对象总数（同上，混合单位；分母为 0 的任务不算） */
   base: number
-  /** 回收率（百分数）；分母为 0 时为 null */
+  /** 回收率（百分数，混合单位合计）；分母为 0 时为 null */
   rate: number | null
+  /** 班级任务的回收（**按人**：本班同学） */
+  classAnswered: number
+  classBase: number
+  classRate: number | null
+  /** 学院任务的回收（**按班**：班主任名册里已登记班主任的班，第六十一轮） */
+  collegeAnswered: number
+  collegeBase: number
+  collegeRate: number | null
   /** 按班分布 */
   byClass: {
     classId: number
+    /** 这一格是班级任务还是学院任务——决定「已填 X / 共 Y」后面跟「人」还是「班」 */
+    scope: TaskScope
     className: string
     total: number
     open: number

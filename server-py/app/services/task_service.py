@@ -396,7 +396,103 @@ def _display_value(task: ClsTask, raw: str | None) -> str:
 # ==================== 统计 ====================
 
 
-def _summarize(task: ClsTask, answers: list, total: int) -> dict:
+def college_recovery(
+    db: Session, task_ids: list[int]
+) -> tuple[int, dict[int, int]]:
+    """**学院任务**的回收进度：`(分母, {task_id: 已填完的班数})`。
+
+    ## 口径：按**班主任名册**算，不按学生数算（第六十一轮）
+
+    用户原话：「学院任务回收进度有问题，数据应该按班主任名册里面，
+    哪些班主任已经注册班级来统计」，并给了例子——八个班主任就是 8；
+    两个班共用一个班主任时**按班级算**、还是 8（他要切班各答一次）；
+    院长兼班主任的，院长当班主任算进去。
+
+    - **分母** = 名册里**已登记班主任**（`sys_user_class.is_adviser=1`）的
+      **启用班**数，一班一个名额。角色判定和名册共用
+      `user_service._adviser_role_condition`——两处各写一份必然漂，
+      表现为「名册上看得见、进度里却不算他」。
+    - **分子** = 这些班里**学生已全部点完名**的班数。
+      用户原话「没有填完的就不算在已填里面」：只点了一半的班不算。
+
+    ## 为什么不再是「全校在册学生」
+
+    第六十轮把分母换成全校学生，是因为当时分子取自点名表（一人一学生），
+    两边必须同单位。可院长要问的其实是「八个班主任交了几个」——
+    「已填 3 / 共 110 人」回答不了这个问题，还和「一人代表一个班」自相矛盾。
+
+    ## 空班不占名额
+
+    班里一个学生都没有时 `get_rollcall` 直接拒（「你带的班还没有学生名册」），
+    这个名额永远填不上。算进分母会让进度条**永远到不了 100%**，
+    那是用户没法修的假红，所以只数**有学生**的班。
+    """
+    from ..models import SysUserClass
+
+    from .user_service import _adviser_role_condition
+
+    filled_of_task: dict[int, int] = {int(t): 0 for t in task_ids}
+
+    class_ids = [
+        int(cid)
+        for (cid,) in db.execute(select(ClsClass.id).where(ClsClass.status == 1))
+    ]
+    if not class_ids:
+        return 0, filled_of_task
+
+    # 名册里占了「班主任」这一位的班（和 /college/advisers 同一个判定）
+    slot_ids = sorted(
+        {
+            int(cid)
+            for (cid,) in db.execute(
+                select(SysUserClass.class_id)
+                .join(SysUser, SysUser.id == SysUserClass.user_id)
+                .where(
+                    SysUserClass.class_id.in_(class_ids),
+                    SysUserClass.is_adviser == 1,
+                    SysUser.status == 1,
+                    _adviser_role_condition(),
+                )
+            )
+        }
+    )
+    if not slot_ids:
+        return 0, filled_of_task
+
+    # 每个名额班的在册学生（只有他们需要被点到名）
+    students_by_class: dict[int, set[int]] = {}
+    for rid, cid in db.execute(
+        select(StudentRecord.id, StudentRecord.class_id).where(
+            StudentRecord.class_id.in_(slot_ids)
+        )
+    ):
+        students_by_class.setdefault(int(cid), set()).add(int(rid))
+
+    # 空班不占名额（见 docstring）
+    roster = {cid: ids for cid, ids in students_by_class.items() if ids}
+    base = len(roster)
+    if not base or not task_ids:
+        return base, filled_of_task
+
+    # 每条任务已点到名的学生（答案取自点名表，一人一行）
+    done_by_task: dict[int, set[int]] = {}
+    for tid, rid in db.execute(
+        select(ClsTaskStudentAnswer.task_id, ClsTaskStudentAnswer.record_id).where(
+            ClsTaskStudentAnswer.task_id.in_(task_ids)
+        )
+    ):
+        done_by_task.setdefault(int(tid), set()).add(int(rid))
+
+    for tid in filled_of_task:
+        done = done_by_task.get(tid) or set()
+        # 该班**全部**学生都点到了才算这个班交了
+        filled_of_task[tid] = sum(1 for ids in roster.values() if ids <= done)
+    return base, filled_of_task
+
+
+def _summarize(
+    task: ClsTask, answers: list, total: int, *, answered: int | None = None
+) -> dict:
     """汇总：**只给分布，不含具体是谁**——这是用户明确要的口径。
 
     未填单列一项，因为「还差谁没交」恰恰是发布人要的东西；而未填的人
@@ -406,12 +502,19 @@ def _summarize(task: ClsTask, answers: list, total: int) -> dict:
     班级任务传 `cls_task_answer`（一人一账号），学院任务传
     `cls_task_student_answer`（一人一学生）——**别再混用**，混了就会出现
     「班主任点名不涨数、自己乱答反而涨」。
+
+    `answered`：**覆盖分子**。学院任务的分子是「交了的班数」（见
+    `college_recovery`），和 `len(answers)`（学生数）不是一个单位，
+    所以必须由调用方显式传进来；不传就还是老口径 `len(answers)`。
+
+    ⚠ `options` 的分布**始终按学生算**——题问的是学生的情况，
+    改成按班计数会把「12 个人返校了」压成「3 个班」，信息没了。
     """
-    answered = len(answers)
+    n = len(answers) if answered is None else int(answered)
     out: dict = {
         "total": total,
-        "answered": answered,
-        "unanswered": max(0, total - answered),
+        "answered": n,
+        "unanswered": max(0, total - n),
         "options": [],
     }
     if task.qtype in ("BOOLEAN", "SINGLE", "MULTI"):
@@ -491,15 +594,16 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
     # ---- 学院任务：答案在**另一张表**（按学生一人一行）----
     #
     # `cls_task_answer` 里那几行是班主任**自己**的废答案（第六十轮已禁止再产生），
-    # 拿它当「已填」会得出「点名了却不涨、自己乱答反而涨」的怪结果——
-    # 用户原话「班主任填写之后就显示在已填里面，没有填完的就不算在已填里面」。
-    # 所以分母/分子/分布三样全部换成学生口径：
-    #   分母 = 全校在册学生（每个学生都要被点到名）
-    #   分子 = 点名表里已填的学生数
-    #   分布 = 这些学生答案的选项计数
+    # 拿它当「已填」会得出「点名了却不涨、自己乱答反而涨」的怪结果。
+    #
+    # 但**进度的分子分母不能用学生口径**（第六十一轮）：院长要问的是
+    # 「八个班主任交了几个」，所以 summary 走 `college_recovery`
+    # （分母 = 名册里已登记班主任的班数，分子 = 学生全点完的班数）；
+    # 下面这张学生表只负责**选项分布**（题问的是学生的情况）。
     college_ids = [t.id for t in tasks if is_college_task(t)]
     stu_by_task: dict[int, list[ClsTaskStudentAnswer]] = {}
-    college_total = 0
+    college_base = 0
+    college_filled: dict[int, int] = {}
     if college_ids:
         for a in db.execute(
             select(ClsTaskStudentAnswer).where(
@@ -507,14 +611,7 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
             )
         ).scalars():
             stu_by_task.setdefault(a.task_id, []).append(a)
-        college_total = int(
-            db.scalar(
-                select(func.count())
-                .select_from(StudentRecord)
-                .where(StudentRecord.class_id.in_(list(class_name_of)))
-            )
-            or 0
-        )
+        college_base, college_filled = college_recovery(db, college_ids)
 
     out = []
     for t in tasks:
@@ -522,10 +619,11 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
         # ⚠ 分母按**任务自己的班**算（第三十二轮起任务可能属于别的班）：
         #   拿「我」的班去算别的班的分母，那个数字是错的。
         if is_college_task(t):
-            # 学院任务：全校学生都是应答对象，答案取**点名表**（见上面那段）
-            base = college_total
+            # 学院任务：分母 = 名册班数，分子 = 已交的班数（见 college_recovery）
+            base = college_base
             rows = stu_by_task.get(t.id, [])
             my = None  # 「我的答案」是班级任务的口径，学院任务没有这一说
+            filled: int | None = college_filled.get(t.id, 0)
         else:
             base = sum(
                 1
@@ -535,6 +633,7 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
             )
             rows = by_task.get(t.id, [])
             my = mine.get(t.id)
+            filled = None
         out.append(
             {
                 "id": t.id,
@@ -583,7 +682,7 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
                     if my
                     else None
                 ),
-                "summary": _summarize(t, rows, base),
+                "summary": _summarize(t, rows, base, answered=filled),
             }
         )
     return out
@@ -969,29 +1068,59 @@ def overview(db: Session, user: LoginUser, *, class_id: int | None = None) -> di
     college_count = sum(1 for r in rows if r["scope"] == SCOPE_COLLEGE)
     class_count = total - college_count
 
-    # 回收率：已答 / 应答对象。分母为 0 的任务不算进去（没人数就没法算比例）
+    # 回收率：已答 / 应答对象。分母为 0 的任务不算进去（没人数就没法算比例）。
+    #
+    # ⚠ **两种单位不能直接相加**（第六十一轮）：班级任务按**人**算，
+    # 学院任务按**班**算（见 `college_recovery`）。硬加会得到
+    # 「已答 15 / 应答 22」这种谁也说不清的数，所以按 scope 拆成两组分别给。
+    # `answered/base/rate` 仍然返回合计——老调用方（回归脚本、导出）还指着它，
+    # 但页面主指标一律用下面这三对。
     answered = 0
     base = 0
+    class_answered = 0
+    class_base = 0
+    college_answered = 0
+    college_base = 0
     for r in rows:
         s = r.get("summary") or {}
         b = int(s.get("total") or 0)
         if b <= 0:
             continue
+        a = int(s.get("answered") or 0)
+        answered += a
         base += b
-        answered += int(s.get("answered") or 0)
+        if r.get("scope") == SCOPE_COLLEGE:
+            college_answered += a
+            college_base += b
+        else:
+            class_answered += a
+            class_base += b
     rate = round(answered * 100.0 / base, 1) if base else None
+    class_rate = (
+        round(class_answered * 100.0 / class_base, 1) if class_base else None
+    )
+    college_rate = (
+        round(college_answered * 100.0 / college_base, 1) if college_base else None
+    )
 
     # 按班分布：每个班多少条任务、答了多少
     # 学院任务**不属于任何班**（class_id 只是发布人的默认班）——
     # 归到「全学院」一栏，否则会显得是某个班发出来的。
-    by_class: dict[int, dict] = {}
+    # 键用 (scope, classId) 而不是裸 classId：否则学院任务和 classId=0 的
+    # 班级任务会挤进同一格，两个单位混在一起没法显示。
+    by_class: dict[tuple[str, int], dict] = {}
     for r in rows:
         is_college = r.get("scope") == SCOPE_COLLEGE
-        cid = 0 if is_college else int(r.get("classId") or 0)
+        key = (
+            (SCOPE_COLLEGE, 0)
+            if is_college
+            else (SCOPE_CLASS, int(r.get("classId") or 0))
+        )
         slot = by_class.setdefault(
-            cid,
+            key,
             {
-                "classId": cid,
+                "classId": key[1],
+                "scope": key[0],
                 "className": "全学院" if is_college else (r.get("className") or ""),
                 "total": 0,
                 "open": 0,
@@ -1042,6 +1171,13 @@ def overview(db: Session, user: LoginUser, *, class_id: int | None = None) -> di
         "answered": answered,
         "base": base,
         "rate": rate,
+        # 按 scope 拆开的三对（单位不同，页面主指标用它们）
+        "classAnswered": class_answered,
+        "classBase": class_base,
+        "classRate": class_rate,
+        "collegeAnswered": college_answered,
+        "collegeBase": college_base,
+        "collegeRate": college_rate,
         "byClass": class_rows,
         "byPublisher": publisher_rows,
         "recent": rows[:10],

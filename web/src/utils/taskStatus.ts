@@ -30,6 +30,20 @@
 /** 返校情况的四个桶 */
 export type ReturnBucket = 'returned' | 'absent' | 'excused' | 'other'
 
+/**
+ * 回收进度的**单位**（第六十一轮）。
+ *
+ * - 学院任务按**班**算：分母是班主任名册里已登记班主任的班（一人一班一个
+ *   名额，两个班共用一个班主任算两个），分子是学生**全部**点完名的班。
+ * - 班级任务按**人**算：本班同学。
+ *
+ * 两个单位不能混：写死在某一个页面里，漏掉的那个就会显示
+ * 「已填 3 / 共 8 人」这种单位错一半的文案。所以只有一个出口。
+ */
+export function progressUnit(scope: string | null | undefined): '人' | '班' {
+  return scope === 'COLLEGE' ? '班' : '人'
+}
+
 /** 每个桶给人看的名字和颜色基调（颜色另配，见组件里的 `--tone-*`） */
 export const BUCKET_META: Record<ReturnBucket, { label: string; tone: 'ok' | 'bad' | 'warn' | 'muted' }> = {
   returned: { label: '已返校', tone: 'ok' },

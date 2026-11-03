@@ -288,15 +288,25 @@ def export_overview(db: Session, user: LoginUser, *, class_id: int | None = None
         c.alignment = Alignment(horizontal="center")
         ws.column_dimensions[get_column_letter(i)].width = 24 if i == 1 else 14
 
+    # 单位的说明单独一行：两列数字本身不带单位，不标清楚会被读成同一个口径
+    ws.cell(
+        row=2, column=2,
+        value="「已填 / 应答总数」的单位见「范围」列："
+              "学院任务按班（名册里已登记班主任的班），班级任务按人",
+    ).font = _MUTED_FONT
+
     for r_i, r in enumerate(rows, start=4):
         s = r.get("summary") or {}
         answered = int(s.get("answered") or 0)
         total = int(s.get("total") or 0)
         rate = f"{round(answered * 100 / total)}%" if total else "—"
+        # 单位写进「范围」列：学院任务按**班**数、班级任务按**人**数（第六十一轮）。
+        # 两列数字本身不带单位，不在这里标清楚，导出的表会被读成同一个口径。
+        college = r.get("scope") == "COLLEGE"
         scope = (
-            "学院任务"
-            if r.get("scope") == "COLLEGE"
-            else (r.get("className") or "班级任务")
+            "学院任务（按班）"
+            if college
+            else f"{r.get('className') or '班级任务'}（按人）"
         )
         ws.cell(row=r_i, column=1, value=r.get("title") or "")
         ws.cell(row=r_i, column=2, value=scope)

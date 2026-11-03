@@ -4687,7 +4687,7 @@ def test_a25_college_excel() -> None:
     )
     if new_cid:
         st, j = call(f"GET", f"/college/students?classId={new_cid}", None, D)
-        check("按新班级筛得���那两个人",
+        check("按新班级筛得出那两个人",
               int((data_of(j) or {}).get("total") or 0) == 2,
               str((data_of(j) or {}).get("total")))
     st, j = call("GET", "/college/students?grade=" + _quote("2099级"), None, D)
@@ -5673,7 +5673,9 @@ def test_a32_task_scope() -> None:
     2. **应答对象按 scope 分流**：学院任务是班主任答，同学答不了
     3. **发布人自己不答**（出题的人不在分母里）
     4. **可见性分三档**（本班+学院 / 只学院 / 其他班）
-    5. **分母按 scope 算**：学院任务 = 全校班主任；班级任务 = 本班同学
+    5. **分母按 scope 算**：学院任务 = 班主任名册里已登记班主任的班数
+       （第六十一轮，一班一个名额、学生全部点完名才算已填）；
+       班级任务 = 本班同学
     6. **明细的口径也不同**：学院任务里班主任只看得到自己班那一份
     7. **任务总览**统计的是「我能看到的」
     """
@@ -5789,10 +5791,19 @@ def test_a32_task_scope() -> None:
     # ---------- ⑥ 分母按 scope 算 ----------
     me = data_of(call("GET", "/auth/me", None, T)[1]) or {}
     cls_id = int(me.get("classId") or 0)
-    # 第六十轮：学院任务的分母 = **全校在册学生**（每个学生都要被点到名），
-    # 不再是「全校班主任人数」——分子取自点名表，两边必须同一个单位，
-    # 否则会出现「已填 2 / 共 11 人」这种分子分母各说各话的数字。
-    want_college_base = db_count("SELECT COUNT(*) FROM student_record")
+    # 第六十一轮：学院任务的分母 = **班主任名册里已登记班主任、且有学生的启用班**
+    # （一班一个名额；两个班共用一个班主任算两个；兼班主任的院长也算一位）。
+    # 分子 = 这些班里学生**全部**点完名的班数——和名册一个口径，
+    # 不再是「全校在册学生」（那个数回答不了「八个班主任交了几个」）。
+    want_college_base = db_count(
+        "SELECT COUNT(DISTINCT uc.class_id) "
+        "FROM sys_user_class uc "
+        "JOIN sys_user u ON u.id = uc.user_id "
+        "JOIN cls_class c ON c.id = uc.class_id AND c.status = 1 "
+        "WHERE uc.is_adviser = 1 AND u.status = 1 "
+        "AND (u.role = 'TEACHER' OR (u.role = 'DEAN' AND u.dean_only = 0)) "
+        "AND EXISTS (SELECT 1 FROM student_record s WHERE s.class_id = uc.class_id)"
+    )
     want_class_base = db_count(
         "SELECT COUNT(*) FROM sys_user WHERE status = 1 AND class_id = :c "
         "AND role IN ('MEMBER','ADMIN','MONITOR')", c=cls_id)
@@ -5801,9 +5812,13 @@ def test_a32_task_scope() -> None:
     by_id = {r["id"]: r for r in rows}
     c_row = by_id.get(college_tid) or {}
     k_row = by_id.get(class_tid) or {}
-    check("★ 学院任务的分母是全校学生数",
+    check("★ 学院任务的分母 = 班主任名册里已登记班主任的班数",
           c_row.get("summary", {}).get("total") == want_college_base,
           f"{c_row.get('summary', {}).get('total')} vs {want_college_base}")
+    check("学院任务的分子不超过分母（班数不会比班还多）",
+          int(c_row.get("summary", {}).get("answered") or 0)
+          <= int(c_row.get("summary", {}).get("total") or 0),
+          str(c_row.get("summary")))
     check("班级任务的分母是本班同学人数",
           k_row.get("summary", {}).get("total") == want_class_base,
           f"{k_row.get('summary', {}).get('total')} vs {want_class_base}")
@@ -5835,6 +5850,17 @@ def test_a32_task_scope() -> None:
     check("总览统计了班级任务数",
           int(ov.get("classTasks") or 0) >= 1, str(ov.get("classTasks")))
     check("总览给出回收率", "rate" in ov and "answered" in ov and "base" in ov, str(ov)[:200])
+    # 第六十一轮：两种任务单位不同（人 / 班），总览必须**分开**给，
+    # 否则「已答 15 / 应答 22」里的 22 说不清是人还是班。
+    check("★ 总览按 scope 拆出两套回收率（人 / 班）",
+          all(k in ov for k in ("classBase", "classAnswered", "classRate",
+                                "collegeBase", "collegeAnswered", "collegeRate")),
+          str(sorted(ov.keys())))
+    check("★ 总览里学院任务的分母 = 名册班数 × 学院任务条数",
+          int(ov.get("collegeBase") or 0)
+          == int(ov.get("collegeTasks") or 0) * want_college_base,
+          f"collegeBase={ov.get('collegeBase')} "
+          f"collegeTasks={ov.get('collegeTasks')} roster={want_college_base}")
     check("总览按班分组", isinstance(ov.get("byClass"), list), str(ov.get("byClass"))[:120])
     check("总览按发布人分组", isinstance(ov.get("byPublisher"), list),
           str(ov.get("byPublisher"))[:120])

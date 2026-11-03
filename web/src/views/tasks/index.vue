@@ -16,6 +16,7 @@ import TaskRollcallDrawer from '@/components/TaskRollcallDrawer.vue'
 import { useModal } from '@/composables/useModal'
 import { useCloseGuard } from '@/composables/useCloseGuard'
 import { toggleTaskOpen } from '@/composables/useReopenTask'
+import { progressUnit } from '@/utils/taskStatus'
 import type {
   Task,
   TaskDetail,
@@ -499,9 +500,10 @@ onMounted(async () => {
         <div class="summary">
           <div class="bar-line">
             <span class="muted">
-              已填 <b>{{ row.summary.answered }}</b> / 共 {{ row.summary.total }} 人
+              已填 <b>{{ row.summary.answered }}</b> / 共 {{ row.summary.total }}
+              {{ progressUnit(row.scope) }}
               <template v-if="row.summary.unanswered > 0">
-                ，还差 {{ row.summary.unanswered }} 人
+                ，还差 {{ row.summary.unanswered }} {{ progressUnit(row.scope) }}
               </template>
             </span>
             <el-progress

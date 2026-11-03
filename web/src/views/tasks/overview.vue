@@ -22,6 +22,7 @@ import { exportTaskDetail, exportTaskOverview, fetchTaskOverview } from '@/api/t
 import { fetchCollegeFields } from '@/api/college'
 import { getErrorMessage } from '@/api/request'
 import { useUserStore } from '@/stores/user'
+import { progressUnit } from '@/utils/taskStatus'
 import type { CollegeClassChoice, Task, TaskOverviewPayload } from '@/types'
 
 const userStore = useUserStore()
@@ -82,7 +83,20 @@ const cards = computed(() => {
   return [
     { key: 'total', label: '任务总数', value: String(d.total), hint: `其中 ${d.classTasks} 条班级任务` },
     { key: 'open', label: '还在收答案', value: String(d.open), hint: d.closed ? `${d.closed} 条已关闭` : '没有已关闭的' },
-    { key: 'rate', label: '回收率', value: rateText(d.rate), hint: `已答 ${d.answered} / 应答 ${d.base}` },
+    // 两种任务的单位不同（人 / 班），**不能合成一个数**——分开两张卡，
+    // 否则「已答 15 / 应答 22」谁也说不清 22 是人还是班。
+    {
+      key: 'collegeRate',
+      label: '学院任务回收率',
+      value: rateText(d.collegeRate),
+      hint: `已填 ${d.collegeAnswered} / 共 ${d.collegeBase} 个班`,
+    },
+    {
+      key: 'classRate',
+      label: '班级任务回收率',
+      value: rateText(d.classRate),
+      hint: `已答 ${d.classAnswered} / 共 ${d.classBase} 人`,
+    },
     { key: 'college', label: '学院任务', value: String(d.collegeTasks), hint: '院长发到全学院的' },
   ]
 })
@@ -172,23 +186,52 @@ onMounted(async () => {
       </article>
     </div>
 
-    <section v-if="data && data.base > 0" class="glass-card rate-card">
+    <section
+      v-if="data && (data.classBase > 0 || data.collegeBase > 0)"
+      class="glass-card rate-card"
+    >
+      <!-- 两种任务的应答对象不是同一个单位：班级任务数**人**、学院任务数**班**。
+           合成一个「总体回收率」会得到一个单位不明的数，所以这里并列两条。 -->
       <div class="rate-head">
-        <span>总体回收率</span>
-        <strong class="num">{{ rateText(data.rate) }}</strong>
+        <span>回收率</span>
       </div>
-      <el-progress
-        :percentage="ratePercent(data.rate)"
-        :stroke-width="8"
-        :show-text="false"
-        color="var(--color-accent-text)"
-        aria-hidden="true"
-      />
-      <p class="filter-hint">
-        已答 {{ data.answered }} 份，应答对象共 {{ data.base }} 人。
-        <strong>班级任务</strong>由本班同学应答，<strong>学院任务</strong>由各班班主任应答；
-        班主任和访客不算班级任务的应答对象，发布人自己也不算。
-      </p>
+
+      <div class="rate-row">
+        <div class="rate-row-head">
+          <span><strong>班级任务</strong>（按人）</span>
+          <strong class="num">{{ rateText(data.classRate) }}</strong>
+        </div>
+        <el-progress
+          :percentage="ratePercent(data.classRate)"
+          :stroke-width="8"
+          :show-text="false"
+          color="var(--color-accent-text)"
+          aria-hidden="true"
+        />
+        <p class="filter-hint">
+          已答 {{ data.classAnswered }} 份，应答对象共 {{ data.classBase }} 人。
+          <strong>班级任务</strong>由本班同学应答；班主任和访客不算，发布人自己也不算。
+        </p>
+      </div>
+
+      <div class="rate-row">
+        <div class="rate-row-head">
+          <span><strong>学院任务</strong>（按班）</span>
+          <strong class="num">{{ rateText(data.collegeRate) }}</strong>
+        </div>
+        <el-progress
+          :percentage="ratePercent(data.collegeRate)"
+          :stroke-width="8"
+          :show-text="false"
+          color="var(--color-accent-text)"
+          aria-hidden="true"
+        />
+        <p class="filter-hint">
+          已填 {{ data.collegeAnswered }} 个班，<strong>学院任务</strong>由各班班主任应答：
+          分母是<strong>班主任名册</strong>里已登记班主任的班（一班一个名额，兼班主任的院长也算），
+          班里学生<strong>全部点完名</strong>才算已填。
+        </p>
+      </div>
     </section>
 
     <section class="glass-card" aria-label="各班情况">
@@ -215,7 +258,9 @@ onMounted(async () => {
                   color="var(--color-accent-text)"
                   aria-hidden="true"
                 />
-                <span class="progress-text num">已答 {{ c.answered }} / 共 {{ c.base }} 人</span>
+                <span class="progress-text num">
+                  已答 {{ c.answered }} / 共 {{ c.base }} {{ progressUnit(c.scope) }}
+                </span>
               </td>
             </tr>
             <tr v-if="byClass.length === 0">
@@ -282,7 +327,10 @@ onMounted(async () => {
                   color="var(--color-accent-text)"
                   aria-hidden="true"
                 />
-                <span class="progress-text num">已答 {{ t.summary.answered }} / 共 {{ t.summary.total }} 人</span>
+                <span class="progress-text num">
+                  已答 {{ t.summary.answered }} / 共 {{ t.summary.total }}
+                  {{ progressUnit(t.scope) }}
+                </span>
               </td>
               <td>
                 <el-tag size="small" effect="plain" :type="t.open ? 'success' : 'info'">
@@ -379,6 +427,26 @@ onMounted(async () => {
 
 .rate-head strong {
   font-size: 18px;
+}
+
+/* 两条回收率并列（单位不同，不能合成一个数） */
+.rate-row + .rate-row {
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.rate-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.rate-row-head .num {
+  font-size: 16px;
 }
 
 .filter-hint {
