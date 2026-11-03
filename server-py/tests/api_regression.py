@@ -119,12 +119,23 @@ def call(method: str, path: str, body=None, token: str | None = None, raw: bytes
                 if "json" in ctype:
                     return r.status, (json.loads(payload) if payload else None)
                 return r.status, {"_bytes": len(payload)}
-        except urllib.error.HTTPError as e:
-            payload = e.read()
+        except urllib.error.HTTPError as he:
+            # ⚠ 响应体也要在重试圈里读：未认证的请求**服务端不读 body** 就回 401，
+            # 关连接时客户端手上还有没发完的字节，内核直接回 RST——
+            # 表现是 `e.read()` 抛 ConnectionResetError（实测带 body 的匿名
+            # PUT 命中率能到六成以上）。这层抖动和接口本身没关系，
+            # 断言的是状态码，所以按下面同一条规则重试一次。
             try:
-                return e.code, (json.loads(payload) if payload else None)
+                payload = he.read()
+            except Exception as read_err:  # noqa: BLE001  连接层错误
+                last_err = read_err
+                if attempt == 1:
+                    continue
+                return he.code, {"code": he.code, "message": repr(read_err)}
+            try:
+                return he.code, (json.loads(payload) if payload else None)
             except Exception:  # noqa: BLE001
-                return e.code, {"_raw": payload[:200].decode("utf-8", "replace")}
+                return he.code, {"_raw": payload[:200].decode("utf-8", "replace")}
         except Exception as e:  # noqa: BLE001  连接层错误
             last_err = e
             if attempt == 1:
