@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { nextTick, reactive, ref, watch } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules, type UploadFile } from 'element-plus'
 import dayjs from 'dayjs'
 import { payBatchMember } from '@/api/batches'
+import { MAX_RECEIPT_BYTES, RECEIPT_ACCEPT, uploadReceipt } from '@/api/files'
 import { getErrorMessage } from '@/api/request'
 import { useModal } from '@/composables/useModal'
 import { disableFutureDates, isFutureDateTime } from '@/utils/date'
@@ -30,6 +31,44 @@ const alertMessage = ref('')
 const alertRef = ref<HTMLElement>()
 
 const channels = Object.entries(CHANNEL_TEXT) as [Channel, string][]
+
+/* ---------------- 小票（选填，第六十一轮） ----------------
+ * 代为登记时把学生交现金的收据 / 转账截图留档。和支出登记同一套做法：
+ * 本地 objectURL 预览，**提交时才上传**（取消登记不会留下孤儿文件）。
+ */
+const uploadRef = ref()
+const receiptFile = ref<File | null>(null)
+const receiptPreview = ref('')
+const receiptError = ref('')
+
+function onReceiptChange(file: UploadFile) {
+  const raw = file.raw
+  if (!raw) return
+  if (!RECEIPT_ACCEPT.includes(raw.type)) {
+    receiptError.value = '仅支持 JPG / PNG / WebP / GIF 图片'
+    clearReceipt()
+    return
+  }
+  if (raw.size > MAX_RECEIPT_BYTES) {
+    receiptError.value = '图片大小不能超过 5MB'
+    clearReceipt()
+    return
+  }
+  receiptError.value = ''
+  receiptFile.value = raw
+  receiptPreview.value = URL.createObjectURL(raw)
+}
+
+function onReceiptExceed() {
+  receiptError.value = '请先移除已选图片再重新选择'
+}
+
+function clearReceipt() {
+  if (receiptPreview.value) URL.revokeObjectURL(receiptPreview.value)
+  receiptPreview.value = ''
+  receiptFile.value = null
+  uploadRef.value?.clearFiles()
+}
 
 const form = reactive({
   amount: undefined as number | undefined,
@@ -65,6 +104,9 @@ const rules: FormRules = {
 }
 
 watch(visible, async (open) => {
+  // 无论开关都先清小票：关=释放 objectURL，开=避免上次输入残留
+  clearReceipt()
+  receiptError.value = ''
   if (!open) return
   alertMessage.value = ''
   // 默认批次应收 / 现在 / 现金，可改（补录历史缴费时改时间即可）
@@ -99,12 +141,18 @@ async function onSubmit() {
       return
     }
 
+    // 先传小票拿相对路径，再随缴费一起落库（上传失败=整单失败，不产生半截缴费）
+    let receiptUrl: string | undefined
+    if (receiptFile.value) {
+      receiptUrl = (await uploadReceipt(receiptFile.value)).path
+    }
     await payBatchMember(props.batch.id, {
       userId: props.member.userId,
       amount: form.amount!,
       channel: form.channel,
       occurredAt: form.occurredAt,
       remark: form.remark.trim() || undefined,
+      receiptUrl,
     })
     ElMessage.success(
       `${props.member.realName} 已标记缴费，收入流水与余额已同步更新`,
@@ -197,6 +245,31 @@ async function onSubmit() {
           placeholder="如：现金已收 / 微信转账截图已存档"
         />
       </el-form-item>
+
+      <!-- 小票（选填）：本地预览，提交时才上传；错误就地 role=alert -->
+      <el-form-item label="小票图片（选填）">
+        <div v-if="receiptPreview" class="receipt-preview">
+          <img :src="receiptPreview" alt="已选小票预览" />
+          <div class="receipt-meta">
+            <span class="receipt-name">{{ receiptFile?.name }}</span>
+            <el-button link type="danger" size="small" @click="clearReceipt">移除</el-button>
+          </div>
+        </div>
+        <el-upload
+          v-else
+          ref="uploadRef"
+          :auto-upload="false"
+          :show-file-list="false"
+          :limit="1"
+          accept="image/jpeg,image/png,image/webp,image/gif"
+          :on-change="onReceiptChange"
+          :on-exceed="onReceiptExceed"
+        >
+          <el-button>选择图片</el-button>
+        </el-upload>
+        <p v-if="receiptError" class="receipt-error" role="alert">{{ receiptError }}</p>
+        <p class="receipt-hint">支持 JPG / PNG / WebP / GIF，不超过 5MB；保存后可在账本明细查看</p>
+      </el-form-item>
       </el-form>
     </div>
 
@@ -240,6 +313,49 @@ async function onSubmit() {
 .grow {
   flex: 1;
   min-width: 0;
+}
+
+.receipt-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.receipt-preview img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--el-border-color);
+}
+
+.receipt-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.receipt-name {
+  font-size: 12px;
+  color: var(--color-muted-fg);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receipt-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-destructive-text);
+}
+
+.receipt-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-muted-fg);
 }
 
 @media (max-width: 560px) {

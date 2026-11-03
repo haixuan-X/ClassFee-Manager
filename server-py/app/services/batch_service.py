@@ -19,6 +19,7 @@ from ..models import FeeBatch, FeeCategory, FeePayment, FeeRecord, SysUser
 from ..schemas import BatchPayRequest, BatchRequest
 from ..security import STAFF_ROLES, LoginUser, require_ownership
 from ..serializers import batch_vo, fmt_d, fmt_dt, member_vo, payment_vo
+from . import file_service
 
 PREFERRED_INCOME_CATEGORY = "班费收取"
 
@@ -380,6 +381,13 @@ def pay(db: Session, user: LoginUser, batch_id: int, req: BatchPayRequest) -> No
         channel = req.channel if req.channel else "CASH"
         occurred_at = req.occurredAt if req.occurredAt is not None else datetime.now()
 
+        # 小票（第六十一轮，可选）：代为登记时允许挂一张凭证。
+        # 手动「收入登记」仍然不许挂（`record_service.create_record` 那条规则不动），
+        # 这里开的是**缴费**这条路——学生交现金的收据 / 转账截图本来就该留档。
+        # 路径必须指向真实存在的上传文件，和支出登记同一道校验。
+        if req.receiptUrl and file_service.resolve_receipt(req.receiptUrl) is None:
+            raise BizException.bad_request("小票文件不存在或已失效，请重新上传")
+
         category = _income_category(db, batch.class_id)
         record = FeeRecord(
             class_id=batch.class_id,
@@ -392,6 +400,7 @@ def pay(db: Session, user: LoginUser, batch_id: int, req: BatchPayRequest) -> No
             payer_user_id=payer.id,
             batch_id=batch.id,
             remark=req.remark,
+            receipt_url=req.receiptUrl,
             status="NORMAL",
             created_by=user.id,
         )

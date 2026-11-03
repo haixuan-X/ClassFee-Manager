@@ -310,6 +310,7 @@ class BatchPayRequest(_BodyModel):
     channel: str | None = None
     occurredAt: datetime | None = None
     remark: str | None = None
+    receiptUrl: str | None = None
 
     @field_validator("userId")
     @classmethod
@@ -348,6 +349,20 @@ class BatchPayRequest(_BodyModel):
     @classmethod
     def _v_remark(cls, v: str | None) -> str | None:
         _check_size(v, 255, "备注最多 255 字")
+        return v
+
+    @field_validator("receiptUrl")
+    @classmethod
+    def _v_receipt(cls, v: str | None) -> str | None:
+        # 代为登记时可以顺手把小票挂上（学生交现金的收据 / 转账截图）。
+        # 口径和 `RecordRequest.receiptUrl` 完全一致：空白串归一为 None，
+        # 只接受 `file_service` 生成的 receipts/<name> 形态。
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        v = v.strip()
+        _check_size(v, 255, "小票路径不合法")
+        if not _ENUM_RECEIPT.fullmatch(v):
+            _raise_constraint("小票路径不合法")
         return v
 
 

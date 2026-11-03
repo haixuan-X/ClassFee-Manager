@@ -63,9 +63,29 @@ const canPublishCollege = ref(false)
 const view = ref<TaskView>('mine')
 
 /**
+ * 「只看班级任务」这一档（第六十一轮）。
+ *
+ * 用户口径：班级任务页要能单独筛出**班级任务**（截图里「学院任务」右边
+ * 空着一个位置）。它和 `view` 不是一个维度——`view=mine` 本来就是
+ * 「本班班级任务 + 学院任务」，所以这一档**复用 mine 的请求**，
+ * 只在本地把 `scope=COLLEGE` 的行滤掉。
+ *
+ * 为什么不加一个后端 view：`/tasks?view=` 是服务端可见性闸门，
+ * 多一档就多一处要和导出/总览对齐的口径；这里纯粹是「同一批数据换个看法」，
+ * 放前端不会漏数据，也不碰权限。
+ */
+const onlyClass = ref(false)
+
+/** 页签的 key（比 `view` 多一个只在前端存在的 'class'） */
+type TaskTab = TaskView | 'class'
+
+/** 当前高亮的页签：只看班级任务时盖过 `view` */
+const activeTab = computed<TaskTab>(() => (onlyClass.value ? 'class' : view.value))
+
+/**
  * 范围切换（第三十三轮：班级数据不互通）。
  *
- * 只保留两档：本班 + 学院、学院任务。
+ * 只保留三档：本班 + 学院、学院任务、班级任务。
  * **刻意没有「其他班」**——班主任 / 班长 / 生活委员 / 同学都只能看
  * 「自己班 + 院长下发的学院任务」，看别的班属于越界。
  *
@@ -74,19 +94,20 @@ const view = ref<TaskView>('mine')
  * 普通成员的卡片上挂着「点名」按钮，就是这条线没拦住。
  * 看不见时把第一档的文案也换掉，否则「本班 + 学院」会骗人。
  */
-const VIEWS: { key: TaskView; label: string; hint: string }[] = [
+const VIEWS: { key: TaskTab; label: string; hint: string }[] = [
   { key: 'mine', label: '本班 + 学院', hint: '我自己班的，以及学院发下来的' },
   { key: 'college', label: '学院任务', hint: '院长发到全学院的，各班班主任应答' },
+  { key: 'class', label: '班级任务', hint: '只看我自己班发的任务（不含学院任务）' },
 ]
 
 const canSeeCollege = ref(false)
 
-const visibleViews = computed(() =>
+const visibleViews = computed<{ key: TaskTab; label: string; hint: string }[]>(() =>
   canSeeCollege.value
     ? VIEWS
     : [
         {
-          key: 'mine' as TaskView,
+          key: 'mine',
           label: '本班任务',
           hint: '我班里发的任务',
         },
@@ -97,7 +118,12 @@ async function load() {
   loading.value = true
   try {
     const data = await fetchTasks(view.value)
-    rows.value = data.rows
+    // 只看班级任务：服务端给的是「本班 + 学院」，这里把学院任务滤掉。
+    // 过滤放在 load 里而不是模板里——`rows` 还喂给计数、批量选择、删除，
+    // 只在渲染时滤会让「全选」把看不见的学院任务也勾上。
+    rows.value = onlyClass.value
+      ? data.rows.filter((r) => r.scope !== 'COLLEGE')
+      : data.rows
     canPublish.value = data.canPublish
     canPublishCollege.value = data.canPublishCollege
     // 老后端没这个字段时按「看得见」处理：宁可多显示一个空页签，
@@ -106,6 +132,7 @@ async function load() {
     // 当前停在「学院任务」档、而这一档已经不给我看了 → 退回本班
     if (view.value === 'college' && !canSeeCollege.value) {
       view.value = 'mine'
+      onlyClass.value = false
     }
   } catch {
     rows.value = []
@@ -114,9 +141,13 @@ async function load() {
   }
 }
 
-function switchView(v: TaskView) {
-  if (view.value === v) return
-  view.value = v
+function switchView(v: TaskTab) {
+  // 'class' 复用 mine 的数据，只是多一个本地过滤
+  const nextView: TaskView = v === 'class' ? 'mine' : v
+  const nextOnlyClass = v === 'class'
+  if (view.value === nextView && onlyClass.value === nextOnlyClass) return
+  view.value = nextView
+  onlyClass.value = nextOnlyClass
   void load()
 }
 
@@ -417,8 +448,8 @@ onMounted(async () => {
         type="button"
         role="tab"
         class="view-btn"
-        :class="{ active: view === v.key }"
-        :aria-selected="view === v.key"
+        :class="{ active: activeTab === v.key }"
+        :aria-selected="activeTab === v.key"
         :title="v.hint"
         @click="switchView(v.key)"
       >

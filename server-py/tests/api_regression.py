@@ -1579,9 +1579,18 @@ def test_a14b_payable_roles():
 
     # 班主任能代生活委员登记（协作动作，不设归属闸）
     adm_id = next((p["userId"] for p in pays if p["role"] == "ADMIN"), None)
+
+    # 代为登记可以顺手挂一张小票（第六十一轮）：学生交现金的收据/转账截图。
+    # 只做魔数嗅探，所以给个最小 PNG 头就够了（与 `/api/files` 同一道校验）。
+    png = b"\x89PNG\r\n\x1a\n" + b"regress"
+    st, j = _post_multipart("/files", "file", "receipt.png", png, T)
+    receipt = (data_of(j) or {}).get("path")
+    chk("上传小票 -> 200", st == 200 and bool(receipt), f"st={st} {msg_of(j)}")
+
     st, j = call("POST", f"/batches/{bid}/pay",
-                 {"userId": adm_id, "amount": 12.34, "channel": "CASH"}, T)
-    chk("班主任代生活委员登记缴费 -> 200", st == 200, f"st={st} {msg_of(j)}")
+                 {"userId": adm_id, "amount": 12.34, "channel": "CASH",
+                  "receiptUrl": receipt}, T)
+    chk("班主任代生活委员登记缴费（带小票）-> 200", st == 200, f"st={st} {msg_of(j)}")
 
     # 删掉那笔自动流水 → 缴费行必须**连缴费时间一起**退回未缴。
     # 只把 status 改回 UNPAID 而留着 paid_at，成员缴费页就会出现
@@ -1592,6 +1601,12 @@ def test_a14b_payable_roles():
     chk("代登记后拿到自动流水 id", bool(rid), str(row)[:200])
     if rid:
         chk("登记后 paidAt 有值", bool(row.get("paidAt")), str(row)[:200])
+        # 小票必须挂到那条自动生成的收入流水上（账本明细里能点开看）
+        st, j = call("GET", f"/records?id={rid}&size=5", None, T)
+        rec = (data_of(j) or {}).get("records") or []
+        chk("★ 缴费小票挂到了自动流水上",
+            bool(rec) and rec[0].get("receiptUrl") == receipt,
+            str(rec)[:200])
         st, j = call("DELETE", f"/records/{rid}", None, T)
         chk("删掉缴费流水 -> 200", st == 200, f"st={st} {msg_of(j)}")
         st, j = call("GET", f"/members?batchId={bid}", None, T)
@@ -1601,6 +1616,16 @@ def test_a14b_payable_roles():
         chk("★ 缴费时间一并清空（不留旧时间）", row2.get("paidAt") is None,
             str(row2)[:200])
         chk("★ 自动流水关联也解除", row2.get("recordId") is None, str(row2)[:200])
+
+    # 假路径必须被拒：不能只存个指向空气的字符串
+    other_id = next(
+        (p["userId"] for p in pays if p["role"] != "ADMIN"), None
+    )
+    if other_id:
+        st, j = call("POST", f"/batches/{bid}/pay",
+                     {"userId": other_id, "amount": 12.34,
+                      "receiptUrl": "receipts/nonexistent.png"}, T)
+        chk("代为登记带不存在的小票路径 -> 400", st == 400, f"st={st} {msg_of(j)}")
 
     st, j = call("DELETE", f"/batches/{bid}", None, T)
     chk("清理批次 -> 200", st == 200, f"st={st} {msg_of(j)}")
