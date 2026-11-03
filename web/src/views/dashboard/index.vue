@@ -209,7 +209,67 @@ const changeOpen = ref(false)
 
 function openChangeDialog() {
   if (!(stu.value?.changeStudents?.length)) return
+  // 每次打开都从头筛：上次筛的条件留在里面，换个名单看会以为「人怎么少了」
+  changeKeyword.value = ''
+  changeStatus.value = ''
+  changeClass.value = ''
   changeOpen.value = true
+}
+
+/* ==================== 学籍变化名单的筛选（第六十三轮） ====================
+ *
+ * 名单是「当前全部不在籍」——学生一多就翻不动了，得能按状态/班级找。
+ * 三个条件**同时生效**（与的关系），全部在前端过滤：数据本来就是一次
+ * 拉全的（卡片上那个数要和名单行数一致），再发请求反而对不上。
+ */
+const changeKeyword = ref('')
+const changeStatus = ref('')
+const changeClass = ref('')
+
+/** 学籍状态下拉的选项：只给名单里**实际出现过**的档（没人的档摆出来是噪音） */
+const changeStatusOptions = computed(() => {
+  const seen = new Set<string>()
+  for (const r of stu.value?.changeStudents ?? []) {
+    const v = r.regStatusCanon || r.regStatus || ''
+    if (v) seen.add(v)
+  }
+  return [...seen]
+})
+
+/** 班级下拉的选项：同上，只给名单里出现过的班 */
+const changeClassOptions = computed(() => {
+  const seen = new Set<string>()
+  for (const r of stu.value?.changeStudents ?? []) {
+    if (r.className) seen.add(r.className)
+  }
+  return [...seen]
+})
+
+/** 筛完的名单。关键词同时匹配姓名和学号（用户记不住全名，学号更常敲） */
+const filteredChangeStudents = computed(() => {
+  const kw = changeKeyword.value.trim().toLowerCase()
+  return (stu.value?.changeStudents ?? []).filter((r) => {
+    if (changeStatus.value) {
+      const v = r.regStatusCanon || r.regStatus || ''
+      if (v !== changeStatus.value) return false
+    }
+    if (changeClass.value && r.className !== changeClass.value) return false
+    if (!kw) return true
+    return (
+      r.name.toLowerCase().includes(kw) || r.studentNo.toLowerCase().includes(kw)
+    )
+  })
+})
+
+/** 筛选条件有没有生效（用来决定要不要显示「重置」） */
+const changeFiltering = computed(
+  () => !!(changeKeyword.value.trim() || changeStatus.value || changeClass.value),
+)
+
+function resetChangeFilter() {
+  changeKeyword.value = ''
+  changeStatus.value = ''
+  changeClass.value = ''
 }
 
 const stats = computed<StatItem[]>(() => {
@@ -512,7 +572,7 @@ onMounted(async () => {
       <el-dialog
         v-model="changeOpen"
         title="学籍变化 · 不在籍学生名单"
-        width="720px"
+        width="760px"
         append-to-body
       >
         <p class="hint" style="margin: 0 0 12px">
@@ -520,8 +580,54 @@ onMounted(async () => {
           共 {{ stu?.changeStudents?.length ?? 0 }} 人，与上方卡片上的数字一致。
           学籍状态在「学生信息」页维护，改完这里会同步。
         </p>
+
+        <!-- 筛选：三个条件同时生效（与的关系），全在前端过滤 -->
+        <div class="change-filter">
+          <el-input
+            v-model="changeKeyword"
+            placeholder="搜姓名 / 学号"
+            clearable
+            class="change-kw"
+            aria-label="按姓名或学号搜索"
+          />
+          <el-select
+            v-model="changeStatus"
+            placeholder="全部状态"
+            clearable
+            class="change-sel"
+            aria-label="按学籍状态筛选"
+          >
+            <el-option
+              v-for="s in changeStatusOptions"
+              :key="s"
+              :label="s"
+              :value="s"
+            />
+          </el-select>
+          <el-select
+            v-model="changeClass"
+            placeholder="全部班级"
+            clearable
+            class="change-sel"
+            aria-label="按班级筛选"
+          >
+            <el-option
+              v-for="c in changeClassOptions"
+              :key="c"
+              :label="c"
+              :value="c"
+            />
+          </el-select>
+          <el-button v-if="changeFiltering" link type="primary" @click="resetChangeFilter">
+            重置
+          </el-button>
+          <span class="change-count">
+            {{ filteredChangeStudents.length }} / {{ stu?.changeStudents?.length ?? 0 }} 人
+          </span>
+        </div>
+
         <el-table
-          :data="stu?.changeStudents ?? []"
+          :data="filteredChangeStudents"
           size="small"
           max-height="460"
           v-loading="stuLoading"
@@ -543,6 +649,12 @@ onMounted(async () => {
             </template>
           </el-table-column>
           <el-table-column prop="enrollDate" label="入校日期" min-width="110" class-name="num" />
+          <template #empty>
+            <el-empty
+              :description="changeFiltering ? '没有符合筛选条件的学生' : '还没有不在籍的学生'"
+              :image-size="72"
+            />
+          </template>
         </el-table>
         <template #footer>
           <el-button @click="changeOpen = false">关闭</el-button>
@@ -897,6 +1009,27 @@ onMounted(async () => {
   margin-top: 6px;
   font-size: 12px;
   color: var(--color-accent-text);
+}
+
+/* 学籍变化名单的筛选条：搜索框 + 两个下拉 + 计数，一行放不下就换行 */
+.change-filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.change-kw {
+  width: 180px;
+}
+.change-sel {
+  width: 130px;
+}
+.change-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-muted-fg);
+  white-space: nowrap;
 }
 
 .stat-jump:hover {
