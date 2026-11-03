@@ -1755,14 +1755,29 @@ def teachers_of_class(db: Session, class_id: int) -> list[dict]:
 
 
 def teacher_candidates(db: Session) -> list[dict]:
-    """能被选为班主任的账号（第三十二轮）。
+    """能被选为班主任的账号（第三十二轮；第六十五轮收紧）。
 
-    = 所有**启用**的账号——不只是 role=TEACHER。
-    因为「谁是班主任」是**班**的安排：生活委员/班长被安排带班也是常事，
-    而职务（role）决定的是「他有哪些权限」，两者是正交的。
+    = 名册上**真能占「班主任」位**的账号：`_adviser_role_condition()`
+    （班主任，或兼班主任的院长），启用中的。
+
+    ## 为什么不再放全校账号进来（第六十五轮）
+
+    原来返回**所有启用账号**，注释写的理由是「生活委员/班长被安排带班
+    也是常事」。但两个问题：
+
+    1. 第五十一轮起，名册和撞车判定都只认 `_adviser_role_condition`——
+       把学生/班长安排进来，写的只是 `is_adviser=0` 的管理行，
+       **名册上一个都不会出现**。用户实测：云计算2601 的下拉里全是
+       学生的姓名+学号，选了也等于白选；
+    2. 把全校学生的姓名+学号铺进这个下拉，隐私面无故扩大。
+
+    候选集 = 名册的判定集，两处共用同一份条件（`_adviser_role_condition`），
+    不再各写一份。
     """
     rows = db.scalars(
-        select(SysUser).where(SysUser.status == 1).order_by(SysUser.id.asc())
+        select(SysUser)
+        .where(SysUser.status == 1, _adviser_role_condition())
+        .order_by(SysUser.id.asc())
     ).all()
     return [
         {
