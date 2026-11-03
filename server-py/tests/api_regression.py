@@ -359,6 +359,9 @@ BOM_FREE_CONFIGS = [
 MUST_HAVE_BOM = [
     "docs/系统设计文档.md",
     "docs/部署-Linux.md",
+    # 交接文档同样给人读（新会话/人都会先打开它），一起钉住
+    "HANDOFF.md",
+    "AGENTS.md",
 ]
 
 #: 「程序读」这一侧的扩展名。新建的文件若落在这个集合里，闸门会自动要求它无 BOM——
