@@ -7276,9 +7276,9 @@ def test_a41_one_teacher_per_class() -> None:
                          {"classIds": [int(fid_a), int(fid_b)]}, Ta)
             check("★ 甲显式勾已被乙占的 B 班 -> 400",
                   st == 400, f"st={st} {msg_of(j)}")
-            check("★ 报错带班名、现任、指路",
+            check("★ 报错带班名、现任，并指路「联系院长」（本人进不去班主任名册）",
                   FIX_B in msg_of(j) and NB in msg_of(j)
-                  and "改班主任安排" in msg_of(j), msg_of(j)[:200])
+                  and "联系院长" in msg_of(j), msg_of(j)[:200])
 
         # ---------- ④ 建号撞车 -> 400 ----------
         T = S["T"]  # 班主任 test，本班=云计算2502（他就是该班班主任）

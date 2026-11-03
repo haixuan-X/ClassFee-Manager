@@ -172,13 +172,22 @@ def _class_teacher_conflict(
 
 
 def _teacher_conflict_msg(
-    db: Session, class_id: int, *, exclude_user_id: int | None, action: str
+    db: Session,
+    class_id: int,
+    *,
+    exclude_user_id: int | None,
+    action: str,
+    hint: str = "如需更换请到「班主任名册 → 改班主任安排」",
 ) -> str | None:
     """撞车时的统一文案（带班名 + 占位人名 + 指路）；没撞返回 None。
 
     和 `_class_teacher_conflict` 分开是为了**行级跳过**（导入）与
     **整单拒绝**（建号/改班）共用同一句话——报错文案写两份必然漂，
     用户在两个入口看到两种说法就不知道该信哪个。
+
+    `hint`：**指路要分人**。运营/院长看到的是「去班主任名册改安排」（他们
+    进得去那个页）；班主任本人改「我带的班」时则只能「联系院长」——
+    给他指一个他自己没权限的页面，等于让他去撞 403。
     """
     other = _class_teacher_conflict(db, class_id, exclude_user_id=exclude_user_id)
     if other is None:
@@ -187,7 +196,7 @@ def _teacher_conflict_msg(
     cname = clazz.class_name if clazz else f"#{class_id}"
     return (
         f"{action}：「{cname}」已有班主任「{other.real_name or other.username}」；"
-        "一个班只有一位班主任，如需更换请到「班主任名册 → 改班主任安排」"
+        f"一个班只有一位班主任，{hint}"
     )
 
 
@@ -1036,7 +1045,12 @@ def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> d
                         kept.append((cid, current[cid]))
                         continue
                     msg = _teacher_conflict_msg(
-                        db, cid, exclude_user_id=target.id, action="修改「我带的班」"
+                        db,
+                        cid,
+                        exclude_user_id=target.id,
+                        action="修改「我带的班」",
+                        # 班主任本人进不去「班主任名册」——指路要指到能做到的人
+                        hint="如需更换请联系院长",
                     )
                     if msg is None:
                         kept.append((cid, 1))
