@@ -630,20 +630,76 @@ async def get_current_user(request: Request) -> LoginUser:
     return user
 
 
+#: 拒绝路径上最多替客户端读掉多少字节的请求体。
+#: 中间件是**不登录也能打到**的入口，无上限地等一个谎报 `Content-Length`
+#: 的客户端会把任务挂死——超过这个数就不读了（那种请求本来也是被拒的）。
+_MAX_DRAIN_BYTES = 1024 * 1024
+#: 同上，读多久还没读完就放弃（秒）。
+_DRAIN_TIMEOUT = 2.0
+
+
+async def _discard_body(request: Request) -> None:
+    """在**拒绝**请求之前，把客户端发来的请求体读掉（丢弃）。
+
+    ## 不读就会 RST
+
+    鉴权中间件跑在路由和请求体解析**之前**。直接 `return fail(401, …)` 时，
+    客户端发来的 body 还躺在内核接收缓冲区里没人读；服务端随后关闭连接，
+    而 TCP 规定「接收缓冲区里还有未读数据就回 RST」——客户端于是
+    **读不到那条 401 响应**，只看到 `ConnectionResetError`。
+
+    实测带 body 的匿名 PUT 有六成以上概率整条响应丢失。前端的表现是
+    token 过期后不提示「登录已过期」，而是甩一个网络错误出来。
+
+    ## 只在拒绝路径上调
+
+    放行路径**不能**读：`call_next` 返回时下游的流式处理（上传）可能还在读
+    body，这时候去读会把它要的字节抢走。所以只在「不往下走、直接出响应」
+    的分支里读。
+
+    ## 有上限
+
+    没有 `Content-Length` 也没有 `Transfer-Encoding` 就是没有 body（GET/HEAD），
+    直接返回——否则每个被拒的 GET 都要等一次超时。
+    """
+    raw = request.headers.get("content-length")
+    if raw is not None:
+        try:
+            if int(raw) > _MAX_DRAIN_BYTES:
+                return
+        except ValueError:
+            return  # 说不清有多大，不赌
+    elif not request.headers.get("transfer-encoding"):
+        return  # 没有 body，没什么可读的
+    try:
+        import anyio
+
+        with anyio.fail_after(_DRAIN_TIMEOUT):
+            async for _ in request.stream():
+                pass
+    except Exception:  # noqa: BLE001  读不完就算了，不影响拒绝本身
+        return
+
+
 def install_auth_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def _auth(request: Request, call_next):
+        async def reject(status: int, code: int, message: str):
+            """出拒绝响应前先读掉 body（见 `_discard_body`）。"""
+            await _discard_body(request)
+            return fail(code, message, None, status=status)
+
         path = request.url.path
         if path == "/api" or path.startswith("/api/"):
             if (request.method, path) not in PUBLIC_ROUTES:
                 header = request.headers.get("Authorization")
                 if header is None or not header.startswith(BEARER_PREFIX):
-                    return fail(401, "未登录或登录已过期", None, status=401)
+                    return await reject(401, 401, "未登录或登录已过期")
                 try:
                     user = parse_token(header[len(BEARER_PREFIX):])
                 except BizException as e:
                     # 中间件内异常不经过全局处理器，直接出响应体
-                    return fail(e.code, e.message, None, status=e.status)
+                    return await reject(e.status, e.code, e.message)
                 # 第十六轮：JWT 里没有 status，账号被停用后旧令牌本来还能继续用满 2 小时——
                 # 「停用」形同虚设（实测停用后所有接口仍 200，甚至能改个人信息）。
                 # 这里补一次主键查询（线程池执行，不阻塞事件循环），停用/删除即刻生效。
@@ -651,7 +707,7 @@ def install_auth_middleware(app: FastAPI) -> None:
                 # 不额外加查询——老师改完范围访客立刻生效，不用等重新登录。
                 active, guest_scopes_raw, dean_only = await _account_active_async(user.id)
                 if not active:
-                    return fail(403, "账号已被停用，请联系班主任", None, status=403)
+                    return await reject(403, 403, "账号已被停用，请联系班主任")
                 # 把「是否纯院长」贴到本次请求的用户对象上。
                 # 它不进 JWT（JWT 签发后就固定了，而这个标志要能即时生效），
                 # 所以每次请求都按主键查一次——和 status / guest_scopes 同一条路子。
@@ -681,32 +737,30 @@ def install_auth_middleware(app: FastAPI) -> None:
                             user, request.query_params.get("classId"), managed
                         )
                     except BizException as e:
-                        return fail(e.code, e.message, None, status=e.status)
+                        return await reject(e.status, e.code, e.message)
                 # 纯院长（第三十轮）：只管学院，班级事务一概不参与。
                 # 后端硬拦——前端隐藏的只是**入口**，手输 URL 或直接调接口都能绕过去。
                 if user.role == DEAN_ROLE and dean_only:
                     if not pure_dean_allowed(request.method, path):
-                        return fail(
+                        return await reject(
+                            403,
                             403,
                             "纯院长只负责学院事务；班级事务请由班主任（或班委）处理",
-                            None,
-                            status=403,
                         )
                 # 访客范围：后端硬拦。前端隐藏的只是**入口**，手输 URL 或直接调接口
                 # 都能绕过去——权限必须在服务端收口。
                 if user.role == GUEST_ROLE:
                     need = required_guest_scope(path)
                     if need is not None and need not in parse_guest_scopes(guest_scopes_raw):
-                        return fail(
+                        return await reject(
+                            403,
                             403,
                             f"该访客账号未被授权查看{_scope_display(need)}",
-                            None,
-                            status=403,
                         )
                 request.state.user = user
                 for method, pattern in _STAFF_COMPILED:
                     if request.method == method and pattern.match(path):
                         if user.role not in STAFF_ROLES:
-                            return fail(403, "当前角色无权执行该操作", None, status=403)
+                            return await reject(403, 403, "当前角色无权执行该操作")
                         break
         return await call_next(request)

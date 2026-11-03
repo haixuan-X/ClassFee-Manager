@@ -681,6 +681,42 @@ def test_a03_self_profile():
     st, j = call("PUT", "/auth/profile", {"realName": "No Token"}, None)
     check("无令牌改个人信息 -> 401", st == 401, f"st={st}")
 
+    # ★ 拒绝路径必须**先把请求体读掉**再回 401（`security._discard_body`）。
+    # 鉴权是中间件、跑在请求体解析之前，直接 return 的话 body 还躺在内核
+    # 接收缓冲区里没人读；服务端关连接时 TCP 会回 RST，**401 响应本身会丢**——
+    # 前端表现为 token 过期后报网络错误，而不是提示「登录已过期」。
+    # 这里刻意**不用 `call()`**：它的连接层重试会把丢响应这件事掩盖掉。
+    def _one_shot_put(path: str, payload: dict) -> int:
+        req = urllib.request.Request(
+            BASE + path,
+            method="PUT",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                r.read()
+                return r.status
+        except urllib.error.HTTPError as he:
+            try:
+                he.read()
+                return he.code
+            except Exception:  # noqa: BLE001  响应体读不到 = 被 RST 了
+                return -1
+        except Exception:  # noqa: BLE001
+            return -1
+
+    bad = [
+        i
+        for i in range(10)
+        if _one_shot_put("/auth/profile", {"realName": "No Token"}) != 401
+    ]
+    check(
+        "★ 匿名带 body 的 PUT 连打 10 次，401 响应一条都不能丢（不读 body 会 RST）",
+        not bad,
+        f"丢/错 {len(bad)} 次，位置 {bad}",
+    )
+
     st, j = call("GET", "/auth/profile", None, M)
     me = data_of(j) or {}
     check("普通成员能读到自己学号",
