@@ -393,7 +393,7 @@ onMounted(load)
         <p>
           这里改的是<strong>你自己</strong>的资料；角色、账号状态由运营在「成员管理」维护
           （<template v-if="isDean">你的<strong>职务范围</strong>下面可以自己改</template>）；
-          登录名、密码可以在右侧自行修改
+          登录名、密码在下面「我的资料」里自行修改
         </p>
       </div>
     </div>
@@ -517,71 +517,28 @@ onMounted(load)
             </el-button>
           </div>
         </el-form>
-      </article>
 
-      <!-- 只读的账号信息 -->
-      <article class="glass-card">
-        <div class="card-head">
-          <h3>账号信息</h3>
-          <span class="hint">这里除了登录名、密码，都由运营维护</span>
+        <!--
+          账号安全（第六十三轮）：登录名 / 修改密码挪到**左边**——
+          「能改的都在左边，右边只读」，一眼分得清哪些是自己动得了的。
+          单独走一道，不混进上面的资料保存：资料可以撤；登录名、密码改了没法撤。
+        -->
+        <div class="security-sep" aria-hidden="true" />
+        <h4 class="security-title">登录名</h4>
+        <div class="name-row">
+          <el-input
+            v-model="nameDraft"
+            maxlength="64"
+            placeholder="用于登录，全局唯一"
+            aria-label="登录名"
+            class="name-input"
+            @keyup.enter="onSaveUsername"
+          />
+          <el-button :loading="savingName" @click="onSaveUsername">保存</el-button>
         </div>
-
-        <dl class="detail-list" :aria-busy="loading">
-          <div class="row">
-            <dt>登录名</dt>
-            <dd class="name-cell">
-              <el-input
-                v-model="nameDraft"
-                maxlength="64"
-                placeholder="用于登录，全局唯一"
-                aria-label="登录名"
-                class="name-input"
-                @keyup.enter="onSaveUsername"
-              />
-              <el-button :loading="savingName" @click="onSaveUsername">保存</el-button>
-            </dd>
-          </div>
-          <p class="form-tip name-tip">
-            全局唯一、不能带空格；改完即用——会话不换，下次登录也用它
-          </p>
-          <div class="row">
-            <dt>角色</dt>
-            <dd>
-              <el-tag size="small" effect="light">{{ roleText ? ROLE_TEXT[roleText] : '—' }}</el-tag>
-            </dd>
-          </div>
-          <div v-if="isPureDean" class="row">
-            <dt>职务范围</dt>
-            <dd>只管学院（不参与班级事务）</dd>
-          </div>
-          <div v-else class="row">
-            <dt>所在班级</dt>
-            <dd>{{ currentClassName }}</dd>
-          </div>
-          <div class="row">
-            <dt>账号状态</dt>
-            <dd>
-              <el-tag
-                v-if="detail"
-                :type="detail.status === 1 ? 'success' : 'info'"
-                size="small"
-                effect="light"
-              >
-                {{ detail.status === 1 ? '启用' : '已停用' }}
-              </el-tag>
-              <span v-else>—</span>
-            </dd>
-          </div>
-          <div class="row">
-            <dt>创建时间</dt>
-            <dd>{{ detail?.createdAt ?? '—' }}</dd>
-          </div>
-          <div class="row">
-            <dt>最近登录</dt>
-            <dd>{{ detail?.lastLoginAt ?? '—' }}</dd>
-          </div>
-        </dl>
-
+        <p class="form-tip name-tip">
+          全局唯一、不能带空格；改完即用——会话不换，下次登录也用它
+        </p>
 
         <div class="security-sep" aria-hidden="true" />
         <h4 class="security-title">修改密码</h4>
@@ -627,6 +584,53 @@ onMounted(load)
             保存密码
           </el-button>
         </el-form>
+      </article>
+
+      <!-- 只读的账号信息：能改的都在左边，这里一个输入框都不放 -->
+      <article class="glass-card">
+        <div class="card-head">
+          <h3>账号信息</h3>
+          <span class="hint">只读；要改去左边「我的资料」</span>
+        </div>
+
+        <dl class="detail-list" :aria-busy="loading">
+          <div class="row">
+            <dt>角色</dt>
+            <dd>
+              <el-tag size="small" effect="light">{{ roleText ? ROLE_TEXT[roleText] : '—' }}</el-tag>
+            </dd>
+          </div>
+          <div v-if="isPureDean" class="row">
+            <dt>职务范围</dt>
+            <dd>只管学院（不参与班级事务）</dd>
+          </div>
+          <div v-else class="row">
+            <dt>所在班级</dt>
+            <dd>{{ currentClassName }}</dd>
+          </div>
+          <div class="row">
+            <dt>账号状态</dt>
+            <dd>
+              <el-tag
+                v-if="detail"
+                :type="detail.status === 1 ? 'success' : 'info'"
+                size="small"
+                effect="light"
+              >
+                {{ detail.status === 1 ? '启用' : '已停用' }}
+              </el-tag>
+              <span v-else>—</span>
+            </dd>
+          </div>
+          <div class="row">
+            <dt>创建时间</dt>
+            <dd>{{ detail?.createdAt ?? '—' }}</dd>
+          </div>
+          <div class="row">
+            <dt>最近登录</dt>
+            <dd>{{ detail?.lastLoginAt ?? '—' }}</dd>
+          </div>
+        </dl>
       </article>
     </section>
   </div>
@@ -751,15 +755,15 @@ onMounted(load)
   line-height: 1.6;
 }
 
-/* 本人改登录名 / 改密码：右栏自己的一道，不影响左边资料保存 */
-.name-cell {
+/* 本人改登录名 / 改密码：左边「我的资料」里自己的一道，不影响上面的资料保存 */
+.name-row {
   display: flex;
   gap: 8px;
   align-items: center;
-  justify-content: flex-end;
 }
 .name-input {
-  max-width: 190px;
+  flex: 1;
+  min-width: 0;
 }
 .name-tip {
   margin: 6px 0 0;
