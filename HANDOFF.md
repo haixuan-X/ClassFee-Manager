@@ -75,6 +75,22 @@ cd D:\bj\web; npm run dev
 
 - `server-py/run.py` 是给 PyCharm 右键运行的入口（会 `chdir` 到 `server-py`、只读 `.env` 里的 `CLASSFEE_COLLEGE_NAME`、Debug 模式自动关 reload）。
 - `run.py` 默认 `CLASSFEE_RELOAD=1` → uvicorn **父 + 子两进程**。
+
+> ⚠ **`.env` 不会自动进环境变量**：`run.py` 只读 `CLASSFEE_COLLEGE_NAME`，
+> 数据库账号、JWT 密钥、种子班主任账号全靠**进程环境**。从新开的 PowerShell
+> 直接起服务时，先逐行注入再启动：
+>
+> ```powershell
+> Get-Content 'D:\bj\.env' -Encoding UTF8 | ForEach-Object {
+>   if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') {
+>     Set-Item -Path "Env:$($matches[1])" -Value $matches[2].Trim()
+>   }
+> }
+> $env:CLASSFEE_RELOAD="0"
+> ```
+>
+> 不注入的后果：本地退回 `config.py` 的默认库账号（能连上就碰运气），
+> 更麻烦的是**空库不会自动建 `test` 账号**——回归第 1 步就 `SystemExit`（见 §14）。
 - 接口文档 `http://127.0.0.1:8080/docs`；`GET /api/version` 探活。
 
 ### 3.2 ⚠ 改了 `.py` 之后必须这样重启（本项目第一坑）
@@ -250,6 +266,10 @@ STAFF_ROLES = {"ADMIN", "MONITOR", "TEACHER", "DEAN"}
 | 缴费对象 | `members`/`PAYABLE_ROLES` 口径（**班主任不是缴费对象**） |
 | 日期字符串格式 | 后端 `helpers` 只认 `yyyy-MM-dd`；前端日期框**必须**写 `value-format` |
 | 导出惯例 | `GET` = 全量、`POST` = 子集（传 id 列表而不是状态语义） |
+| 学籍变化（`changeTotal`） | `student_service.dashboard_stats`：**当前不在籍人数**（毕业/入伍/休学/退学/其他）。没有历史表，给不了「本学期异动人次」，别再把它当时间口径 |
+| 任务详情看板展示口径 | `TaskDetailDashboard.vue`：`BOOLEAN/DATE → 返校四桶`（`utils/taskStatus.ts`）；`SINGLE/MULTI → 按选项`（`detail.options` 含 0 人项 + 未填）。两种口径共用一套筛选/导出 |
+| 候选项上限 | `task_service.MAX_OPTIONS = 4`（前端 `TaskPublishDialog` 的 `MAX_OPTIONS` 同值）。只挡新建，编辑不改候选项 |
+| 学院口径接口不带 `classId` | `web/src/api/request.ts` 的 `skipClassId` 名单：`/college/`、`/dashboard/students`、`/tasks/overview`。**新增学院口径接口必须加进去**，否则会被塞「当前班」（漏一次 = 任务总览 0 条） |
 
 ---
 
@@ -356,6 +376,12 @@ STAFF_ROLES = {"ADMIN", "MONITOR", "TEACHER", "DEAN"}
 | playwright ref 复用 | 点击报 `Ref not found` | 每次 snapshot 后 ref 变了，重新 find/snapshot |
 | `.playwright-mcp/` 出现在仓库根 | `git status` 多一堆 | 工具缓存，提交前删 |
 | 8080 被孤儿占用 | 服务起不来 / 起了个旧代码 | 先 `Get-NetTCPConnection -LocalPort 8080` 看 pid 再杀 |
+| PowerShell `Set-Content -Encoding UTF8` 带 BOM | `package.json` / PostCSS 解析报 `Unexpected token '\uFEFF'`，`npm run build` 直接挂 | **别用 PowerShell 改 UTF-8 程序文件**；用编辑器工具，或 Python 按字节写、写完检查前 3 字节 |
+| Python 给 CRLF 文件做字符串替换 | `raw.find("...\n...")` 返回 `-1`，`raw[:-1] + new + raw[len(old)-1:]` 仍照写 → **整个文件重复一段**（本仓库真实发生过） | 替换前**断言 `i >= 0`**；优先用编辑器工具；跨行匹配注意 `\r\n` |
+| `git add -A` 扫进别人的改动 | 提交信息只写「个人信息页」，实际带了 10 个无关文件 | 只 `git add <具体路径>`；即使单智能体也建议如此 |
+| 浏览器工具点登录/按钮 | `browser.click` 报 `UnknownVizError`；登录框没有 a11y ref | 在 `evaluate` 里用原生 `value` setter 赋值 + `element.click()`；`el-select` 要点 `.el-select__wrapper` 的 `mousedown`；下拉项在 portal 里（`.el-select-dropdown__item`）；Vue 重渲染后**元素引用会失效，每次重新查** |
+| 截图失败 `Screenshot needs a visible tab` | 浏览器工具报错 | 先 `browser.tabs.focus`，且窗口要可见；拿不到就退回 DOM 断言，别卡住 |
+| Vite 只监听 `localhost`（IPv6） | `127.0.0.1:5173` 连不上 | 统一用 `http://localhost:5173` |
 
 ---
 
@@ -443,6 +469,9 @@ STAFF_ROLES = {"ADMIN", "MONITOR", "TEACHER", "DEAN"}
 - **基线不变量**（跑完必须回到开跑时）：账号集合、批次条数、余额、完成率；每个用例结束后还有守卫检查 `test` 账号的班级关联没被改坏（`root_class_links()`）。
 - **写新用例的套路**：`test_aNN_xxx()` → 加进 `ALL_TESTS` → 自己造数据自己清 → 断言用中文名。
 - ⚠ **用例中途抛异常会跳过自己的清理**，留下脏数据让下一轮红一片（踩过：`回归新建班`、`dean_probe_xls`）。写完全量跑一遍确认能跑到 `RESULT:`。
+- ⚠ **`ROOT_U/ROOT_P` 是硬编码的 `test` / `123456`**（文件第 37 行）：库里没有这个账号时脚本直接 `SystemExit("无法登录班主任账号")`。空库/清库后先确认 `.env` 的 `CLASSFEE_TEACHER_USERNAME/PASSWORD` 已配置**并注入了进程环境**再重启（§3.1），或手工建号。
+- ⚠ **把某字段从「只读」改成「本人可改」时，先全局搜回归**：`test_a06` 有一条 `PUT /auth/profile {"username":"hijack"}` 断言「username 必须被忽略」——字段一旦可改，探针账号会被真改名，后续 54 条连锁 401。改行为前先 `grep` 断言里的旧口径。
+- 中途失败的用例会留下夹具（`回归新建班`、`Z90夹具班`、`不存在的班`、`云计算2502` 等），它们会出现在班级下拉里；确认无用后手工清，别让它越滚越多。
 - 前端也有「源码扫描」型断言可以照抄：`test_a22`（图表容器写法）、`test_a47`（每个 `<el-date-picker>` 必须有 `value-format`）。
 
 ---
@@ -481,4 +510,14 @@ $H = @{ Authorization = "Bearer $($lg.data.token)" }
 - **上传目录** `server-py/uploads/receipts/`（uuid 命名；删流水时回收未被引用的文件）。
 - **前端没有常驻 dev server**：验证前先 `cd web; npm run dev`。
 - 仓库根 `.playwright-mcp/`、临时 xlsx、截图都可能污染 `git status`，提交前看一眼。
+
+---
+
+## 17. 数据与隐私（动手前必读）
+
+- **`docs/wenti/` 的 16 张截图是用户的真实报障图**，里面是**真实姓名 + 学号**，已经随仓库提交（用户明确要求保留，**别再删**）。仓库是 **public**。
+- 因此：**不要再往仓库里加带真实姓名 / 学号 / 手机号的截图或导出文件**；`git add` 前先看 `git status`，别一把 `-A`。
+- 本地 `C:\Users\29913\AppData\Local\Temp\opencode\dbclean\` 下有**清库前的全量备份**（含 423 名学生），**不要**挪进仓库目录，也不要提交。
+- 数据库是真实数据：回归会自建自删并回到基线，但**不要手工 `DELETE` / `TRUNCATE`**；确实要清库，先问用户、先备份。
+- 改任何「导出 / 下载」功能时，注意导出的默认列可能带姓名学号——新加字段先想一句「这列能不能出现在公开文件里」。
 
