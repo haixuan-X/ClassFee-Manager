@@ -111,7 +111,13 @@ BOOLEAN_LABELS = {"true": "是", "false": "否"}
 #: 把它归到「请假」桶——和发布人自己在 SINGLE 里写「请假」是同一套口径。
 EXCUSED_VALUE = "请假"
 
-MAX_OPTIONS = 12
+#: 候选项上限（第六十四轮由 12 收紧到 4）。
+#:
+#: 用户口径：「新建单选类型的任务的时候最多可以添加四个选项」——
+#: 选项多了卡片一屏放不下，`√`/`×` 这类快速统计也失去意义。
+#: 只影响**新建**：编辑接口刻意不含候选项（换选项会让已回收的答案对不上题），
+#: 所以历史任务里的旧选项不会被这个上限卡住。
+MAX_OPTIONS = 4
 MAX_OPTION_LEN = 30
 MAX_VALUE_LEN = 255
 
@@ -834,6 +840,9 @@ def _college_detail(db: Session, user: LoginUser, task: ClsTask) -> dict:
             "qtype": task.qtype,
             "qtypeText": QTYPE_TEXT.get(task.qtype, task.qtype),
             "allowText": bool(task.allow_text),
+            # 完整选项表（含**0 人**的选项）：单选/多选的看板按选项列卡片，
+            # 只列「有答案的选项」会把「选项C 0 人」藏起来——那正是发布人想看的。
+            "options": _load_options(task),
             "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
             "open": is_open(task),
             "scope": SCOPE_COLLEGE,
@@ -932,6 +941,8 @@ def _college_detail(db: Session, user: LoginUser, task: ClsTask) -> dict:
         "qtype": task.qtype,
         "qtypeText": QTYPE_TEXT.get(task.qtype, task.qtype),
         "allowText": bool(task.allow_text),
+        # 完整选项表（含 0 人的），看板按它列卡片（见上面空班的注释）
+        "options": _load_options(task),
         "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
         "open": is_open(task),
         "scope": SCOPE_COLLEGE,
@@ -1009,6 +1020,8 @@ def get_detail(db: Session, user: LoginUser, task_id: int) -> dict:
         "qtype": task.qtype,
         "qtypeText": QTYPE_TEXT.get(task.qtype, task.qtype),
         "allowText": bool(task.allow_text),
+        # 完整选项表（含 0 人的）：和学院任务明细同一个形状，前端不用按 scope 分两套读法
+        "options": _load_options(task),
         "deadline": task.deadline.strftime("%Y-%m-%d %H:%M") if task.deadline else None,
         "open": is_open(task),
         "scope": SCOPE_CLASS,

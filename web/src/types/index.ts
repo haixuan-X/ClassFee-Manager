@@ -737,6 +737,13 @@ export interface PayRequest {
   channel?: Channel
   occurredAt?: string
   remark?: string
+  /**
+   * 小票路径（选填，第六十一轮）。
+   *
+   * 走的是「代为登记」这条路：收现金的收据 / 转账截图留个档。
+   * 手动「收入登记」仍然不许挂小票，只有这里开。
+   */
+  receiptUrl?: string
 }
 
 /** 批次明细行 */
@@ -1417,6 +1424,13 @@ export interface TaskDetail {
   qtype: TaskQType
   qtypeText: string
   allowText: boolean
+  /**
+   * **完整选项表**（含 0 人的选项，单选题才非空）。
+   *
+   * 看板按它列卡片：只列「有答案的选项」会把「选项C 0 人」藏起来——
+   * 那正是发布人想看的（哪个选项没人选）。
+   */
+  options: string[]
   deadline: string | null
   open: boolean
   /**

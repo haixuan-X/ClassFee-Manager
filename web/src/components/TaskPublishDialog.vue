@@ -182,8 +182,11 @@ const formRules: FormRules = {
 /** 选日期时默认落到当天 23:59，避免「今天」默认 00:00 一选就过期 */
 const deadlineDefaultTime = new Date(2000, 0, 1, 23, 59, 59)
 
+/** 候选项上限（第六十四轮：12 → 4，与后端 `task_service.MAX_OPTIONS` 同一条规则） */
+const MAX_OPTIONS = 4
+
 function addOption() {
-  if (form.options.length >= 12) return
+  if (form.options.length >= MAX_OPTIONS) return
   form.options.push('')
 }
 
@@ -296,11 +299,11 @@ async function submit() {
               删除
             </el-button>
           </div>
-          <el-button size="small" :disabled="form.options.length >= 12" @click="addOption">
+          <el-button size="small" :disabled="form.options.length >= MAX_OPTIONS" @click="addOption">
             加一项
           </el-button>
           <div class="form-tip">
-            已填 {{ cleanOptions.length }} 项（至少 2 项，最多 12 项，每项 30 字内）
+            已填 {{ cleanOptions.length }} 项（至少 2 项，最多 {{ MAX_OPTIONS }} 项，每项 30 字内）
           </div>
         </div>
       </el-form-item>

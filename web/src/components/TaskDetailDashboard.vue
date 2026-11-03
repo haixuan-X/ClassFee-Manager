@@ -39,38 +39,86 @@ const detail = ref<TaskDetail | null>(null)
 
 const { restoreFocus } = useModal(visible)
 
-/**
- * 一个班在校验后的样子：学生按四个桶分好，模板直接遍历。
+/* ==================== 分组口径（第六十四轮） ====================
  *
- * `cls.rows` 后端已按学号排过，`filter` 保序——所以名单跟班级名册同序，
- * 院长能对着手上的名单逐个勾。
+ * 这个看板原来只服务「返校统计」：所有答案都往固定四个桶
+ * （已返校 / 未返校 / 请假 / 其它）里塞。
+ *
+ * 单选题的答案是**发布人自定义的选项**，套那四个桶是错的——用户实测：
+ * 「单选测试」的详情里显示成「未返校 9 人」，跟选项毫无关系。
+ *
+ * 现在按题型分流，两套口径共用同一份「筛选 / 班级过滤 / 导出」逻辑：
+ * - 是/否、日期 → 返校桶（原样保留，返校统计是它的主场）
+ * - 单选、多选 → 按**选项**分组（选项原文 + 「未填」）
+ */
+
+/** 「未填」的分组键。用哨兵而不是中文，免得和用户自己起的选项名撞车 */
+const UNFILLED = '__unfilled__'
+
+/** 当前任务按**选项**展示（单选/多选），还是按**返校桶**（是/否、日期） */
+const optionMode = computed(() => {
+  const q = detail.value?.qtype
+  return q === 'SINGLE' || q === 'MULTI'
+})
+
+/** 一个答案归到哪一组 */
+function groupKeyOf(value: string | null | undefined): string {
+  if (optionMode.value) return (value ?? '').trim() || UNFILLED
+  return classifyStatus(value ?? null)
+}
+
+/** 组的显示名 */
+function groupLabel(key: string): string {
+  if (optionMode.value) return key === UNFILLED ? '未填' : key
+  return BUCKET_META[key as ReturnBucket].label
+}
+
+/** 组的色调（拼成 `tone-xxx`） */
+function groupTone(key: string): string {
+  if (optionMode.value) return key === UNFILLED ? 'muted' : 'opt'
+  return BUCKET_META[key as ReturnBucket].tone
+}
+
+/** 一行学生的状态标签文字（选项模式 = 选项原文；返校模式 = 归类后的标准名） */
+function rowLabel(value: string | null | undefined): string {
+  return optionMode.value
+    ? (value ?? '').trim() || '未填'
+    : statusLabel(value ?? null)
+}
+
+/**
+ * 一个班分组后的样子：`byKey` = 分组键 → 该组的学生行。
+ *
+ * 不再写死 returned/absent/excused/other 四个字段——组是动态的
+ * （选项模式最多 4 个选项 + 未填），写死字段就只能在两种模式里二选一。
+ * `cls.rows` 后端已按学号排过，分组只做 filter，保序。
  */
 interface ClassView {
   cls: TaskDetailClass
-  returned: TaskDetailStudentRow[]
-  absent: TaskDetailStudentRow[]
-  excused: TaskDetailStudentRow[]
-  other: TaskDetailStudentRow[]
+  byKey: Map<string, TaskDetailStudentRow[]>
 }
 
-/** 按桶分人，并给出这个班的视图 */
 function toClassView(cls: TaskDetailClass): ClassView {
-  const bucket = (b: ReturnBucket) =>
-    cls.rows.filter((r) => classifyStatus(r.value) === b)
-  return {
-    cls,
-    returned: bucket('returned'),
-    absent: bucket('absent'),
-    excused: bucket('excused'),
-    other: bucket('other'),
+  const byKey = new Map<string, TaskDetailStudentRow[]>()
+  for (const r of cls.rows) {
+    const k = groupKeyOf(r.value)
+    const arr = byKey.get(k)
+    if (arr) arr.push(r)
+    else byKey.set(k, [r])
   }
+  return { cls, byKey }
 }
 
-/** 未返校多的班排前面——院长先看最需要催的那个班 */
+/** 未填/未返校多的班排前面——院长先看最需要催的那个班 */
 const classViews = computed<ClassView[]>(() =>
   (detail.value?.classes ?? [])
     .map(toClassView)
-    .sort((a, b) => b.absent.length - a.absent.length || a.cls.className.localeCompare(b.cls.className)),
+    .sort((a, b) => {
+      const key = optionMode.value ? UNFILLED : 'absent'
+      const na = a.byKey.get(key)?.length ?? 0
+      const nb = b.byKey.get(key)?.length ?? 0
+      return nb - na || a.cls.className.localeCompare(b.cls.className)
+    }),
 )
 
 /** 班级筛选范围内的全部学生行——图例、卡片、名单都从这一份算，口径只有一处 */
@@ -93,6 +141,28 @@ const stats = computed(() => {
   }
 })
 
+/**
+ * 选项模式的卡片（第六十四轮）：按**发布时的选项顺序**排，**含 0 人的选项**
+ * （「选项C 0 人」正是发布人要看的），「未填」有才出现。
+ * 库里存在但已不在选项表里的旧答案追加在最后，不静默丢掉。
+ */
+const optionCards = computed<{ key: string; label: string; count: number }[]>(() => {
+  const counts = new Map<string, number>()
+  for (const r of allRows.value) {
+    const k = groupKeyOf(r.value)
+    counts.set(k, (counts.get(k) ?? 0) + 1)
+  }
+  const opts = detail.value?.options ?? []
+  const out = opts.map((o) => ({ key: o, label: o, count: counts.get(o) ?? 0 }))
+  for (const [k, n] of counts) {
+    if (k === UNFILLED || opts.includes(k)) continue
+    out.push({ key: k, label: k, count: n })
+  }
+  const unfilled = counts.get(UNFILLED) ?? 0
+  if (unfilled > 0) out.push({ key: UNFILLED, label: '未填', count: unfilled })
+  return out
+})
+
 /* ==================== 筛选 + 导出（第四十九轮） ====================
  *
  * 顶部那排卡片**同时是筛选器**：点「未返校」下面只列未返校的学生，
@@ -105,11 +175,16 @@ const stats = computed(() => {
  * 传 id 列表 = 文件内容就是屏幕上那些行，结构上不可能对不上。
  */
 
-/** 当前筛选。`null` = 全部（不筛） */
-const filter = ref<ReturnBucket | null>(null)
+/**
+ * 当前筛选。`null` = 全部（不筛）。
+ *
+ * 存**分组键**（字符串）而不是 `ReturnBucket`：选项模式下键就是选项原文，
+ * 两套口径共用一个筛选变量，模板不用分叉。
+ */
+const filter = ref<string | null>(null)
 
-function toggleFilter(bucket: ReturnBucket): void {
-  filter.value = filter.value === bucket ? null : bucket
+function toggleFilter(key: string): void {
+  filter.value = filter.value === key ? null : key
 }
 
 /* ==================== 按班级筛选（第五十四轮） ====================
@@ -152,28 +227,56 @@ const scopedViews = computed<ClassView[]>(() =>
 
 /** 当前筛选命中的学生行（不筛时 = 全部行）——导出的 recordIds 就从这来 */
 const filteredRows = computed<TaskDetailStudentRow[]>(() => {
-  const b = filter.value
-  return b === null
+  const k = filter.value
+  return k === null
     ? allRows.value
-    : allRows.value.filter((r) => classifyStatus(r.value) === b)
+    : allRows.value.filter((r) => groupKeyOf(r.value) === k)
 })
 
 /** 下面要展示的班：筛选时**没有命中学生的班不出现**（一排空表会像漏了人） */
 const visibleViews = computed<ClassView[]>(() => {
-  const b = filter.value
-  return b === null ? classViews.value : classViews.value.filter((v) => v[b].length > 0)
+  const k = filter.value
+  return k === null
+    ? classViews.value
+    : classViews.value.filter((v) => (v.byKey.get(k)?.length ?? 0) > 0)
 })
 
-/** 一个班在当前筛选下要渲染的分组（不筛时 = 未返校 / 请假 / 其它 三段） */
-function groupsOf(v: ClassView): { bucket: ReturnBucket; title: string; rows: TaskDetailStudentRow[] }[] {
-  const b = filter.value
-  if (b !== null) {
-    return [{ bucket: b, title: `${BUCKET_META[b].label} ${v[b].length} 人`, rows: v[b] }]
+interface GroupView {
+  key: string
+  title: string
+  tone: string
+  rows: TaskDetailStudentRow[]
+}
+
+/** 一个班在当前筛选下要渲染的分组 */
+function groupsOf(v: ClassView): GroupView[] {
+  const k = filter.value
+  if (k !== null) {
+    const rows = v.byKey.get(k) ?? []
+    return rows.length
+      ? [{ key: k, title: `${groupLabel(k)} ${rows.length} 人`, tone: groupTone(k), rows }]
+      : []
   }
-  const out: { bucket: ReturnBucket; title: string; rows: TaskDetailStudentRow[] }[] = []
-  if (v.absent.length) out.push({ bucket: 'absent', title: `未返校 ${v.absent.length} 人`, rows: v.absent })
-  if (v.excused.length) out.push({ bucket: 'excused', title: `请假 ${v.excused.length} 人（不算未返校）`, rows: v.excused })
-  if (v.other.length) out.push({ bucket: 'other', title: `其它状态 ${v.other.length} 人`, rows: v.other })
+  // 不筛时：
+  // - 返校模式只列「未返校 / 请假 / 其它」（已返校是正常态，铺满屏反而找不到人）
+  // - 选项模式**每个有人的选项都列**——这就是「按选项展示」本身
+  const out: GroupView[] = []
+  const keys: string[] = optionMode.value
+    ? optionCards.value.map((c) => c.key)
+    : ['absent', 'excused', 'other']
+  for (const key of keys) {
+    const rows = v.byKey.get(key) ?? []
+    if (!rows.length) continue
+    // 返校模式保留原本那几句更具体的说明（「不算未返校」这类提示有用）
+    const title = optionMode.value
+      ? `${groupLabel(key)} ${rows.length} 人`
+      : key === 'absent'
+        ? `未返校 ${rows.length} 人`
+        : key === 'excused'
+          ? `请假 ${rows.length} 人（不算未返校）`
+          : `其它状态 ${rows.length} 人`
+    out.push({ key, title, tone: groupTone(key), rows })
+  }
   return out
 }
 
@@ -186,10 +289,14 @@ const TAG_TYPES: Record<ReturnBucket, 'success' | 'danger' | 'warning' | 'info'>
   other: 'info',
 }
 
-/** 行上状态标签的颜色：桶决定底色，没点名的统一 info（还没确认，不是已确认缺席） */
-function tagType(bucket: ReturnBucket, value: string | null | undefined): 'success' | 'danger' | 'warning' | 'info' {
+/** 行上状态标签的颜色：选项模式只区分「填了/没填」，返校模式按桶上色 */
+function tagType(
+  key: string,
+  value: string | null | undefined,
+): 'primary' | 'success' | 'danger' | 'warning' | 'info' {
+  if (optionMode.value) return key === UNFILLED ? 'info' : 'primary'
   if (!value?.trim()) return 'info'
-  return TAG_TYPES[bucket]
+  return TAG_TYPES[key as ReturnBucket]
 }
 
 /* ------------------------- 导出 ------------------------- */
@@ -198,25 +305,25 @@ const exporting = ref(false)
 
 /** 按钮文案带上**当前导出的是谁、多少人**——点了才知道会得到什么文件 */
 const exportLabel = computed(() => {
-  const b = filter.value
-  return b === null
+  const k = filter.value
+  return k === null
     ? `导出全部（${filteredRows.value.length} 人）`
-    : `导出（${BUCKET_META[b].label} ${filteredRows.value.length} 人）`
+    : `导出（${groupLabel(k)} ${filteredRows.value.length} 人）`
 })
 
 async function onExport(): Promise<void> {
   if (props.taskId === null || exporting.value) return
-  const b = filter.value
+  const k = filter.value
   const rows = filteredRows.value
   // 一个都没筛中就别发请求：后端会 400，按钮此时也是 disabled，这里是双保险
-  if (b !== null && !rows.length) return
+  if (k !== null && !rows.length) return
   exporting.value = true
   try {
     await exportTaskDetail(
       props.taskId,
-      b === null
+      k === null
         ? undefined
-        : { recordIds: rows.map((r) => r.recordId), label: BUCKET_META[b].label },
+        : { recordIds: rows.map((r) => r.recordId), label: groupLabel(k) },
     )
   } catch (e) {
     ElMessage.error(getErrorMessage(e, '导出失败'))
@@ -230,8 +337,12 @@ async function onExport(): Promise<void> {
  *
  * 归类靠关键词，认不出的会落进「其它状态」。这张表就是**对账用的**——
  * 院长扫一眼就知道「哦，我填的『未到校』被算进未返校了」，数字才可信。
+ *
+ * 选项模式不需要它：答案是发布人自己定的选项，卡片上就是分布，
+ * 不存在「被归到别的桶」这回事。
  */
 const legend = computed(() => {
+  if (optionMode.value) return []
   const map = new Map<string, { label: string; count: number; bucket: ReturnBucket }>()
   for (const r of allRows.value) {
     const label = statusLabel(r.value)
@@ -278,7 +389,13 @@ async function load() {
 <template>
   <el-dialog
     v-model="visible"
-    :title="detail ? `返校情况 · ${detail.title}` : '返校情况'"
+    :title="
+      detail
+        ? `${optionMode ? '答题情况' : '返校情况'} · ${detail.title}`
+        : optionMode
+          ? '答题情况'
+          : '返校情况'
+    "
     width="940px"
     class="dash-dialog"
     @closed="restoreFocus"
@@ -306,9 +423,12 @@ async function load() {
         </p>
 
         <!-- ============================ 顶部大数字 = 筛选 tab ============================
-             点一张卡 = 下面只看那一栏，再点一次复位；点「学校总人数」= 回到全部。
-             用真 <button>：可 Tab、可回车、有 aria-pressed，读屏也说得清「筛选中」 -->
-        <div class="cards" role="group" aria-label="按状态筛选">
+             点一张卡 = 下面只看那一栏，再点一次复位；点第一张卡 = 回到全部。
+             用真 <button>：可 Tab、可回车、有 aria-pressed，读屏也说得清「筛选中」。
+
+             第六十四轮按题型分叉：是/否、日期走「返校」四桶（原样保留）；
+             单选/多选的答案是发布人自定义的选项，卡片就按选项列（含 0 人的）。 -->
+        <div v-if="!optionMode" class="cards" role="group" aria-label="按状态筛选">
           <button
             type="button"
             class="card tone-total"
@@ -379,8 +499,39 @@ async function load() {
           </button>
         </div>
 
-        <!-- 状态图例：把「哪个状态算哪一栏」摊开给人看 -->
-        <p class="legend">
+        <!-- 选项模式：一个选项一张卡（含 0 人的），点开只看选了它的人 -->
+        <div v-else class="cards" role="group" aria-label="按选项筛选">
+          <button
+            type="button"
+            class="card tone-total"
+            :class="{ on: !filter }"
+            :aria-pressed="filter === null"
+            title="看全部学生"
+            @click="filter = null"
+          >
+            <div class="card-label">全部学生</div>
+            <div class="card-value num">{{ stats.total }}</div>
+            <div class="card-hint">{{ stats.classes }} 个班</div>
+          </button>
+
+          <button
+            v-for="c in optionCards"
+            :key="c.key"
+            type="button"
+            class="card"
+            :class="[`tone-${c.key === UNFILLED ? 'muted' : 'opt'}`, { on: filter === c.key }]"
+            :aria-pressed="filter === c.key"
+            :title="`只看「${c.label}」的学生`"
+            @click="toggleFilter(c.key)"
+          >
+            <div class="card-label">{{ c.label }}</div>
+            <div class="card-value num">{{ c.count }}</div>
+            <div class="card-hint">占 {{ pct(c.count) }}</div>
+          </button>
+        </div>
+
+        <!-- 状态图例：把「哪个状态算哪一栏」摊开给人看（选项模式不需要） -->
+        <p v-if="!optionMode" class="legend">
           <span
             v-for="l in legend"
             :key="l.label"
@@ -435,7 +586,13 @@ async function load() {
             </el-popover>
 
             <h4 class="sec-title">
-              {{ filter ? `${BUCKET_META[filter].label} · 各班名单` : '各班未返校情况' }}
+              {{
+                filter
+                  ? `${groupLabel(filter)} · 各班名单`
+                  : optionMode
+                    ? '各选项分布 · 按班'
+                    : '各班未返校情况'
+              }}
             </h4>
           </div>
 
@@ -452,7 +609,7 @@ async function load() {
         </div>
 
         <p v-if="!visibleViews.length" class="all-good">
-          ✓ 没有{{ filter ? BUCKET_META[filter].label : '' }}的学生
+          ✓ 没有{{ filter ? groupLabel(filter) : '' }}的学生
         </p>
 
         <section
@@ -468,36 +625,64 @@ async function load() {
               </span>
             </div>
             <div class="badges">
-              <el-tag :type="v.absent.length ? 'danger' : 'success'" size="small">
-                未返校 {{ v.absent.length }}
-              </el-tag>
-              <el-tag v-if="v.excused.length" type="warning" size="small">
-                请假 {{ v.excused.length }}
-              </el-tag>
-              <el-tag type="success" size="small">已返校 {{ v.returned.length }}</el-tag>
+              <template v-if="optionMode">
+                <el-tag type="success" size="small">已填 {{ v.cls.answered }}</el-tag>
+                <el-tag
+                  v-if="v.cls.total > v.cls.answered"
+                  type="info"
+                  size="small"
+                >
+                  未填 {{ v.cls.total - v.cls.answered }}
+                </el-tag>
+              </template>
+              <template v-else>
+                <el-tag
+                  :type="(v.byKey.get('absent')?.length ?? 0) ? 'danger' : 'success'"
+                  size="small"
+                >
+                  未返校 {{ v.byKey.get('absent')?.length ?? 0 }}
+                </el-tag>
+                <el-tag v-if="v.byKey.get('excused')?.length" type="warning" size="small">
+                  请假 {{ v.byKey.get('excused')?.length }}
+                </el-tag>
+                <el-tag type="success" size="small">
+                  已返校 {{ v.byKey.get('returned')?.length ?? 0 }}
+                </el-tag>
+              </template>
             </div>
           </header>
 
           <p class="cls-stat muted">
             共 {{ v.cls.total }} 人 · 已点名 {{ v.cls.answered }} 人 ·
-            返校率 {{ pct(v.returned.length, v.cls.total) }}
+            {{ optionMode ? '填写率' : '返校率' }}
+            {{
+              pct(
+                optionMode ? v.cls.answered : (v.byKey.get('returned')?.length ?? 0),
+                v.cls.total,
+              )
+            }}
           </p>
 
           <p v-if="!groupsOf(v).length" class="all-good">
-            ✓ 全班已到齐，没有未返校和请假的学生
+            ✓
+            {{
+              optionMode
+                ? '全班都还没填'
+                : '全班已到齐，没有未返校和请假的学生'
+            }}
           </p>
 
           <template v-else>
-            <template v-for="g in groupsOf(v)" :key="g.bucket">
-              <h5 class="grp" :class="`tone-${BUCKET_META[g.bucket].tone}`">{{ g.title }}</h5>
+            <template v-for="g in groupsOf(v)" :key="g.key">
+              <h5 class="grp" :class="`tone-${g.tone}`">{{ g.title }}</h5>
               <ul class="stu-list">
                 <li v-for="s in g.rows" :key="s.recordId" class="stu">
                   <span class="stu-name">{{ s.name }}</span>
                   <span class="stu-no num">{{ s.studentNo }}</span>
                   <!-- 没点名的（info）和「确认没到」（danger）要分得开：
                        前者可能只是班主任还没轮到，不该被当成已确认缺席 -->
-                  <el-tag size="small" :type="tagType(g.bucket, s.value)">
-                    {{ statusLabel(s.value) }}
+                  <el-tag size="small" :type="tagType(g.key, s.value)">
+                    {{ rowLabel(s.value) }}
                   </el-tag>
                   <span
                     v-if="detail.allowText"
@@ -533,6 +718,9 @@ async function load() {
   --tone-muted-bg: var(--color-muted);
   --tone-total: #2563eb;
   --tone-total-bg: #eff6ff;
+  /* 选项模式的「一个选项」：靛蓝，和「全部」的总人数蓝区分开 */
+  --tone-opt: #4338ca;
+  --tone-opt-bg: #eef2ff;
 }
 
 .dash-dialog :deep(.el-dialog) {
@@ -673,6 +861,16 @@ async function load() {
   background: var(--tone-muted-bg);
 }
 .tone-muted .card-value { color: var(--tone-muted); }
+
+/* 选项模式的卡片（第六十四轮）：中性蓝，不走「好/坏」语义——
+   选项没有对错，颜色只是分组锚点 */
+.tone-opt {
+  --t: var(--tone-opt);
+  --bg: var(--tone-opt-bg);
+  border-left-color: var(--tone-opt);
+  background: var(--tone-opt-bg);
+}
+.tone-opt .card-value { color: var(--tone-opt); }
 
 /* 总人数卡（全部）：描边用蓝色，和「筛选中」的那几张区分开 */
 .tone-total {
