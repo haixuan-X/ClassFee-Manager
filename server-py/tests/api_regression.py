@@ -4107,6 +4107,35 @@ def test_a22_chart_container_visibility() -> None:
               "pre 刷新时 v-if 的容器还不存在，量不到 ref")
 
 
+def test_a47_date_picker_value_format() -> None:
+    """日期框必须显式写 `value-format`（第六十一轮）。
+
+    没写的话 `el-date-picker` 的 v-model 拿到的是 **Date 对象**而不是字符串：
+    筛选页把它当 `start` / `end` 塞进查询，axios 序列化成
+    `2026-11-01T16:00:00.000Z`，后端只认 `yyyy-MM-dd` → 400
+    「日期格式应为 yyyy-MM-dd」。
+
+    这条 bug 真实发生过：账本明细的起止日期漏了 value-format，而
+    `/records`、`/income`、`/expense` 共用同一个组件实例（路由复用、
+    onMounted 不重跑），坏筛选被一路带到收入登记 / 支出登记页。
+    """
+    print("\n--- 日期选择器：value-format ---")
+    root = pathlib.Path(__file__).resolve().parents[2]
+    bad: list[str] = []
+    total = 0
+    for path in sorted((root / "web/src").rglob("*.vue")):
+        src = path.read_text(encoding="utf-8-sig")
+        for m in re.finditer(r"<el-date-picker\b", src):
+            total += 1
+            close = src.find("/>", m.start())
+            block = src[m.start(): close + 2] if close > 0 else src[m.start():]
+            if "value-format" not in block:
+                line = src[: m.start()].count("\n") + 1
+                bad.append(f"{path.relative_to(root).as_posix()}:{line}")
+    check("扫到了日期选择器", total > 0, str(total))
+    check("★ 每个 el-date-picker 都写了 value-format", not bad, ", ".join(bad))
+
+
 def test_a23_college_views() -> None:
     """学院视角（第三十轮）：跨班级的学生名册 / 班主任名册 / 任务一览。
 
@@ -7864,6 +7893,7 @@ ALL_TESTS = [
     test_a44_class_delete_and_teacher_create,
     test_a45_reopen_extend_deadline,
     test_a46_import_class_grade,
+    test_a47_date_picker_value_format,
     test_a15_cleanup,
 ]
 

@@ -2,12 +2,12 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import dayjs from 'dayjs'
 import { deleteRecord, exportRecords, fetchCategories, fetchRecords, voidRecord } from '@/api/records'
 import { fetchReceipt } from '@/api/files'
 import { useUserStore } from '@/stores/user'
 import { useModal } from '@/composables/useModal'
 import RecordFormDrawer from '@/components/RecordFormDrawer.vue'
+import { disablePastDates } from '@/utils/date'
 import type { Category, FeeRecord, RecordQuery, RecordStatus, RecordType } from '@/types'
 import { CHANNEL_TEXT, STATUS_TEXT, TYPE_TEXT } from '@/types'
 
@@ -347,14 +347,6 @@ onUnmounted(() => {
   receiptCache.forEach((url) => URL.revokeObjectURL(url))
   receiptCache.clear()
 })
-
-const datePickOptions = {
-  valueFormat: 'YYYY-MM-DD',
-  shortcuts: [
-    { text: '本月', value: [dayjs().startOf('month').toDate(), dayjs().endOf('month').toDate()] },
-    { text: '近 30 天', value: [dayjs().subtract(30, 'day').toDate(), dayjs().toDate()] },
-  ],
-}
 </script>
 
 <template>
@@ -437,14 +429,25 @@ const datePickOptions = {
         <el-option label="已作废" value="VOID" />
       </el-select>
 
+      <!-- 起止日期**不能早于今天**——和发布任务的截止时间同一条规则
+           （`disablePastDates`）。今天 11-03 就只能从 11-03 起选。
+           ⚠ 必须写 value-format：不写的话 v-model 拿到的是 **Date 对象**，
+           currentQuery() 把它塞进 start/end，axios 序列化成
+           `2026-11-01T16:00:00.000Z`，后端只认 `yyyy-MM-dd` → 400
+           「日期格式应为 yyyy-MM-dd」。
+           又因为 /records、/income、/expense **共用这一个组件实例**
+           （路由复用，onMounted 不重跑），坏筛选会被一路带到收入/支出登记页。
+           ⚠ 原来的「本月 / 近 30 天」快捷项已删：它们会把起始日直接填到
+           昨天以前，等于给用户留了一个绕开上面这条规则的后门。 -->
       <el-date-picker
         v-model="filters.range"
         class="f-range"
         type="daterange"
+        value-format="YYYY-MM-DD"
         range-separator="至"
         start-placeholder="开始日期"
         end-placeholder="结束日期"
-        :shortcuts="datePickOptions.shortcuts"
+        :disabled-date="disablePastDates"
         :clearable="true"
         aria-label="发生日期区间"
         @change="applyFilters"

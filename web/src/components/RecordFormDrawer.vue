@@ -22,6 +22,14 @@ const alertMessage = ref('')
 const alertRef = ref<HTMLElement>()
 
 const categories = ref<Category[]>([])
+/**
+ * 类别下拉的**真实**加载态。
+ *
+ * 以前写的是 `:loading="categories.length === 0"`——那分不清「正在加载」和
+ * 「加载完了但一个都没有」，一个类别都没建时转圈会**永远转下去**，
+ * 用户看到的就是「一直加载中」（实测报障原话）。
+ */
+const catsLoading = ref(false)
 const channels = Object.entries(CHANNEL_TEXT) as [Channel, string][]
 
 /** 类别字典维护弹窗（与表单共用 kind，改动后联动刷新下拉） */
@@ -129,7 +137,14 @@ watch(visible, async (open) => {
   // 切页时 props.type 会变而组件不重建 —— 所以不能只判「是否为空」，
   // 必须校验缓存里的类别是否属于当前方向，否则支出抽屉会带出收入类别。
   if (categories.value.length === 0 || categories.value[0].kind !== props.type) {
-    categories.value = await fetchCategories(props.type)
+    catsLoading.value = true
+    try {
+      categories.value = await fetchCategories(props.type)
+    } catch {
+      /* 拦截器已提示；保留旧值，下次打开重试 */
+    } finally {
+      catsLoading.value = false
+    }
   }
   await nextTick()
   // 焦点移到抽屉里第一个输入框（限定在本抽屉的 form 内，不命中其他抽屉）
@@ -139,10 +154,13 @@ watch(visible, async (open) => {
 
 /** 类别弹窗新增/删除后：按**当前方向**刷新下拉，正被表单选中的类别已删则清掉选择 */
 async function onCategoriesChanged() {
+  catsLoading.value = true
   try {
     categories.value = await fetchCategories(props.type)
   } catch {
     /* 拦截器已提示；下拉保持旧值也不影响后续重新打开时加载 */
+  } finally {
+    catsLoading.value = false
   }
   if (form.categoryId && !categories.value.some((c) => c.id === form.categoryId)) {
     form.categoryId = undefined
@@ -222,7 +240,8 @@ async function onSubmit() {
           class="full"
           aria-label="类别"
           placeholder="请选择类别"
-          :loading="categories.length === 0"
+          :loading="catsLoading"
+          no-data-text="暂无类别，请添加"
         >
           <el-option
             v-for="cat in categories"
@@ -231,6 +250,11 @@ async function onSubmit() {
             :value="cat.id"
           />
         </el-select>
+        <!-- 加载完了却一个都没有：直接给下一步（下面那个按钮），
+             别让人对着一个永远转圈的下拉猜 -->
+        <p v-if="!catsLoading && categories.length === 0" class="cat-empty" role="status">
+          这个方向还没有类别，点下方「管理类别」先加一个。
+        </p>
       </el-form-item>
 
       <div class="cat-manage">
@@ -365,6 +389,12 @@ async function onSubmit() {
 .cat-manage {
   margin-top: -12px;
   margin-bottom: 4px;
+}
+
+.cat-empty {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-muted-fg);
 }
 
 .receipt-preview {
