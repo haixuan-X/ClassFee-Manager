@@ -352,7 +352,7 @@ async function onExport() {
 <template>
   <el-drawer
     v-model="visible"
-    :title="detail ? `点名 · ${detail.title}` : '点名'"
+    :title="detail ? `填写 · ${detail.title}` : '填写'"
     size="min(720px, 96vw)"
     :close-on-click-modal="true"
     :before-close="onBeforeClose"

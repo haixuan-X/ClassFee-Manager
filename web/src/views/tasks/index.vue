@@ -67,13 +67,30 @@ const view = ref<TaskView>('mine')
  * 只保留两档：本班 + 学院、学院任务。
  * **刻意没有「其他班」**——班主任 / 班长 / 生活委员 / 同学都只能看
  * 「自己班 + 院长下发的学院任务」，看别的班属于越界。
+ *
+ * 第六十轮：**学院任务这一档只有班主任和院长看得见**（后端 `canSeeCollege`）。
+ * 同学 / 生活委员 / 班长既不该看见，也没有「填写」的资格——实测截图里
+ * 普通成员的卡片上挂着「点名」按钮，就是这条线没拦住。
+ * 看不见时把第一档的文案也换掉，否则「本班 + 学院」会骗人。
  */
 const VIEWS: { key: TaskView; label: string; hint: string }[] = [
   { key: 'mine', label: '本班 + 学院', hint: '我自己班的，以及学院发下来的' },
   { key: 'college', label: '学院任务', hint: '院长发到全学院的，各班班主任应答' },
 ]
 
-const visibleViews = VIEWS
+const canSeeCollege = ref(false)
+
+const visibleViews = computed(() =>
+  canSeeCollege.value
+    ? VIEWS
+    : [
+        {
+          key: 'mine' as TaskView,
+          label: '本班任务',
+          hint: '我班里发的任务',
+        },
+      ],
+)
 
 async function load() {
   loading.value = true
@@ -82,6 +99,13 @@ async function load() {
     rows.value = data.rows
     canPublish.value = data.canPublish
     canPublishCollege.value = data.canPublishCollege
+    // 老后端没这个字段时按「看得见」处理：宁可多显示一个空页签，
+    // 也不能把班主任的学院任务页签藏没了（前后端一起发版，正常都有值）
+    canSeeCollege.value = data.canSeeCollege ?? true
+    // 当前停在「学院任务」档、而这一档已经不给我看了 → 退回本班
+    if (view.value === 'college' && !canSeeCollege.value) {
+      view.value = 'mine'
+    }
   } catch {
     rows.value = []
   } finally {
@@ -372,7 +396,10 @@ onMounted(async () => {
         <h2>班级任务</h2>
         <p>
           班主任或班长发一个题，全班在这里填；只公布「多少人是、多少否」，具体谁填了什么只有发布人和班主任看得到。
-          <strong>学院任务</strong>是院长发到全学院的，由<strong>各班班主任</strong>应答，也在这里填。
+          <!-- 学院任务这一档只给班主任/院长（第六十轮），看不见的人连这句解释也不给 -->
+          <template v-if="canSeeCollege">
+            <strong>学院任务</strong>是院长发到全学院的，由<strong>各班班主任</strong>应答，也在这里填。
+          </template>
         </p>
       </div>
       <div class="head-tools">
@@ -447,18 +474,23 @@ onMounted(async () => {
                状态不用按钮来表达，卡片正文本来就说清楚了：
                - 填过 → 下面「我的答案：X（备注）提交于 …」
                - 填不了 → 标题旁的「已关闭」/「截止 …」标签
-               访客看不到答案、也拿不到按钮，只剩汇总数字，意思已经够了。 -->
+               访客看不到答案、也拿不到按钮，只剩汇总数字，意思已经够了。
+               学院任务不在此列：它的 `canAnswer` 恒为 false（答案是班主任按
+               学生逐个填的，本人没有「答案」），所以那个「填写答案」按钮
+               对学院任务根本不渲染——用户原话「填写答案和修改答案毫无用处」。 -->
           <div v-if="row.canAnswer" class="head-right">
             <el-button type="primary" size="small" @click="openAnswer(row)">
               {{ row.myAnswer ? '修改我的答案' : '填写答案' }}
             </el-button>
           </div>
-          <!-- 学院任务的点名入口（第四十五轮）。
-               canAnswer 对班主任是 true（他是应答对象），但学院任务要走**点名页**
-               而不是单选弹窗——所以这里单独判断 scope，不能复用 canAnswer -->
-          <div v-if="row.scope === 'COLLEGE' && row.open" class="head-right">
+          <!-- 学院任务的填写入口（第四十五轮点名，第六十轮改名）。
+               以前叫「点名」，可它干的事就是**填**：班主任打开自己班的名册，
+               逐个学生标记，填完的进「已填」、没填的不进（汇总走点名表）。
+               名字改成「填写」后，和上面那个废掉的「填写答案」不会再混淆。
+               显隐只认后端下发的 `canFill`（班主任 + 没出过这题 + 还在收答案）。 -->
+          <div v-if="row.canFill" class="head-right">
             <el-button type="primary" size="small" @click="openRollcall(row)">
-              点名
+              填写
             </el-button>
           </div>
         </header>
@@ -496,7 +528,10 @@ onMounted(async () => {
 
         <!-- 操作：明细/导出发布人和班主任可见；改/关/删只有发布人自己 -->
         <footer class="task-foot">
-          <span class="muted">发布于 {{ row.createdAt }}</span>
+          <!-- 发布人真名 + 时间：老师一眼认得出是谁发的。 -->
+          <span class="muted">
+            发布人 <b>{{ row.publisherName || '—' }}</b> · {{ row.createdAt }}
+          </span>
           <div class="acts">
             <el-button
               v-if="row.canSeeDetail"

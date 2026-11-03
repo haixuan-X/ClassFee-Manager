@@ -1528,15 +1528,18 @@ def delete_classes(db: Session, user: LoginUser, class_ids: list[int]) -> dict:
                     "reason": f"班里还有 {n_student} 名学生，先删学生再删班",
                 })
                 continue
+            # 类别**不算「班里有内容」**：它是收支下拉的字典，`seed.py` 会给
+            # 班自动铺 11 条默认类别（用户实测就是被这 11 条卡住：「班里还有
+            # 11 条账目/批次/类别，不能删」）——算进去等于**任何班永远删不掉**。
+            # 真正涉及钱的只有账目和批次；类别在下面随班一起删掉。
             n_fee = (
                 cnt(FeeRecord, FeeRecord.class_id)
                 + cnt(FeeBatch, FeeBatch.class_id)
-                + cnt(FeeCategory, FeeCategory.class_id)
             )
             if n_fee:
                 skipped.append({
                     "classId": cid, "className": clazz.class_name,
-                    "reason": f"班里还有 {n_fee} 条账目/批次/类别，不能删",
+                    "reason": f"班里还有 {n_fee} 条账目/批次，不能删",
                 })
                 continue
             n_task = cnt(ClsTask, ClsTask.class_id)
@@ -1870,6 +1873,31 @@ def tasks(
         ):
             answers_by_task[int(tid)] = int(cnt)
 
+    # 学院任务的答案在**点名表**（一人一学生），`cls_task_answer` 里那几行是
+    # 班主任自己的废答案——拿它当「已答」会出现「点了名却不涨、自己乱答反而涨」。
+    # 分母同理换成学生：全校在册学生都要被点到名。
+    college_ids = [t.id for t in task_list if is_college_task(t)]
+    student_answers_by_task: dict[int, int] = {}
+    if college_ids:
+        for tid, cnt in db.execute(
+            select(ClsTaskStudentAnswer.task_id, func.count())
+            .where(ClsTaskStudentAnswer.task_id.in_(college_ids))
+            .group_by(ClsTaskStudentAnswer.task_id)
+        ):
+            student_answers_by_task[int(tid)] = int(cnt)
+    college_total = (
+        int(
+            db.scalar(
+                select(func.count())
+                .select_from(StudentRecord)
+                .where(StudentRecord.class_id.in_(class_ids))
+            )
+            or 0
+        )
+        if college_ids and class_ids
+        else 0
+    )
+
     class_by_id = {c.id: c for c in classes}
     # 发布人（学院任务看不出是谁发的，这行必须有名字）
     publisher_names: dict[int, str] = {}
@@ -1884,20 +1912,16 @@ def tasks(
     for t in task_list:
         cls = class_by_id.get(t.class_id)
         if (t.scope or "CLASS") == "COLLEGE":
-            # 学院任务：应答对象是**全校的班主任**（一人代表一个班）
-            base = sum(
-                1
-                for lst in active_by_class.values()
-                for u in lst
-                if is_college_answer_target(u)
-            )
+            # 学院任务：分母 = 全校在册学生，分子 = 点名表里已填的学生数
+            base = college_total
+            answered = student_answers_by_task.get(t.id, 0)
         else:
             base = sum(
                 1
                 for u in active_by_class.get(t.class_id, [])
                 if is_answer_target(u, t.created_by, t.scope)
             )
-        answered = answers_by_task.get(t.id, 0)
+            answered = answers_by_task.get(t.id, 0)
         rows.append(
             {
                 "id": t.id,
@@ -1930,6 +1954,16 @@ def tasks(
                 "canEdit": can_manage_task(t, user),
                 "canSeeDetail": can_see_detail(t, user),
                 "canManage": can_manage_task(t, user),
+                # 能不能**填**这条（学院任务专用，第六十轮）：只有各班班主任、
+                # 不是发布人、还在收答案。按钮显隐**只认它**——以前前端拼
+                # `scope==='COLLEGE' && !canEdit && open`，纯院长不是发布人也会
+                # 看到「填写」，点下去 403（`_rollcall_guard` 只放行班主任）。
+                "canFill": bool(
+                    is_college_task(t)
+                    and is_college_answer_target(user)
+                    and t.created_by != user.id
+                    and is_open(t)
+                ),
                 # 编辑对话框回填要用题型 / 候选项（题型本身不给改）。
                 "qtype": t.qtype,
                 "options": json.loads(t.options_json) if t.options_json else [],

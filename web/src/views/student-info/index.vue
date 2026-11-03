@@ -476,8 +476,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
   const isUndo = k === 'z' && !e.shiftKey
   const isRedo = k === 'y' || (k === 'z' && e.shiftKey)
   if (!isUndo && !isRedo) return
-  // 编辑中且**刚敲了字** → 让输入框自己撤销
-  if (editKey.value && draftVal.value !== editStartVal.value) return
+
+  const t = e.target as HTMLElement | null
+  const inTextEdit = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+
+  // ① 正在格子里打字 → 把草稿退回起点。原生撤销对**程序写进去的值**无效
+  //    （不在浏览器撤销栈里），用户按了没反应 —— 见学院名册同名用例。
+  if (editKey.value && draftVal.value !== editStartVal.value) {
+    e.preventDefault()
+    if (isUndo) draftVal.value = editStartVal.value
+    return
+  }
+  // ② 焦点在别的输入框里（搜索框、弹窗）→ 别抢人家的撤销
+  if (inTextEdit && !editKey.value) return
+
   e.preventDefault()
   if (isUndo) void undo()
   else void redo()
@@ -611,6 +623,20 @@ function onCellKeydown(e: KeyboardEvent, row: StudentRow, k: string) {
   // ---- 编辑中 ----
   if (e.key === 'Escape') {
     editKey.value = null // 不保存直接关（Excel 里 Esc 的语义）
+    return
+  }
+  // Delete：光标停在末尾时浏览器什么都不做 → 按 Excel 语义清空整格；
+  // 光标在中间/有选区时仍交给浏览器删字符。
+  if (e.key === 'Delete' && !inPanel) {
+    if (!canEdit.value || !row.editable) return
+    const el = e.target
+    const native = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+    const pos = native ? el.selectionStart : null
+    const atEnd = !native || pos == null || (pos === el.selectionEnd && pos === el.value.length)
+    if (atEnd) {
+      e.preventDefault()
+      void clearCell(row, k)
+    }
     return
   }
   if (e.key === 'Tab') {

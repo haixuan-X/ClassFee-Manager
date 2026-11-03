@@ -103,13 +103,16 @@ const blankStatus = computed(
 /**
  * 学生总览的统计卡。三张对应用户提的三个指标。
  *
- * 第三张「学籍变化」目前是**壳**：`changeTotal` 后端恒给 `null`，
- * 界面上写「暂无异动记录」而不是画一条全零折线——零会被读成「本年零异动」，
- * 那是撒谎。真接上异动表之后，这里换成真数字即可。
+ * 第三张「学籍变化」第六十轮接上了数据源：**当前不在籍的人数**，
+ * 与右边「学籍状态分布」同源（改一处两处一起变）。没有异动时给 0 并说
+ * 「全部在籍」——那是真 0；`null` 只在老后端上出现，才退回「暂无异动记录」。
  */
 const stuStats = computed(() => {
   const d = stu.value
   const notRegistered = d ? d.studentTotal - d.registeredTotal : 0
+  const moved = (d?.changeBreakdown ?? [])
+    .map((b) => `${b.status} ${b.count}`)
+    .join(' · ')
   return [
     {
       key: 'total',
@@ -146,14 +149,20 @@ const stuStats = computed(() => {
     {
       key: 'change',
       label: '学籍变化',
-      // 没有数据源就明说，不给一个会被读成「零异动」的 0
+      // 与右边「学籍状态分布」**同源**：非在籍的人数，不是时间口径的「人次」
       value: d ? (d.changeTotal == null ? '--' : String(d.changeTotal)) : '--',
       hint: d
-        ? d.changeSupported
-          ? '本学期异动人次'
-          : '暂无异动记录'
+        ? d.changeTotal == null
+          ? '暂无异动记录' // 老后端：还没有数据源
+          : d.changeTotal === 0
+            ? d.studentTotal === 0
+              ? '还没有学生记录'
+              : '全部在籍，暂无异动'
+            : moved // 「入伍 1 · 休学 5 · 退学 1」，一眼对得上右边那张分布图
         : '加载中',
       tone: '' as '' | 'out',
+      // 有异动时这张卡可点开看名单（第六十一轮）
+      clickable: !!(d && (d.changeStudents?.length ?? 0) > 0),
     },
   ]
 })
@@ -191,6 +200,16 @@ interface StatItem {
   tone: '' | 'in' | 'out'
   /** 缴费完成率（0-100），有值时卡片内画进度条；其余卡片无此项 */
   progress?: number
+  /** 这张卡能不能点开名单（学籍变化：有异动时可点，见弹窗） */
+  clickable?: boolean
+}
+
+/** 「学籍变化」弹窗：当前不在籍的学生名单（与卡片上那个数同源） */
+const changeOpen = ref(false)
+
+function openChangeDialog() {
+  if (!(stu.value?.changeStudents?.length)) return
+  changeOpen.value = true
 }
 
 const stats = computed<StatItem[]>(() => {
@@ -302,7 +321,20 @@ onMounted(async () => {
       loading.value = false
     }
   } else {
-    loading.value = false
+    // 纯院长的置顶任务：`GET /api/tasks/pinned` **不在**班级账目那批 403 里，
+    // 后端给他的是**学院任务**口径（见 `task_service.pinned_tasks`）。
+    // 第三十轮把它和账目接口一起砍了，结果右下角空出一块 —— 用户反馈
+    // 「没有置顶任务」。单独兜住，失败也照常把 loading 收掉。
+    fetchPinnedTasks()
+      .then((r) => {
+        pinnedTasks.value = r.rows
+      })
+      .catch(() => {
+        pinnedTasks.value = []
+      })
+      .finally(() => {
+        loading.value = false
+      })
   }
   // 院长默认落在「学生情况总览」，所以学生数据要**一开始就拉**：
   // 面板是按 `view` 挂载的，挂着的时候 stu 还是 null，界面上会先闪一帧空态。
@@ -459,12 +491,63 @@ onMounted(async () => {
           v-for="item in stuStats"
           :key="item.key"
           class="glass-card stat"
+          :class="{ clickable: item.clickable }"
+          :role="item.clickable ? 'button' : undefined"
+          :tabindex="item.clickable ? 0 : undefined"
+          @click="item.clickable && openChangeDialog()"
+          @keydown.enter="item.clickable && openChangeDialog()"
         >
           <div class="stat-label">{{ item.label }}</div>
           <div class="stat-value num">{{ item.value }}</div>
           <div class="stat-hint">{{ item.hint }}</div>
+          <div v-if="item.clickable" class="stat-more">点击看名单 →</div>
         </article>
       </section>
+
+      <!--
+        学籍变化名单（第六十一轮）：卡片上那个数 = 这张表的行数。
+        口径同源（都从 `student_service.dashboard_stats` 出），改一次学籍状态
+        卡片和名单一起变。
+      -->
+      <el-dialog
+        v-model="changeOpen"
+        title="学籍变化 · 不在籍学生名单"
+        width="720px"
+        append-to-body
+      >
+        <p class="hint" style="margin: 0 0 12px">
+          这里列出<strong>当前不在籍</strong>的学生（毕业 / 入伍 / 休学 / 退学 / 其他），
+          共 {{ stu?.changeStudents?.length ?? 0 }} 人，与上方卡片上的数字一致。
+          学籍状态在「学生信息」页维护，改完这里会同步。
+        </p>
+        <el-table
+          :data="stu?.changeStudents ?? []"
+          size="small"
+          max-height="460"
+          v-loading="stuLoading"
+        >
+          <el-table-column prop="name" label="姓名" min-width="90" />
+          <el-table-column prop="studentNo" label="学号" min-width="130" class-name="num" />
+          <el-table-column prop="className" label="班级" min-width="130" />
+          <el-table-column prop="grade" label="年级" min-width="80" />
+          <el-table-column prop="majorName" label="专业" min-width="120" />
+          <el-table-column label="学籍状态" min-width="110">
+            <template #default="{ row }">
+              <el-tag
+                size="small"
+                effect="plain"
+                :type="regStatusTagType(row.regStatus, row.registered ?? false)"
+              >
+                {{ row.regStatus || row.regStatusCanon || '未填写' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="enrollDate" label="入校日期" min-width="110" class-name="num" />
+        </el-table>
+        <template #footer>
+          <el-button @click="changeOpen = false">关闭</el-button>
+        </template>
+      </el-dialog>
 
       <p v-if="stuError" class="stu-error" role="alert">{{ stuError }}</p>
 
@@ -571,15 +654,13 @@ onMounted(async () => {
         </article>
 
         <!--
-          置顶任务（第三十轮起纯院长不渲染）：置顶任务属于**班级**事务
-          （谁发的题、谁没填），纯院长不参与班级事务，`/api/tasks` 对他 403。
-          摆一个永远空的置顶任务面板只会让人以为「全班都还没填」。
+          置顶任务。**纯院长也渲染**（第六十轮）：他看到的是**学院任务**口径的
+          置顶（后端 `pinned_tasks` 已经分流），不依赖任何班级账目接口。
+          第三十轮把这块对纯院长藏掉，结果右下角空出一整块 —— 用户反馈
+          「没有置顶任务」。空的时候面板自己会说「还没有置顶任务」，
+          比一块空白更清楚。
         -->
-        <PinnedTasksPanel
-          v-if="!userStore.isPureDean"
-          :tasks="pinnedTasks"
-          :loading="loading"
-        />
+        <PinnedTasksPanel :tasks="pinnedTasks" :loading="loading" />
       </section>
     </template>
   </div>
@@ -793,6 +874,29 @@ onMounted(async () => {
   text-decoration: underline;
   cursor: pointer;
   min-height: 24px;
+}
+
+/* 「学籍变化」卡片可点开看名单（第六十一轮）：有异动时才可点，
+   鼠标移上去给反馈，键盘也能回车打开（role=button + tabindex） */
+.stat.clickable {
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.stat.clickable:hover {
+  border-color: var(--color-accent-border, var(--color-border));
+  box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
+}
+
+.stat.clickable:focus-visible {
+  outline: 2px solid var(--color-accent-text);
+  outline-offset: 2px;
+}
+
+.stat-more {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-accent-text);
 }
 
 .stat-jump:hover {

@@ -363,7 +363,7 @@ onMounted(load)
               <th scope="col">
                 <el-checkbox :model-value="allSelected" @change="toggleSelectAll" aria-label="全选" />
               </th>
-              <th v-if="!isCollege" scope="col">班级</th>
+              <th v-if="!isCollege" scope="col">班级 · 发布人</th>
               <th v-else scope="col">发布人</th>
               <th scope="col">标题</th>
               <th scope="col">题目</th>
@@ -383,7 +383,10 @@ onMounted(load)
                   @change="toggleSelect(row.id)"
                 />
               </td>
-              <td>{{ isCollege ? row.publisher || '—' : row.className }}</td>
+              <td>
+                <template v-if="!isCollege">{{ row.className }} · {{ row.publisher || '—' }}</template>
+                <template v-else>{{ row.publisher || '—' }}</template>
+              </td>
               <td>
                 {{ row.title }}
                 <el-tag v-if="row.pinned" size="small" type="warning" effect="plain">置顶</el-tag>
@@ -428,17 +431,18 @@ onMounted(load)
                 >
                   导出
                 </el-button>
-                <!-- 点名：班主任填自己班的状态（第四十五轮）。
-                     判据是「这条是学院任务 + 我不是发布人 + 还在收答案」，
-                     不用 canEdit——那是「能不能改任务本身」，和「能不能填」无关 -->
+                <!-- 填写（原「点名」）：班主任填自己班的状态（第四十五轮，
+                     第六十轮改名）。显隐只认后端的 `canFill`——以前写成
+                     `scope==='COLLEGE' && !canEdit && open`，纯院长不是发布人
+                     也会看到按钮，点下去 403。 -->
                 <el-button
-                  v-if="row.scope === 'COLLEGE' && !row.canEdit && row.open"
+                  v-if="row.canFill"
                   size="small"
                   type="primary"
                   plain
                   @click="openRollcall(row)"
                 >
-                  点名
+                  填写
                 </el-button>
                 <template v-if="row.canEdit">
                   <el-button size="small" @click="openEdit(row)">编辑</el-button>

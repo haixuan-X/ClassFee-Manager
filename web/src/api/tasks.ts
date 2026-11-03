@@ -43,9 +43,16 @@ export function fetchTasks(view: TaskView = 'mine') {
 /**
  * 任务总览（第三十二轮）：统计「现在什么状况」——
  * 多少条、还开着几条、回收率、按班/按发布人的分布、最近任务。
+ *
+ * `classId`（第六十轮）可只看某个班：只统计**该班的班级任务**，
+ * 学院任务（不属于任何班）整体排除。不传 = 全学院。
  */
-export function fetchTaskOverview() {
-  return request<TaskOverviewPayload>({ url: '/tasks/overview', method: 'get' })
+export function fetchTaskOverview(classId?: number | null) {
+  return request<TaskOverviewPayload>({
+    url: '/tasks/overview',
+    method: 'get',
+    params: classId == null ? undefined : { classId },
+  })
 }
 
 /**
@@ -160,10 +167,18 @@ export async function exportTaskDetail(id: number, filter?: TaskExportFilter): P
   }
 }
 
-/** 导出**任务总览**（所有任务一览 + 回收情况），仅院长。 */
-export async function exportTaskOverview(): Promise<void> {
+/**
+ * 导出**任务总览**（所有任务一览 + 回收情况），仅院长。
+ *
+ * `classId`（第六十轮）可只导出该班的**班级任务**——学院任务（不属于任何班）
+ * 整体排除，与页面上按班级筛选看到的内容一致。不传 = 全学院。
+ */
+export async function exportTaskOverview(classId?: number | null): Promise<void> {
   try {
-    const res = await service.get<Blob>('/tasks/overview/export', { responseType: 'blob' })
+    const res = await service.get<Blob>('/tasks/overview/export', {
+      responseType: 'blob',
+      params: classId == null ? undefined : { classId },
+    })
     downloadXlsx(res, '任务总览.xlsx')
   } catch (error) {
     exportFailure(error)
@@ -277,3 +292,16 @@ export const TASK_QTYPES: { value: TaskQType; label: string; hint: string }[] = 
   { value: 'MULTI', label: '多选', hint: '可以多选，如返校方式勾「飞机 + 中转」' },
   { value: 'DATE', label: '日期', hint: '填一个具体日期，如「你预计哪天到校？」' },
 ]
+
+/**
+ * **发布时**给选的题型（用户口径：把「多选」「日期」隐藏掉，等于删掉）。
+ *
+ * 为什么只藏发布入口、不删题型本身：
+ * - 已经发出去的多选/日期任务**照常显示、照常能答、能导出**——把题型从
+ *   `TASK_QTYPES` 里删掉会让那些任务渲染不出答案控件，等于悄悄废掉历史数据；
+ * - 后端 `QTYPES` 也不动，否则老任务的行解析会直接报错。
+ *
+ * 所以这是**发布表单的一道过滤**，不是数据层的删除。
+ */
+export const TASK_QTYPES_PUBLISHABLE: { value: TaskQType; label: string; hint: string }[] =
+  TASK_QTYPES.filter((t) => t.value === 'BOOLEAN' || t.value === 'SINGLE')

@@ -13,7 +13,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
 import { useCloseGuard } from '@/composables/useCloseGuard'
-import { publishTask, updateTask, TASK_QTYPES } from '@/api/tasks'
+import { publishTask, updateTask, TASK_QTYPES, TASK_QTYPES_PUBLISHABLE } from '@/api/tasks'
 import { disablePastDates, isPastDateTime } from '@/utils/date'
 import dayjs from 'dayjs'
 import type { Task, TaskCreatePayload, TaskQType, TaskScope } from '@/types'
@@ -136,6 +136,21 @@ const { onBeforeClose } = useCloseGuard(
 )
 
 const needsOptions = computed(() => form.qtype === 'SINGLE' || form.qtype === 'MULTI')
+
+/**
+ * 题型单选按钮给哪几个。
+ *
+ * **发布时只给「是/否」「单选」**——用户口径：把「多选」「日期」藏掉（等于删掉）。
+ * 编辑老任务时题型可能是已下架的那两种，禁用态下也必须把选中项显示出来，
+ * 否则一个都没选中，看着像题型被重置了。
+ */
+const qtypeChoices = computed(() => {
+  if (!editing.value || TASK_QTYPES_PUBLISHABLE.some((t) => t.value === form.qtype)) {
+    return TASK_QTYPES_PUBLISHABLE
+  }
+  const old = TASK_QTYPES.find((t) => t.value === form.qtype)
+  return old ? [...TASK_QTYPES_PUBLISHABLE, old] : TASK_QTYPES_PUBLISHABLE
+})
 /** 去掉首尾空白和空串，发布前归一（用户很容易在候选项里敲进一个空格） */
 const cleanOptions = computed(() => form.options.map((o) => o.trim()).filter(Boolean))
 
@@ -252,12 +267,12 @@ async function submit() {
 
       <el-form-item label="题型" prop="qtype">
         <el-radio-group v-model="form.qtype" :disabled="editing">
-          <el-radio-button v-for="t in TASK_QTYPES" :key="t.value" :value="t.value">
+          <el-radio-button v-for="t in qtypeChoices" :key="t.value" :value="t.value">
             {{ t.label }}
           </el-radio-button>
         </el-radio-group>
         <div class="form-tip">
-          {{ TASK_QTYPES.find((t) => t.value === form.qtype)?.hint }}
+          {{ qtypeChoices.find((t) => t.value === form.qtype)?.hint }}
         </div>
       </el-form-item>
 

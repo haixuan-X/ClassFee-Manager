@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { fetchMe, fetchMyProfile, updateProfile } from '@/api/auth'
+import { fetchMe, fetchMyProfile, updateProfile, changePassword } from '@/api/auth'
 import { fetchClassChoices } from '@/api/class'
 import { createCollegeClass } from '@/api/college'
 import { getErrorMessage } from '@/api/request'
@@ -14,7 +14,7 @@ import type { Role, UserAccount } from '@/types'
  *
  * 边界（后端 `PUT /api/auth/profile` 强制，不靠前端隐藏）：
  * - 改谁由登录令牌决定，请求体不接受 id → 结构上改不到别人
- * - 角色、启用状态只能由运营在「成员管理」改；登录名创建后不可改；改密走顶栏「修改密码」
+ * - 角色、启用状态只能由运营在「成员管理」改；登录名、密码可在「账号信息」里自行修改
  * - 学号同班唯一（重号后端 400），空串=清空
  *
  * 保存成功后把返回的 `UserInfo` 写回 store，顶栏的姓名/角色/班级立即同步。
@@ -107,6 +107,13 @@ const currentClassName = computed(() => {
 
 /** 所有启用的班（供「我带的班」多选） */
 const allClasses = ref<{ id: number; className: string; grade: string }[]>([])
+
+/** 「账号安全」：登录名 / 修改密码。单独走一道，不混进上面的资料保存——
+ *  资料可以撤；登录名、密码一旦改了没法撤 */
+const nameDraft = ref('')
+const savingName = ref(false)
+const pwdForm = reactive({ oldPassword: '', newPassword: '', confirm: '' })
+const savingPwd = ref(false)
 
 /**
  * 可选项 = 拉到的班 + **当前选着但没在列表里的班**。
@@ -211,6 +218,8 @@ async function load() {
     form.realName = mine.realName
     form.studentNo = mine.studentNo ?? ''
     form.phone = mine.phone ?? ''
+    // 第六十轮：本人改登录名（单独的一道）
+    nameDraft.value = mine.username
     // 第三十二轮：职务范围（纯院长 ↔ 兼班主任）
     form.deanOnly = mine.deanOnly === true
     // 第三十二轮：我带的班
@@ -246,6 +255,7 @@ function fillFromStore() {
   const me = userStore.user
   if (!me) return
   form.realName = me.realName
+  nameDraft.value = me.username
   if (detail.value) {
     form.studentNo = detail.value.studentNo ?? ''
     form.phone = detail.value.phone ?? ''
@@ -311,6 +321,67 @@ function onReset() {
   fillFromStore()
 }
 
+/** 本人改登录名（第六十轮）。全局唯一校验在后端；这里先挡明显问题。 */
+async function onSaveUsername() {
+  const name = nameDraft.value.trim()
+  if (!name) {
+    await showAlert('登录名不能为空')
+    return
+  }
+  if (/\s/.test(name)) {
+    await showAlert('登录名不能包含空格')
+    return
+  }
+  if (name === userStore.user?.username) {
+    ElMessage.info('登录名没有变化')
+    return
+  }
+  savingName.value = true
+  alertMessage.value = ''
+  try {
+    await updateProfile({ username: name })
+    // 顶栏等处从 store 读姓名/登录名，刷新一下看到的是新的那个
+    userStore.setUser(await fetchMe())
+    ElMessage.success(`登录名已改为「${name}」，下次登录也用它`)
+  } catch (e) {
+    await showAlert(getErrorMessage(e, '修改失败，请稍后重试'))
+  } finally {
+    savingName.value = false
+  }
+}
+
+/** 本人改密码（第六十轮；顶栏头像菜单也走同一接口） */
+async function onChangePassword() {
+  const oldP = pwdForm.oldPassword
+  const newP = pwdForm.newPassword
+  const confirm = pwdForm.confirm
+  if (!oldP) {
+    await showAlert('请输入原密码')
+    return
+  }
+  if (newP.length < 6 || newP.length > 32) {
+    await showAlert('新密码长度需为 6-32 位')
+    return
+  }
+  if (newP !== confirm) {
+    await showAlert('两次输入的新密码不一致')
+    return
+  }
+  savingPwd.value = true
+  alertMessage.value = ''
+  try {
+    await changePassword({ oldPassword: oldP, newPassword: newP })
+    pwdForm.oldPassword = ''
+    pwdForm.newPassword = ''
+    pwdForm.confirm = ''
+    ElMessage.success('密码已修改')
+  } catch (e) {
+    await showAlert(getErrorMessage(e, '修改失败，请稍后重试'))
+  } finally {
+    savingPwd.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -320,8 +391,9 @@ onMounted(load)
       <div>
         <h2>个人信息</h2>
         <p>
-          这里改的是<strong>你自己</strong>的资料；角色、账号状态、登录名由运营在「成员管理」维护
-          （<template v-if="isDean">你的<strong>职务范围</strong>下面可以自己改</template>），登录名创建后不可修改
+          这里改的是<strong>你自己</strong>的资料；角色、账号状态由运营在「成员管理」维护
+          （<template v-if="isDean">你的<strong>职务范围</strong>下面可以自己改</template>）；
+          登录名、密码可以在右侧自行修改
         </p>
       </div>
     </div>
@@ -451,14 +523,27 @@ onMounted(load)
       <article class="glass-card">
         <div class="card-head">
           <h3>账号信息</h3>
-          <span class="hint">这些由运营维护，如需变更请联系生活委员、班长或班主任</span>
+          <span class="hint">这里除了登录名、密码，都由运营维护</span>
         </div>
 
         <dl class="detail-list" :aria-busy="loading">
           <div class="row">
             <dt>登录名</dt>
-            <dd class="strong">{{ userStore.user?.username ?? '—' }}</dd>
+            <dd class="name-cell">
+              <el-input
+                v-model="nameDraft"
+                maxlength="64"
+                placeholder="用于登录，全局唯一"
+                aria-label="登录名"
+                class="name-input"
+                @keyup.enter="onSaveUsername"
+              />
+              <el-button :loading="savingName" @click="onSaveUsername">保存</el-button>
+            </dd>
           </div>
+          <p class="form-tip name-tip">
+            全局唯一、不能带空格；改完即用——会话不换，下次登录也用它
+          </p>
           <div class="row">
             <dt>角色</dt>
             <dd>
@@ -497,9 +582,51 @@ onMounted(load)
           </div>
         </dl>
 
-        <p class="readonly-hint">
-          修改密码请用右上角头像菜单里的「修改密码」（需验证原密码）。
-        </p>
+
+        <div class="security-sep" aria-hidden="true" />
+        <h4 class="security-title">修改密码</h4>
+        <el-form
+          class="pwd-form"
+          label-position="top"
+          autocomplete="off"
+          @submit.prevent="onChangePassword"
+        >
+          <el-form-item label="原密码">
+            <el-input
+              v-model="pwdForm.oldPassword"
+              type="password"
+              placeholder="验证是你本人"
+              autocomplete="off"
+              show-password
+            />
+          </el-form-item>
+          <el-form-item label="新密码">
+            <el-input
+              v-model="pwdForm.newPassword"
+              type="password"
+              placeholder="6-32 位"
+              autocomplete="new-password"
+              show-password
+            />
+          </el-form-item>
+          <el-form-item label="确认新密码">
+            <el-input
+              v-model="pwdForm.confirm"
+              type="password"
+              placeholder="再输入一遍"
+              autocomplete="new-password"
+              show-password
+            />
+          </el-form-item>
+          <el-button
+            class="pwd-submit"
+            type="primary"
+            :loading="savingPwd"
+            native-type="submit"
+          >
+            保存密码
+          </el-button>
+        </el-form>
       </article>
     </section>
   </div>
@@ -622,6 +749,36 @@ onMounted(load)
   font-size: 12px;
   color: var(--color-muted-fg);
   line-height: 1.6;
+}
+
+/* 本人改登录名 / 改密码：右栏自己的一道，不影响左边资料保存 */
+.name-cell {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.name-input {
+  max-width: 190px;
+}
+.name-tip {
+  margin: 6px 0 0;
+}
+.security-sep {
+  height: 0;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-md) 0 var(--space-sm);
+}
+.security-title {
+  margin: 0 0 var(--space-sm);
+  font-size: 13px;
+  font-weight: 600;
+}
+.pwd-form {
+  margin-top: 0;
+}
+.pwd-submit {
+  margin-top: 2px;
 }
 
 /**

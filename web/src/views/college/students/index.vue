@@ -538,8 +538,23 @@ function onGlobalKeydown(e: KeyboardEvent) {
   const isUndo = k === 'z' && !e.shiftKey
   const isRedo = k === 'y' || (k === 'z' && e.shiftKey)
   if (!isUndo && !isRedo) return
-  // 编辑中且**刚敲了字** → 让输入框自己撤销
-  if (editKey.value && draftVal.value !== editStartVal.value) return
+
+  const t = e.target as HTMLElement | null
+  const inTextEdit = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+
+  // ① 正在格子里打字 → 把草稿退回起点。
+  //    为什么不能交给浏览器原生撤销：这个输入框的值是 Vue **程序写进去**的，
+  //    不在浏览器的撤销栈里，原生 Ctrl+Z 什么都不做 —— 用户原话
+  //    「ctrl+z 无法撤销字段修改」就是这么来的。自己退一步，至少有反应。
+  if (editKey.value && draftVal.value !== editStartVal.value) {
+    e.preventDefault()
+    if (isUndo) draftVal.value = editStartVal.value
+    return
+  }
+  // ② 焦点在**别的输入框**里（搜索框、弹窗表单）→ 那是人家的撤销，别抢。
+  //    以前这里无条件抢，结果在搜索框里按 Ctrl+Z 会去改表格数据。
+  if (inTextEdit && !editKey.value) return
+
   e.preventDefault()
   if (isUndo) void undo()
   else void redo()
@@ -643,7 +658,7 @@ function onCellFocusOut(e: FocusEvent, row: CollegeStudentRow, k: string) {
  * | 键 | 作用 |
  * |----|------|
  * | Enter / F2 | 进入编辑 |
- * | Delete | 清空这一格 |
+ * | Delete | 清空这一格（编辑态里光标在末尾时同样清空） |
  * | ↑ ↓ ← → | 移到相邻格（不进入编辑） |
  * | Home / End | 本行第一个 / 最后一个格子 |
  * | PageUp / PageDown | 上一页 / 下一页 |
@@ -697,6 +712,20 @@ function onCellKeydown(e: KeyboardEvent, row: CollegeStudentRow, k: string) {
   // ---- 编辑态 ----
   if (e.key === 'Escape') {
     editKey.value = null // 不保存直接关（Excel 里 Esc 的语义）
+    return
+  }
+  // Delete：浏览器在「光标停在末尾」时**什么都不做**（用户按了没反应，
+  // 也就是「delete 快捷键无法使用」）。这时按 Excel 的语义清空整格；
+  // 光标在中间或有选区时仍交给浏览器删字符，别把正在打的字一次性吞掉。
+  if (e.key === 'Delete' && !inPanel) {
+    const el = e.target
+    const native = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+    const pos = native ? el.selectionStart : null
+    const atEnd = !native || pos == null || (pos === el.selectionEnd && pos === el.value.length)
+    if (atEnd) {
+      e.preventDefault()
+      void clearCell(row, k)
+    }
     return
   }
   if (e.key === 'Tab') {

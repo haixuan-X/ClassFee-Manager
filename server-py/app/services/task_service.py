@@ -54,7 +54,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..errors import BizException
@@ -190,6 +190,18 @@ def is_pure_dean(user: LoginUser) -> bool:
     return user.role == DEAN_ROLE and bool(user.dean_only)
 
 
+def can_see_college_tasks(user: LoginUser) -> bool:
+    """谁看得见**学院任务**。
+
+    用户口径：**只有班主任和院长**。普通成员 / 生活委员 / 班长既不该看见，
+    也没有「点名」的资格——实测截图里普通成员的卡片上挂着「点名」按钮，
+    就是这条线没拦住（列表按 `mine` 档把 `scope=COLLEGE` 一起发出去了）。
+
+    用等级判定而不是 `role == TEACHER`：院长等级更高，写成角色相等会把他挡掉。
+    """
+    return user.role in _roles_at_least(TEACHER_ROLE)
+
+
 def can_publish(user: LoginUser) -> bool:
     return user.role in PUBLISH_ROLES
 
@@ -231,18 +243,16 @@ def can_answer(task: ClsTask, user: LoginUser) -> bool:
 
     **学院任务**（第三十二轮）走另一套：应答对象是**各班班主任**，
     同学答不了（那是班级任务干的事）。
+
+    第六十轮收紧：学院任务**一律不接受「本人作答」**，`can_answer` 恒为 False。
+    理由是它压根不该有这个动作——学院任务的答案是班主任**按学生**逐个填的
+    （点名表 `cls_task_student_answer`），班主任自己那条既不进分母、也不进
+    明细，纯属废数据。界面上那个「填写答案 / 修改我的答案」按钮点下去
+    「毫无用处」（用户原话），根子就在这。
     """
     if is_college_task(task):
-        # 学院任务：只有「各班班主任」交得上
-        if not is_college_answer_target(user):
-            return False
-        if task.created_by == user.id:
-            return False  # 你出的题你自己不算（和班级任务一个口径）
-        if task.status != 1:
-            return False
-        if task.deadline is not None and datetime.now() > task.deadline:
-            return False
-        return True
+        # 学院任务：只能走点名页逐个学生填，本人没有「答案」这回事
+        return False
     if user.role in NON_ANSWER_ROLES:
         return False  # 班主任发题催交，访客看情况——都不是被统计的同学
     if task.created_by == user.id:
@@ -386,11 +396,16 @@ def _display_value(task: ClsTask, raw: str | None) -> str:
 # ==================== 统计 ====================
 
 
-def _summarize(task: ClsTask, answers: list[ClsTaskAnswer], total: int) -> dict:
+def _summarize(task: ClsTask, answers: list, total: int) -> dict:
     """汇总：**只给分布，不含具体是谁**——这是用户明确要的口径。
 
     未填单列一项，因为「还差谁没交」恰恰是发布人要的东西；而未填的人
     在明细页里能看到名字，汇总页只给个数。
+
+    `answers` 只用到 `.value_json`（题型解析口径只有一份），所以两种行都能传：
+    班级任务传 `cls_task_answer`（一人一账号），学院任务传
+    `cls_task_student_answer`（一人一学生）——**别再混用**，混了就会出现
+    「班主任点名不涨数、自己乱答反而涨」。
     """
     answered = len(answers)
     out: dict = {
@@ -453,6 +468,12 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
             select(ClsClass.id, ClsClass.class_name)
         )
     }
+    # 发布人姓名（班级任务要显示「谁发的」）——按**名册上的真实姓名**来，
+    # 账号名字比账号id更能说明问题（老师一眼认得出是谁）。
+    name_of = {
+        int(u.id): ((u.real_name or u.username or "") or "")
+        for u in active
+    }
 
     ids = [t.id for t in tasks]
     answers = (
@@ -467,13 +488,44 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
         if a.user_id == user.id:
             mine[a.task_id] = a
 
+    # ---- 学院任务：答案在**另一张表**（按学生一人一行）----
+    #
+    # `cls_task_answer` 里那几行是班主任**自己**的废答案（第六十轮已禁止再产生），
+    # 拿它当「已填」会得出「点名了却不涨、自己乱答反而涨」的怪结果——
+    # 用户原话「班主任填写之后就显示在已填里面，没有填完的就不算在已填里面」。
+    # 所以分母/分子/分布三样全部换成学生口径：
+    #   分母 = 全校在册学生（每个学生都要被点到名）
+    #   分子 = 点名表里已填的学生数
+    #   分布 = 这些学生答案的选项计数
+    college_ids = [t.id for t in tasks if is_college_task(t)]
+    stu_by_task: dict[int, list[ClsTaskStudentAnswer]] = {}
+    college_total = 0
+    if college_ids:
+        for a in db.execute(
+            select(ClsTaskStudentAnswer).where(
+                ClsTaskStudentAnswer.task_id.in_(college_ids)
+            )
+        ).scalars():
+            stu_by_task.setdefault(a.task_id, []).append(a)
+        college_total = int(
+            db.scalar(
+                select(func.count())
+                .select_from(StudentRecord)
+                .where(StudentRecord.class_id.in_(list(class_name_of)))
+            )
+            or 0
+        )
+
     out = []
     for t in tasks:
         # 分母按任务各自算：发布人自己不答，所以这里要按 t.created_by 逐条筛。
         # ⚠ 分母按**任务自己的班**算（第三十二轮起任务可能属于别的班）：
         #   拿「我」的班去算别的班的分母，那个数字是错的。
         if is_college_task(t):
-            base = sum(1 for u in active if is_college_answer_target(u))
+            # 学院任务：全校学生都是应答对象，答案取**点名表**（见上面那段）
+            base = college_total
+            rows = stu_by_task.get(t.id, [])
+            my = None  # 「我的答案」是班级任务的口径，学院任务没有这一说
         else:
             base = sum(
                 1
@@ -481,8 +533,8 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
                 if u.class_id == t.class_id
                 and is_answer_target(u, t.created_by, t.scope)
             )
-        rows = by_task.get(t.id, [])
-        my = mine.get(t.id)
+            rows = by_task.get(t.id, [])
+            my = mine.get(t.id)
         out.append(
             {
                 "id": t.id,
@@ -495,11 +547,24 @@ def _build_rows(db: Session, user: LoginUser, tasks: list[ClsTask]) -> list[dict
                 "scopeText": SCOPE_TEXT.get(t.scope or SCOPE_CLASS, "班级任务"),
                 "classId": t.class_id,
                 "className": class_name_of.get(t.class_id, ""),
+                # 第六十轮：发布人真名（班级任务要显示「谁发的」）
+                "publisherName": name_of.get(int(t.created_by or 0)) or "",
                 "options": _load_options(t),
                 "allowText": bool(t.allow_text),
                 "deadline": t.deadline.strftime("%Y-%m-%d %H:%M") if t.deadline else None,
                 "open": is_open(t),
                 "canAnswer": can_answer(t, user),
+                # 能不能**填**这条（学院任务专用）：只有各班班主任、且不是
+                # 发布人、且还在收答案。以前前端用 `scope==='COLLEGE' && open`
+                # 判断，于是**纯院长也会看到「点名」按钮**，点下去 403
+                # （`_rollcall_guard` 只放行班主任）。按钮显隐必须以后端这一个
+                # 标志为准，前端不再自己拼条件。
+                "canFill": bool(
+                    is_college_task(t)
+                    and is_college_answer_target(user)
+                    and t.created_by != user.id
+                    and is_open(t)
+                ),
                 "createdBy": t.created_by,
                 "isMine": t.created_by == user.id,
                 "canSeeDetail": can_see_detail(t, user),
@@ -542,10 +607,20 @@ def _visible_task_query(user: LoginUser, view: str):
     - `mine`：本班的（scope=CLASS）+ 学院任务（scope=COLLEGE）
     - `college`：只要学院任务
     - `other`：其他班的任务（不含本班、不含学院任务）
+
+    **学院任务只有班主任和院长看得见**（见 `can_see_college_tasks`）：
+    低于班主任的角色，`mine` 档只发本班，`college` 档直接给空集——
+    否则同学在「班级任务」里会看到全学院的题，还带着他按不了的「点名」按钮。
     """
     if is_pure_dean(user):
         # 纯院长只碰学院任务，看不到任何班级任务
         return select(ClsTask).where(ClsTask.scope == SCOPE_COLLEGE)
+    if not can_see_college_tasks(user):
+        if view == VIEW_COLLEGE:
+            return select(ClsTask).where(ClsTask.id < 0)
+        return select(ClsTask).where(
+            ClsTask.class_id == user.class_id, ClsTask.scope != SCOPE_COLLEGE
+        )
     if view == VIEW_COLLEGE:
         return select(ClsTask).where(ClsTask.scope == SCOPE_COLLEGE)
     if view == VIEW_OTHER:
@@ -850,7 +925,7 @@ def get_detail(db: Session, user: LoginUser, task_id: int) -> dict:
 # ==================== 任务总览（第三十二轮） ====================
 
 
-def overview(db: Session, user: LoginUser) -> dict:
+def overview(db: Session, user: LoginUser, *, class_id: int | None = None) -> dict:
     """任务总览：**我能看到的**任务都统计一遍。
 
     放在「班级任务」上面那一页，给的是「现在什么状况」而不是「有哪些任务」：
@@ -858,17 +933,35 @@ def overview(db: Session, user: LoginUser) -> dict:
 
     统计范围 = 任务列表的可见范围（本班 + 学院任务），
     加上**其他班**的任务（只对运营角色）——不然总览就少了大半。
+
+    ## 按班级筛选（第六十轮）
+
+    传 `class_id`（必须存在且启用）时，只统计**该班级的班级任务**——
+    「可针对班级查看班级任务总览」。学院任务（`scope=COLLEGE`）
+    不属于任何班，筛选时**整体排除**，和按班拆分的口径一致。
     """
     is_staff = user.role in _roles_at_least(TEACHER_ROLE)
-    if is_staff:
-        tasks = db.execute(
-            select(ClsTask).order_by(ClsTask.created_at.desc(), ClsTask.id.desc())
-        ).scalars().all()
+    if class_id is not None:
+        cid = int(class_id)
+        if not db.scalar(
+            select(func.count())
+            .select_from(ClsClass)
+            .where(ClsClass.id == cid, ClsClass.status == 1)
+        ):
+            raise BizException.bad_request("班级不存在或已停用")
+        stmt = select(ClsTask).where(
+            ClsTask.class_id == cid,
+            or_(ClsTask.scope != SCOPE_COLLEGE, ClsTask.scope.is_(None)),
+        ).order_by(ClsTask.created_at.desc(), ClsTask.id.desc())
+    elif is_staff:
+        stmt = select(ClsTask).order_by(
+            ClsTask.created_at.desc(), ClsTask.id.desc()
+        )
     else:
-        tasks = db.execute(
-            _visible_task_query(user, VIEW_MINE)
-            .order_by(ClsTask.created_at.desc(), ClsTask.id.desc())
-        ).scalars().all()
+        stmt = _visible_task_query(user, VIEW_MINE).order_by(
+            ClsTask.created_at.desc(), ClsTask.id.desc()
+        )
+    tasks = db.execute(stmt).scalars().all()
 
     rows = _build_rows(db, user, list(tasks))
     total = len(rows)
@@ -1117,13 +1210,13 @@ def submit_answer(
     with db.begin():
         task = _require_task(db, user.class_id, task_id)
         if is_college_task(task):
-            # 学院任务（第三十二轮）：应答对象是**各班班主任**，同学答不了。
-            # 这条分支不能省——班主任在 NON_ANSWER_ROLES 里（班级任务里他不填），
-            # 拿老口径一刀切下去，全校班主任就一个都交不上。
-            if not is_college_answer_target(user):
-                raise BizException.forbidden(
-                    "学院任务由各班班主任应答，同学不用填"
-                )
+            # 学院任务**不接受本人作答**（第六十轮）：答案是班主任按学生逐个
+            # 填的（点名表 `cls_task_student_answer`），本人那条既不进分母、
+            # 也不进明细，纯属废数据。前端已按 `can_answer=False` 不渲染按钮，
+            # 这里再拦一道——直接调接口也提交不上去。
+            raise BizException.bad_request(
+                "学院任务由各班班主任逐个学生填写，不接受本人作答"
+            )
         elif user.role in NON_ANSWER_ROLES:
             raise BizException.forbidden(
                 "班主任和访客不在被统计的同学名单里，只能发题和查看，不能填写"

@@ -196,6 +196,26 @@ def _init_teacher_account(db: Session, cfg: dict, class_id: int) -> None:
         status=1,
     )
     db.add(account)
+    db.flush()
+    # 声明的班主任 = **种子班的班主任**。
+    #
+    # `sys_user.class_id` 只决定登录落点；名册（`/college/advisers`）和
+    # 「一班一位」看的是 `sys_user_class.is_adviser`。少了这一行，新装系统的
+    # 名册上班级显示「无班主任」，回归里「在已有班主任的班里建号 -> 400」
+    # 也因为前提不成立而红。
+    #
+    # 只在**建号这一刻**写：账号已存在就跳过（上面已 return），所以不会把
+    # 用户手动清空的班主任又悄悄加回来 —— `_init_class` 踩过同一个坑。
+    already = (
+        db.scalar(
+            select(func.count())
+            .select_from(SysUserClass)
+            .where(SysUserClass.class_id == class_id, SysUserClass.is_adviser == 1)
+        )
+        or 0
+    )
+    if not already:
+        db.add(SysUserClass(user_id=account.id, class_id=class_id, is_adviser=1))
     # 只记用户名不记口令：口令以部署配置为准，且日志不该留明文密码
     log.warning(
         "已按部署配置创建班主任账号：%s（role=%s%s）——首次登录后请立即在「个人中心」修改密码",

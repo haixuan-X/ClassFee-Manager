@@ -850,12 +850,16 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
     `_field_ids_by_key` 同一个道理。拿全校的某一个班的字段 id 去读别的班，
     读出来的是完全不相干的列。
 
-    ## 学籍变化：**还没有数据源**
+    ## 学籍变化 = **当前不在籍的那些人**
 
-    全库没有任何历史/快照/异动表（`student_record_value` 只存当前值）。
-    所以这里把 `changeTotal` 返回成 `null` 并带 `changeSupported: false`，
-    界面上如实显示「暂无异动记录」而不是画一条假的零线——
-    一条全零的折线会被读成「本年零异动」，那是**撒谎**。
+    全库没有任何历史/快照/异动表（`student_record_value` 只存当前值），
+    所以给不了「本学期异动人次」这种时间口径。但**不能继续返回 null**：
+    用户反馈「学籍变化不能同步学籍信息」——右边「学籍状态分布」明明摆着
+    入伍 1 / 休学 5 / 退学 1，这张卡却写着「暂无异动记录」，看着像没接上。
+
+    现在两处**同源**（都从 `breakdown` 出）：`changeTotal` = 非在籍的人数，
+    `changeBreakdown` 把哪几档各有多少写清楚。改一次学籍状态，两张卡一起变。
+    没有异动时给 0 并说「全部在籍」——这是真 0，不是编的。
     """
     # 统计范围：院长 = 所有启用班；其他人 = 自己那个班
     is_college = user.role == DEAN_ROLE
@@ -926,6 +930,10 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
     registered = 0
     enroll_months: dict[str, int] = {}
     latest_rows: list[dict] = []
+    #: 「学籍变化」点开后要看的名单（第六十一轮）：**当前不在籍的那些人**。
+    #: 与卡片同一个数、同一个口径——卡片上的 8 个人，点开就是这 8 行，
+    #: 不是另一套过滤（两套口径必然对不上，用户会以为点错了）。
+    changed_rows: list[dict] = []
 
     for rid, rec in records.items():
         status = val(rid, "reg_status")
@@ -968,6 +976,28 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
             ),
         })
 
+        # 「学籍变化」点开后的名单：**当前不在籍**的那些人（第六十一轮）。
+        # 与卡片上那个数同一个口径（见 `moved`），卡片显示 8，点开就是这 8 行。
+        if bucket not in (REG_STATUS_ENROLLED, REG_STATUS_EMPTY):
+            changed_rows.append({
+                "id": rec.id,
+                "studentNo": rec.student_no,
+                "name": rec.name,
+                "regStatus": status,
+                "regStatusCanon": bucket,
+                "grade": val(rid, "grade"),
+                "majorName": val(rid, "major_name"),
+                "enrollDate": ed,
+                "updatedAt": fmt_dt(rec.updated_at),
+                # 名单里的人**全都不在籍**（这是筛出来的），前端拿它决定配色
+                "registered": False,
+                "className": (
+                    class_by_id[rec.class_id].class_name
+                    if rec.class_id in class_by_id
+                    else ""
+                ),
+            })
+
     # 累计在校人数曲线：按入校月份累加，末值 = 有入校日期的学生总数。
     # 只画**有入校日期**的学生——没填日期的没法归月，硬塞进第一个月是编数据。
     trend: list[dict] = []
@@ -977,6 +1007,25 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
         trend.append({"ym": ym, "added": enroll_months[ym], "cumulative": running})
 
     latest_rows.sort(key=lambda r: (r["updatedAt"] or "", r["id"]), reverse=True)
+
+    # 「学籍变化」= 当前**不在籍**的那些人（毕业/入伍/休学/退学 + 认不出的写法）。
+    # 「未填写」不算异动——那是模板空列，不是状态变了。
+    moved = {
+        k: breakdown[k]
+        for k in (*REG_STATUSES, REG_STATUS_OTHER)
+        if k != REG_STATUS_ENROLLED and breakdown.get(k)
+    }
+    # 点开后的名单按**档位顺序**排（毕业→入伍→休学→退学→其他），
+    # 档内按班级+学号——和卡片上「入伍 1 · 休学 5 · 退学 1」的读法一致，
+    # 不按人数排（人数一变顺序就变，找人费劲）。
+    bucket_order = {k: i for i, k in enumerate((*REG_STATUSES, REG_STATUS_OTHER))}
+    changed_rows.sort(
+        key=lambda r: (
+            bucket_order.get(r["regStatusCanon"], len(bucket_order)),
+            r["className"] or "",
+            r["studentNo"] or "",
+        )
+    )
 
     clazz = db.get(ClsClass, user.class_id)
     return {
@@ -1004,10 +1053,14 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
         "enrollTrend": trend,
         "months": months,
         "latest": latest_rows[:LATEST_LIMIT],
-        # 学籍异动：暂无数据源（见函数 docstring）。null 而不是 0——
-        # 0 会被读成「确实零异动」，null 才如实表达「还没这回事」。
-        "changeTotal": None,
-        "changeSupported": False,
+        # 学籍异动：与右边「学籍状态分布」**同源**（见函数 docstring）。
+        # 不再给 null——用户反馈「学籍变化不能同步学籍信息」就是因为它一直空着。
+        "changeTotal": sum(moved.values()),
+        "changeSupported": True,
+        "changeBreakdown": [{"status": k, "count": v} for k, v in moved.items()],
+        # 点「学籍变化」卡片弹出的名单（第六十一轮）：当前不在籍的那些人，
+        # 与 `changeTotal` 同一个数、同一个口径（卡片 8 人 = 这里 8 行）。
+        "changeStudents": changed_rows,
     }
 
 

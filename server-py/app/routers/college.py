@@ -618,3 +618,74 @@ def tasks(
             scope=scope,
         )
     )
+class TeacherAccountUpdateRequest(BaseModel):
+    """编辑班主任账号（姓名 / 登录名 / 手机号，均可选）。"""
+
+    realName: str | None = None
+    username: str | None = None
+    phone: str | None = None
+
+
+class TeacherPasswordResetRequest(BaseModel):
+    """重置班主任账号密码。不填 `password` 则重置为 123456。"""
+
+    password: str | None = None
+
+
+class TeacherStatusRequest(BaseModel):
+    """启用/停用班主任账号。"""
+
+    status: int = Field(...)
+
+
+@router.put("/teacher-accounts/{account_id}", summary="编辑班主任账号")
+def update_teacher_account(
+    account_id: int,
+    req: TeacherAccountUpdateRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """编辑班主任账号（姓名 / 登录名 / 手机号）。
+
+    学院层**只管班主任**：院长 / 学生 / 生活委员一律当「不存在」，
+    不看、不改、不停用（404 语义，防账号探测）。
+    """
+    require_min_level(user, "DEAN", "编辑班主任账号")
+    return ok(
+        user_service.update_teacher_account(
+            db,
+            user,
+            account_id,
+            real_name=req.realName,
+            username=req.username,
+            phone=req.phone,
+        )
+    )
+
+
+@router.post("/teacher-accounts/{account_id}/reset-password", summary="重置班主任密码")
+def reset_teacher_password(
+    account_id: int,
+    req: TeacherPasswordResetRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """重置班主任账号密码。不填 `password` 则重置为 123456。"""
+    require_min_level(user, "DEAN", "重置班主任密码")
+    return ok(
+        user_service.reset_teacher_password(
+            db, user, account_id, req.password
+        )
+    )
+
+
+@router.put("/teacher-accounts/{account_id}/status", summary="启用/停用班主任账号")
+def set_teacher_status(
+    account_id: int,
+    req: TeacherStatusRequest,
+    user: LoginUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """启用/停用班主任账号（status: 1=启用 0=停用）。"""
+    require_min_level(user, "DEAN", "启用/停用班主任账号")
+    return ok(user_service.set_teacher_status(db, user, account_id, req.status))

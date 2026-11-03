@@ -97,6 +97,44 @@ export function createCollegeTeacher(body: {
   })
 }
 
+/** 编辑班主任账号（姓名 / 登录名 / 手机号，均可选）。仅院长。 */
+export function updateCollegeTeacher(
+  id: number,
+  body: { realName?: string; username?: string; phone?: string },
+) {
+  return request<{ id: number }>({ url: `/college/teacher-accounts/${id}`, method: 'put', data: body })
+}
+
+/**
+ * 重置班主任账号密码。
+ *
+ * 不传 `password` = 重置为 **123456**（`DEFAULT_INITIAL_PASSWORD`）。
+ * 仅院长。
+ */
+export function resetCollegeTeacherPassword(id: number, password?: string) {
+  return request<{ id: number; username: string; message: string }>({
+    url: `/college/teacher-accounts/${id}/reset-password`,
+    method: 'post',
+    data: { password },
+  })
+}
+
+/**
+ * 启用/停用班主任账号。
+ *
+ * - `1` 启用：账号恢复登录、恢复「我带的班」；
+ * - `0` 停用：该账号登录返回「账号已被停用」。
+ *
+ * 仅院长。停用不会移出「改班主任安排」里的安排——名册按 `sys_user_class`。
+ */
+export function setCollegeTeacherStatus(id: number, status: 0 | 1) {
+  return request<{ id: number; status: number }>({
+    url: `/college/teacher-accounts/${id}/status`,
+    method: 'put',
+    data: { status },
+  })
+}
+
 /**
  * 院长账号一览（第五十二轮）：只列 `role=DEAN`，不按班级过滤。
  *
@@ -110,14 +148,20 @@ export function fetchCollegeDeans() {
 /**
  * 新增院长账号。
  *
- * 请求体只带人（姓名/登录名/密码/手机号）：**角色与班级由后端钉死**，
- * 一律建成纯院长——这一页不是绕过等级校验的建号后门。
+ * 默认建**纯院长**（不传 `deanOnly` 就走纯院长）：只管学院，不进班级事务。
+ * 传 `deanOnly: false` + `classIds` → 建**院长 + 班主任**：
+ * 他真当那几个班的班主任（占名额），任何一个班已有班主任会被后端拒绝
+ * （提示指路「班主任名册 → 改班主任安排」）。
  */
 export function createCollegeDean(body: {
   username: string
   realName: string
   password?: string
   phone?: string
+  /** true = 纯院长（默认） */
+  deanOnly?: boolean
+  /** 「院长 + 班主任」时要带的班（至少一个） */
+  classIds?: number[]
 }) {
   return request<CollegeDeanRow>({ url: '/college/deans', method: 'post', data: body })
 }

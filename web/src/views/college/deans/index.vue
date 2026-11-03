@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { createCollegeDean, fetchCollegeDeans } from '@/api/college'
+import { createCollegeDean, fetchCollegeDeans, fetchCollegeFields } from '@/api/college'
 import { getErrorMessage } from '@/api/request'
-import type { CollegeDeanList } from '@/types'
+import type { CollegeClassChoice, CollegeDeanList } from '@/types'
 
 /**
  * 院长账号（第五十二轮）。
@@ -18,11 +18,12 @@ import type { CollegeDeanList } from '@/types'
  * 把纯院长塞进去，他会看到一屏学生账号，还能顺手建班主任——和
  * 「纯院长只管学院」直接矛盾。所以这里只列院长、只建院长。
  *
- * ## 新院长为什么是纯院长
+ * ## 新院长：纯院长还是「院长 + 班主任」
  *
- * 建出来就自动挂到某个班（`create_user` 对兼班主任院长会写一条管理行），
- * 「他为什么能进这个班」会变成一个没人记得的副作用，还可能和班主任安排
- * 纠缠。需要兼班主任的，本人登录后在「个人信息 → 职务范围」切换即可。
+ * 建出来的院长**默认是纯院长**（只管学院）——这是院长账号页最常见的用途。
+ * 需要兼班主任的，建号时选「院长 + 班主任」并勾选要带的班：
+ * 他**真当那几个班的班主任**（占名额，名册里看得见）；一个班一位，
+ * 被占的班会被后端拒绝并提示「已有班主任，请到「改班主任安排」改人」。
  */
 const list = ref<CollegeDeanList | null>(null)
 const loading = ref(true)
@@ -37,7 +38,14 @@ const form = reactive({
   username: '',
   password: '',
   phone: '',
+  /** true = 纯院长（默认）；false = 院长 + 班主任 */
+  deanOnly: true,
+  /** 「院长 + 班主任」时要带的班（下拉里勾选；可多选） */
+  classIds: [] as number[],
 })
+
+/** 全部启用的班（下拉选项） */
+const allClasses = ref<CollegeClassChoice[]>([])
 
 async function load() {
   loading.value = true
@@ -57,6 +65,8 @@ function openCreate() {
   form.username = ''
   form.password = ''
   form.phone = ''
+  form.deanOnly = true
+  form.classIds = []
   open.value = true
 }
 
@@ -65,8 +75,10 @@ async function submit() {
   const username = form.username.trim()
   const password = form.password.trim()
   const phone = form.phone.trim()
+  const deanOnly = form.deanOnly
+  const classIds = [...form.classIds]
   // 前端先挡一遍明显问题，省一次往返；真正的边界（登录名唯一、密码长度、
-  // 等级校验）仍在后端，两边不是重复实现，是同一套规则的两道门。
+  // 班级冲突）仍在后端，两边不是重复实现，是同一套规则的两道门。
   if (!realName) {
     ElMessage.warning('请输入姓名')
     return
@@ -83,6 +95,10 @@ async function submit() {
     ElMessage.warning('密码长度需为 6-32 位')
     return
   }
+  if (!deanOnly && classIds.length === 0) {
+    ElMessage.warning('「院长 + 班主任」至少要选一个他要带的班')
+    return
+  }
   saving.value = true
   try {
     await createCollegeDean({
@@ -90,12 +106,14 @@ async function submit() {
       realName,
       password: password || undefined,
       phone: phone || undefined,
+      deanOnly,
+      classIds: deanOnly ? undefined : classIds,
     })
     ElMessage.success(password ? '院长账号已创建' : '院长账号已创建，初始密码 123456')
     open.value = false
     await load()
   } catch (e) {
-    // 登录名重复、权限不足等：后端文案已经足够具体，直接透出
+    // 登录名重复、班级冲突、权限不足等：后端文案已经足够具体，直接透出
     ElMessage.error(getErrorMessage(e))
   } finally {
     saving.value = false
@@ -106,7 +124,18 @@ function fmtTime(value: string | null | undefined): string {
   return value ? value.slice(0, 16) : '—'
 }
 
-onMounted(load)
+async function fetchClasses() {
+  try {
+    allClasses.value = (await fetchCollegeFields()).classes
+  } catch {
+    allClasses.value = []
+  }
+}
+
+onMounted(() => {
+  void fetchClasses()
+  void load()
+})
 </script>
 
 <template>
@@ -115,8 +144,9 @@ onMounted(load)
       <div>
         <h2>院长账号</h2>
         <p>
-          可以有多位院长，彼此同级。新账号一律是<strong>纯院长</strong>（只管学院）；
-          需要兼班主任的，本人登录后在「个人信息 → 职务范围」切换。
+          可以有多位院长，彼此同级。新账号默认是<strong>纯院长</strong>（只管学院）；
+          需要兼班主任的，建号时选<strong>「院长 + 班主任」</strong>并勾选他要带的班，
+          也可以由本人登录后在「个人信息 → 职务范围」切换。
         </p>
       </div>
       <el-button type="primary" @click="openCreate">新增院长</el-button>
@@ -175,7 +205,8 @@ onMounted(load)
     <el-dialog v-model="open" title="新增院长" width="480px" append-to-body>
       <p class="hint" style="margin: 0 0 14px">
         新账号默认<strong>纯院长</strong>：全校学生名册、班主任名册、学院任务、
-        学生情况总览。要参与某个班的事务，由本人在「个人信息 → 职务范围」切换。
+        学生情况总览。<strong>「院长 + 班主任」</strong>会让他真当班主任——
+        一个班只能有一位，建号前先在下面勾好他要带的班；名册上他占他带的班主任名额。
       </p>
       <el-form label-width="80px" @submit.prevent>
         <el-form-item label="姓名" required>
@@ -194,6 +225,36 @@ onMounted(load)
         </el-form-item>
         <el-form-item label="手机号">
           <el-input v-model="form.phone" maxlength="20" placeholder="选填" />
+        </el-form-item>
+        <el-form-item label="职责范围" required>
+          <el-radio-group v-model="form.deanOnly">
+            <el-radio :value="true">纯院长（只管学院）</el-radio>
+            <el-radio :value="false">院长 + 班主任</el-radio>
+          </el-radio-group>
+          <div class="form-tip">
+            「院长 + 班主任」= 他真当班主任（占班主任名额）——负责账目、缴费、班级成员、
+            学生信息、任务。下方勾选他要带的班，建号后立刻生效。
+          </div>
+        </el-form-item>
+        <el-form-item v-if="!form.deanOnly" label="带的班" required>
+          <el-select
+            v-model="form.classIds"
+            multiple
+            filterable
+            style="width: 100%"
+            placeholder="勾选他要带的班"
+          >
+            <el-option
+              v-for="c in allClasses"
+              :key="c.id"
+              :label="(c.grade ? c.grade + ' · ' : '') + c.className"
+              :value="c.id"
+            />
+          </el-select>
+          <div class="form-tip">
+            至少勾选一个；每个班只能有一位班主任，被占的班会被后端拒绝并提示
+            「到「班主任名册 → 改班主任安排」改人」。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -265,5 +326,12 @@ onMounted(load)
   margin: 0;
   font-size: 12px;
   color: var(--color-muted-fg);
+}
+
+.form-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-muted-fg);
+  line-height: 1.6;
 }
 </style>

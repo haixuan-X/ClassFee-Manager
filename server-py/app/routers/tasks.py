@@ -55,6 +55,10 @@ def list_tasks(
             "canPublish": svc.can_publish(user),
             # 第三十二轮：能不能发**学院任务**（只有院长）
             "canPublishCollege": user.role == "DEAN",
+            # 能不能**看见**学院任务（只有班主任和院长）：前端据此决定要不要
+            # 显示「学院任务」这一档。真正的闸门在 `_visible_task_query`——
+            # 这里只是把同一套口径下发给界面，不构成权限边界。
+            "canSeeCollege": svc.can_see_college_tasks(user),
             "view": view,
         }
     )
@@ -62,6 +66,8 @@ def list_tasks(
 
 @router.get("/overview")
 def task_overview(
+    class_id: int | None = Query(None, alias="classId",
+                                 description="按班级筛选（第六十轮）；不传 = 全学院"),
     user: LoginUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -73,19 +79,24 @@ def task_overview(
     ⚠ **只有院长能看**（用户口径）：它是「学院」这一组里的一页，
     而「学院」除了院长谁都不展示。侧栏不给入口、路由也弹回仪表盘，
     后端这里再硬拦一道——手输 URL / 直接调接口都绕不过去。
+
+    第六十轮：`?classId=` 可以按**班级**筛选（只统计该班的班级任务，
+    学院任务不属于任何班，筛选时整体排除）。
     """
     require_min_level(user, "DEAN", "任务总览")
-    return ok(svc.overview(db, user))
+    return ok(svc.overview(db, user, class_id=class_id))
 
 
 @router.get("/overview/export", summary="导出任务总览（所有任务一览）")
 def export_overview(
+    class_id: int | None = Query(None, alias="classId",
+                                 description="按班级筛选（第六十轮）；不传 = 全学院"),
     user: LoginUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """把任务总览导出成 Excel。仅院长。"""
     require_min_level(user, "DEAN", "任务总览导出")
-    return task_excel.xlsx_response(task_excel.export_overview(db, user))
+    return task_excel.xlsx_response(task_excel.export_overview(db, user, class_id=class_id))
 
 
 @router.get("/pinned")

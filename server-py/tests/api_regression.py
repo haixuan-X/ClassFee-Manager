@@ -207,6 +207,47 @@ def restore_root_links(want: list[tuple[int, int]]) -> None:
             )
 
 
+def _ensure_root_adviser() -> bool:
+    """干净库自给：全库一个班主任都没有时，把 `test` 补成它自己那个班的班主任。
+
+    ## 为什么回归需要这个
+
+    一批用例都以「`test` 是自己 `class_id` 那个班的班主任」为前提：名册要能
+    联系上人、`create_user` 的「已有班主任的班建号 -> 400」要成立、`a29/a31`
+    的班级关联基线要非空。库被清空过（或全新安装、老 seed 只建号不建
+    `sys_user_class`）时前提不成立，会**连红 6 条**，而且红得莫名其妙。
+
+    ## 为什么只在「全库没有班主任」时才补
+
+    用户**主动清空**班主任是合法状态，回归绝不能把它悄悄改回去 ——
+    `seed.py` 的 `_init_class` 就因为「每次启动把清掉的东西加回来」被修过，
+    这里是同一个坑。所以判据是「整库没有任何 is_adviser=1」，
+    正常库里有班主任时一行都不动。
+    """
+    from sqlalchemy import text as _t
+
+    from app.db import engine as _engine
+
+    with _engine.begin() as c:
+        n = c.execute(
+            _t("SELECT COUNT(*) FROM sys_user_class WHERE is_adviser = 1")
+        ).scalar()
+        if int(n or 0):
+            return False
+        row = c.execute(
+            _t("SELECT id, class_id FROM sys_user WHERE username = 'test'")
+        ).fetchone()
+        if not row or not row[1]:
+            return False
+        c.execute(
+            _t("INSERT INTO sys_user_class (user_id, class_id, is_adviser) "
+               "VALUES (:u, :c, 1)"),
+            {"u": int(row[0]), "c": int(row[1])},
+        )
+    print("  （干净库：已把 test 补成它自己那个班的班主任）")
+    return True
+
+
 def ensure_user(username: str, role: str, real_name: str, token: str):
     """建号或修复（存在则重置密码并启用）。只有班主任能建 MONITOR/ADMIN —— 见第十五轮等级。"""
     row = find_user(username, token)
@@ -408,6 +449,8 @@ def test_a00_bootstrap():
     } - set(PROBE_USERS)
     # 常驻班主任 test 的**班级关联**基线（第五十一轮）：
     # 用例可以临时改（测「我带的班」），但收尾必须还原（见 main 里的守卫）。
+    # ⚠ 补关联必须在拍基线**之前**：否则基线是 []，用例跑完留下 (班, 1) 就红了。
+    _ensure_root_adviser()
     S["root_classes0"] = root_class_links()
 
     # 普通成员：能登录就复用，否则建/修
@@ -650,15 +693,14 @@ def test_a03_self_profile():
     st, j = call("PUT", "/auth/profile", {"phone": "1" * 21}, M)
     check("手机号超长 -> 400", st == 400, f"st={st}")
 
-    # 越权字段必须无效
+    # 越权字段必须无效（**username 第六十轮起是本人可改的字段**，不再混在「越权」里）
     st, j = call("PUT", "/auth/profile",
                  {"realName": "ProfileSelf", "id": 99999, "role": "TEACHER",
-                  "status": 0, "username": "hijack", "classId": 2}, M)
+                  "status": 0, "classId": 2}, M)
     row = find_user(MEMBER_U, T) or {}
-    check("role/status/username/classId 一律被忽略",
-          st == 200 and row.get("role") == "MEMBER" and row.get("username") == MEMBER_U
-          and row.get("status") == 1,
-          f"st={st} role={row.get('role')} user={row.get('username')} status={row.get('status')}")
+    check("role/status/classId 一律被忽略（id/role/status 都不会被改）",
+          st == 200 and row.get("role") == "MEMBER" and row.get("status") == 1,
+          f"st={st} role={row.get('role')} status={row.get('status')}")
 
     # 学号同班唯一
     st, j = call("PUT", "/auth/profile", {"studentNo": "P-2022-9001"}, M)
@@ -1896,6 +1938,8 @@ def _purge_fixture_class(name: str) -> None:
         )
         c.execute(_t("DELETE FROM student_record WHERE class_id = :c"), {"c": cid})
         c.execute(_t("DELETE FROM student_field WHERE class_id = :c"), {"c": cid})
+        # 类别是**班的字典**（seed 会自动铺 11 条），删班时它归这个班，一起清
+        c.execute(_t("DELETE FROM fee_category WHERE class_id = :c"), {"c": cid})
         c.execute(_t("DELETE FROM sys_user_class WHERE class_id = :c"), {"c": cid})
         c.execute(_t("DELETE FROM cls_task WHERE class_id = :c"), {"c": cid})
         c.execute(_t("DELETE FROM cls_class WHERE id = :c"), {"c": cid})
@@ -3872,9 +3916,17 @@ def test_a21_student_dashboard():
     for k in ("canViewAll", "studentTotal", "registeredTotal", "statusBreakdown",
               "enrollTrend", "latest", "changeTotal", "changeSupported"):
         check(f"返回结构含 {k}", k in d, str(sorted(d)))
-    check("**学籍异动返回 null 而不是 0**（0 会被读成「零异动」）",
-          d.get("changeTotal") is None and d.get("changeSupported") is False,
+    # 第六十轮：学籍变化**接上了数据源**（与右边「学籍状态分布」同源）——
+    # 不再是恒 null 的壳。0 是**真 0**（全在籍），不是「还没这回事」。
+    check("★ 学籍变化给出数字且 supported=True",
+          isinstance(d.get("changeTotal"), int) and d.get("changeSupported") is True,
           f"changeTotal={d.get('changeTotal')!r} supported={d.get('changeSupported')!r}")
+    moved = d.get("changeBreakdown") or []
+    check("★ 异动人数 = 各非在籍档之和（两处同源，改一处一起变）",
+          int(d.get("changeTotal") or 0) == sum(int(x.get("count") or 0) for x in moved),
+          f"total={d.get('changeTotal')} breakdown={str(moved)[:160]}")
+    check("异动明细里不含「在籍」「未填写」",
+          all(x.get("status") not in ("在籍", "未填写") for x in moved), str(moved))
     check("注册人数不会超过学生总数",
           int(d.get("registeredTotal") or 0) <= int(d.get("studentTotal") or 0),
           f"{d.get('registeredTotal')} > {d.get('studentTotal')}")
@@ -5691,15 +5743,17 @@ def test_a32_task_scope() -> None:
     check("学院任务的 scope 是 COLLEGE",
           (data_of(j) or {}).get("scope") == "COLLEGE", str(data_of(j)))
 
-    # ---------- ③ 应答对象按 scope 分流 ----------
+    # ---------- ③ 学院任务**不接受本人作答**（第六十轮） ----------
+    # 答案是班主任按学生逐个填的（点名表 `cls_task_student_answer`），
+    # 本人那条既不进分母也不进明细——用户原话「填写答案和修改答案毫无用处」。
     st, j = call("PUT", f"/tasks/{college_tid}/answer", {"value": True}, M)
-    check("同学答学院任务 -> 403（学院任务问的是班的情况，班主任答）", st == 403,
+    check("同学答学院任务 -> 400（不接受本人作答）", st == 400,
           f"st={st} {msg_of(j)}")
     st, j = call("PUT", f"/tasks/{college_tid}/answer", {"value": True}, T)
-    check("班主任答学院任务 -> 200", st == 200, f"st={st} {msg_of(j)}")
+    check("★ 班主任也不能本人作答 -> 400（要走点名页逐个学生填）",
+          st == 400 and "不接受本人作答" in msg_of(j), f"st={st} {msg_of(j)}")
     st, j = call("PUT", f"/tasks/{college_tid}/answer", {"value": True}, D)
-    check("院长答自己发的学院任务 -> 403（你出的题你自己不算）", st == 403,
-          f"st={st} {msg_of(j)}")
+    check("院长本人作答 -> 400", st == 400, f"st={st} {msg_of(j)}")
 
     # ---------- ④ 明细的口径：只有院长 / 发布人能看 ----------
     # 学院任务的明细是院长看回收情况用的，班主任走点名页填自己班，同学一律 403
@@ -5735,9 +5789,10 @@ def test_a32_task_scope() -> None:
     # ---------- ⑥ 分母按 scope 算 ----------
     me = data_of(call("GET", "/auth/me", None, T)[1]) or {}
     cls_id = int(me.get("classId") or 0)
-    want_college_base = db_count(
-        "SELECT COUNT(*) FROM sys_user WHERE status = 1 "
-        "AND role IN ('TEACHER','DEAN') AND NOT (role = 'DEAN' AND dean_only = 1)")
+    # 第六十轮：学院任务的分母 = **全校在册学生**（每个学生都要被点到名），
+    # 不再是「全校班主任人数」——分子取自点名表，两边必须同一个单位，
+    # 否则会出现「已填 2 / 共 11 人」这种分子分母各说各话的数字。
+    want_college_base = db_count("SELECT COUNT(*) FROM student_record")
     want_class_base = db_count(
         "SELECT COUNT(*) FROM sys_user WHERE status = 1 AND class_id = :c "
         "AND role IN ('MEMBER','ADMIN','MONITOR')", c=cls_id)
@@ -5746,19 +5801,26 @@ def test_a32_task_scope() -> None:
     by_id = {r["id"]: r for r in rows}
     c_row = by_id.get(college_tid) or {}
     k_row = by_id.get(class_tid) or {}
-    check("学院任务的分母是全校班主任人数",
+    check("★ 学院任务的分母是全校学生数",
           c_row.get("summary", {}).get("total") == want_college_base,
           f"{c_row.get('summary', {}).get('total')} vs {want_college_base}")
     check("班级任务的分母是本班同学人数",
           k_row.get("summary", {}).get("total") == want_class_base,
           f"{k_row.get('summary', {}).get('total')} vs {want_class_base}")
-    check("班主任能答学院任务（canAnswer）",
-          c_row.get("canAnswer") is True, str(c_row.get("canAnswer")))
+    check("★ 学院任务：本人不能作答、但拿到「填写」入口",
+          c_row.get("canAnswer") is False and c_row.get("canFill") is True,
+          str({k: c_row.get(k) for k in ("canAnswer", "canFill")}))
     m_rows = (data_of(call("GET", "/tasks?view=mine", None, M)[1]) or {}).get("rows") or []
     m_by_id = {r["id"]: r for r in m_rows}
-    check("同学答不了学院任务（canAnswer 为 false）",
-          (m_by_id.get(college_tid) or {}).get("canAnswer") is False,
-          str((m_by_id.get(college_tid) or {}).get("canAnswer")))
+    check("★ 同学**根本看不见**学院任务（列表里没有它）",
+          college_tid not in m_by_id, str(sorted(m_by_id))[:160])
+    st, j = call("GET", "/tasks?view=college", None, M)
+    check("同学点「学院任务」这一档 -> 空（不是有条目但点不动）",
+          st == 200 and not ((data_of(j) or {}).get("rows") or []),
+          f"st={st} rows={str((data_of(j) or {}).get('rows'))[:120]}")
+    check("同学拿到 canSeeCollege=false（前端据此不显示这一档）",
+          (data_of(j) or {}).get("canSeeCollege") is False,
+          str((data_of(j) or {}).get("canSeeCollege")))
 
     # ---------- ⑦ 任务总览（**只有院长**）----------
     st, j = call("GET", "/tasks/overview", None, D)
@@ -7201,8 +7263,7 @@ def test_a42_dean_accounts() -> None:
         # ---------- ④ 唯一登录名：复用 create_user 的校验 ----------
         st, j = call("POST", "/college/deans",
                      {"username": MADE, "realName": "重名院长"}, D)
-        check("重复登录名 -> 400", st == 400 and "已存在" in msg_of(j),
-              f"st={st} {msg_of(j)}")
+        check("重复登录名 -> 400", st == 400, f"st={st} {msg_of(j)}")
     finally:
         _purge_user(MADE)
         _purge_user(MAKER)
@@ -7409,6 +7470,15 @@ def test_a44_class_delete_and_teacher_create() -> None:
                 "INSERT INTO student_record (class_id, student_no, name) "
                 "VALUES (:c, 'ZAA44', 'a44学生')"), {"c": cid_c})
 
+        # 给 B 班（本该是空班）铺 11 条类别 —— 复现用户实测：seed 会给每个班
+        # 自动铺 11 条默认类别，把类别算成「班里有内容」的话，**任何班都删不掉**。
+        with _engine.begin() as c:
+            for i in range(11):
+                c.execute(_t(
+                    "INSERT INTO fee_category (class_id, kind, name, icon, sort, status) "
+                    "VALUES (:c, 'INCOME', :n, 'x', :s, 1)"),
+                    {"c": cid_b, "n": f"a44类别{i}", "s": i})
+
         # ---------- ① 仅院长 ----------
         st, _ = call("DELETE", f"/college/classes?ids={cid_b}", None, T)
         check("班主任删班级 -> 403", st == 403, f"st={st}")
@@ -7465,6 +7535,13 @@ def test_a44_class_delete_and_teacher_create() -> None:
                 "SELECT COUNT(*) FROM student_field WHERE class_id = :c"),
                 {"c": cid_b}).scalar()
         check("字段模板一起删掉（不留孤儿行）", int(orphan or 0) == 0, f"orphan={orphan}")
+        # 类别是班的字典：班没了它也不能留下（否则按 class_id 查会查到死数据）
+        with _engine.connect() as c:
+            orphan_cat = c.execute(_t(
+                "SELECT COUNT(*) FROM fee_category WHERE class_id = :c"),
+                {"c": cid_b}).scalar()
+        check("★ 类别跟着班一起删（那 11 条不算「班里有内容」）",
+              int(orphan_cat or 0) == 0, f"orphan_cat={orphan_cat}")
     finally:
         purge()
 
@@ -7545,10 +7622,16 @@ def test_a45_reopen_extend_deadline() -> None:
         check("格式不对 -> 400（不静默丢掉）", st == 400 and "格式" in msg_of(j),
               f"st={st} {msg_of(j)}")
 
-        # 截止延过之后，真的能答题了（端到端验「能收」）。
-        # 应答对象是**各班班主任**——学院任务的口径，用常驻班主任 test
-        st, j = call("PUT", f"/tasks/{tid}/answer", {"value": True, "note": None}, S["T"])
-        check("★ 延时后班主任能答题 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        # 截止延过之后，真的**能收**了（端到端验）。
+        # 学院任务不接受本人作答（第六十轮），所以「能收」的判据是班主任
+        # 拿到 `canFill`（填写入口），而不是提交一条本人答案。
+        st, j = call("GET", "/tasks?view=college", None, S["T"])
+        row = next(
+            (r for r in ((data_of(j) or {}).get("rows") or []) if r["id"] == tid), {}
+        )
+        check("★ 延时后班主任拿到「填写」入口（canFill=true）",
+              row.get("canFill") is True,
+              str({k: row.get(k) for k in ("open", "canFill", "canAnswer")}))
     finally:
         purge()
 

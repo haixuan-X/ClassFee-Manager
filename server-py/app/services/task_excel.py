@@ -223,11 +223,16 @@ def export_rollcall(
     return buf.getvalue(), f"{detail['title']}-{detail['className']}-点名结果.xlsx"
 
 
-def export_overview(db: Session, user: LoginUser) -> tuple[bytes, str]:
+def export_overview(db: Session, user: LoginUser, *, class_id: int | None = None) -> tuple[bytes, str]:
     """导出**任务总览**：所有任务一览 + 回收情况（仅院长可调）。
 
     和「单条任务导出」不同：这里是给院长看全局的一页纸——每条任务的
     标题、范围、发布人、开放状态、回收进度、截止、发布时间。
+
+    ## 按班级筛选（第六十轮）
+
+    传 `class_id` 时只导出**该班的班级任务**（学院任务不属于任何班，
+    整体排除），和在页面上按班级筛选看到的内容一致。
     """
     from sqlalchemy import select
 
@@ -239,6 +244,23 @@ def export_overview(db: Session, user: LoginUser) -> tuple[bytes, str]:
         ).scalars()
     )
     rows = svc._build_rows(db, user, tasks)
+
+    if class_id is not None:
+        # 只导出该班的**班级任务**——学院任务不属于任何班，整体排除
+        from ..models import ClsClass as _ClsClass
+
+        cid = int(class_id)
+        ok_ = db.scalar(
+            select(_ClsClass.id).where(_ClsClass.id == cid, _ClsClass.status == 1).limit(1)
+        )
+        if not ok_:
+            from ..errors import BizException
+
+            raise BizException.bad_request("班级不存在或已停用")
+        rows = [
+            r for r in rows
+            if int(r.get("classId") or 0) == cid and r.get("scope") != "COLLEGE"
+        ]
 
     publisher: dict[int, str] = {}
     if tasks:

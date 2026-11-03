@@ -479,7 +479,7 @@ def list_deans(db: Session) -> dict:
 
 
 def create_dean(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
-    """新增一位院长账号（第五十二轮）。
+    """新增一位院长账号。
 
     ## 为什么单独一个入口
 
@@ -487,30 +487,96 @@ def create_dean(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
     他不能参与班级账号的增删改。但「再开一个院长」是**学院级**的事，
     不能因为这两道闸门就没有入口，否则院长账号只能靠改库或部署声明新增。
 
-    ## 为什么一律建成纯院长
+    ## 「院长 + 班主任」（第六十轮）
 
-    新院长默认只管学院。若建出来就自动挂到某个班（`create_user` 对
-    兼班主任院长会写一条管理行），「他为什么能进这个班」会变成一个
-    没人记得的副作用，还可能和班主任安排纠缠。
-    需要兼班主任的，本人登录后在「个人信息 → 职务范围」切换即可
-    （第三十二轮起院长自己能改，立刻生效）。
+    请求里传 `deanOnly: false` + `classIds: [...]` → 建**兼班主任院长**：
 
-    ## 角色/班级字段不是调用方说了算
+    - `class_id` = 选中列表里的**第一个班**；
+    - 他对**每个选中的班**都按名册规则挂 `is_adviser=1`——也就是他真当那几个班的班主任；
+    - 一个班只能有一位班主任：任何选中的班已有班主任时，**整单拒绝**（一个都不建）；
+    - 他占用这几个班的班主任名额，名册上能看到他。
 
-    `role` 覆盖成 DEAN、`deanOnly` 覆盖成 True、`classIds`/`guestScopes`/
-    `studentNo` 清空：这个入口只建院长。即使请求体里塞了 `role=TEACHER`，
-    也只会建出院长——避免把「院长账号」页当成绕过等级校验的建号后门。
+    其余「纯院长」路径和以前完全一致。`role` 始终钉死 DEAN：即使请求体里
+    塞了 `role=TEACHER`，也只会建出院长——避免把「院长账号」页当成绕过
+    等级校验的建号后门。
     """
-    payload = req.model_copy(
-        update={
-            "role": DEAN_ROLE,
-            "deanOnly": True,
-            "classIds": None,
-            "guestScopes": None,
-            "studentNo": None,
-        }
-    )
-    return create_user(db, user, payload)
+    # 逻辑与校验自成一体：create_user 的默认班是操作者的班，院长不该被默认带过去，
+    # 所以这里不复用它（legacy 第五十二轮也写着「一律纯院长」，正是为此绕开它）。
+    username = (req.username or "").strip()
+    real_name = (req.realName or "").strip()
+    # 与 create_user / create_teacher 同一条默认规则：不传密码 → 123456
+    password = (req.password or "").strip() or DEFAULT_INITIAL_PASSWORD
+    if not username:
+        raise BizException.bad_request("请输入登录名")
+    if not real_name:
+        raise BizException.bad_request("请输入姓名")
+    if len(username) > 32:
+        raise BizException.bad_request("登录名最多 32 字")
+    if len(password) < 6 or len(password) > 32:
+        raise BizException.bad_request("密码需为 6-32 位")
+
+    dean_only = True if req.deanOnly is None else bool(req.deanOnly)
+
+    with db.begin():
+        targets: list[int] = []
+        if not dean_only:
+            seen: list[int] = []
+            for cid in req.classIds or []:
+                try:
+                    c = int(cid)
+                except (TypeError, ValueError):
+                    continue
+                if c not in seen:
+                    seen.append(c)
+            if not seen:
+                raise BizException.bad_request(
+                    "建「院长 + 班主任」时，至少要选一个他要带的班")
+            rows = {
+                int(c.id): c
+                for c in db.scalars(
+                    select(ClsClass).where(ClsClass.id.in_(seen))
+                ).all()
+            }
+            bad = [c for c in seen if c not in rows or rows[c].status != 1]
+            if bad:
+                raise BizException.bad_request(
+                    f"所选班级不存在或已停用（id={','.join(map(str, bad))}）")
+            conflicts = []
+            for c in seen:
+                other = _class_teacher_conflict(db, c)
+                if other is not None:
+                    conflicts.append(
+                        f"「{rows[c].class_name}」已有班主任「{other.real_name or other.username}」"
+                    )
+            if conflicts:
+                raise BizException.bad_request("；".join(conflicts))
+            targets = seen
+        # 登录名全局唯一（和 create_user / create_teacher 同一条规则）
+        if db.scalar(
+            select(func.count()).select_from(SysUser)
+            .where(SysUser.username == username)
+        ):
+            raise BizException.bad_request(f"登录名「{username}」已被占用")
+        default_class = targets[0] if targets else user.class_id
+        row = SysUser(
+            class_id=default_class,
+            username=username,
+            password=hash_password(password),
+            real_name=real_name,
+            student_no=None,
+            phone=(req.phone or None),
+            role=DEAN_ROLE,
+            guest_scopes=None,
+            dean_only=1 if dean_only else 0,
+            status=1,
+        )
+        db.add(row)
+        db.flush()
+        for cid in targets:
+            # 每个选中的班都要占班主任名额（一个班一位）——名册上看得见他
+            db.add(SysUserClass(user_id=row.id, class_id=cid, is_adviser=1))
+        db.flush()
+    return account_vo(row, managed_class_ids(db, row.id, row.role, row.class_id))
 
 
 def create_teacher(db: Session, user: LoginUser, req: TeacherCreateRequest) -> dict:
@@ -864,6 +930,7 @@ def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> d
             and req.phone is None
             and req.deanOnly is None
             and req.classIds is None
+            and req.username is None
         ):
             raise BizException.bad_request("没有需要修改的内容")
 
@@ -874,6 +941,24 @@ def update_profile(db: Session, user: LoginUser, req: ProfileUpdateRequest) -> d
             student_no=req.studentNo,
             phone=req.phone,
         )
+        # 第六十轮：本人改**登录名**。
+        # 全局唯一（和 `create_user` 同一条规则）；不能含空白（登录页输入框
+        # 无法输入空格，真带了空格的话用户自己都再也登不进来）。
+        if req.username is not None:
+            new_name = req.username.strip()
+            if not new_name:
+                raise BizException.bad_request("登录名不能为空")
+            if any(c in " \t\r\n" for c in new_name):
+                raise BizException.bad_request("登录名不能包含空格")
+            if len(new_name) > 64:
+                raise BizException.bad_request("登录名最多 64 字")
+            if new_name != (target.username or "") and db.scalar(
+                select(func.count())
+                .select_from(SysUser)
+                .where(SysUser.username == new_name, SysUser.id != target.id)
+            ):
+                raise BizException.bad_request(f"登录名「{new_name}」已被占用")
+            values["username"] = new_name
         # 第三十二轮：本人改「职务范围」（纯院长 ↔ 兼班主任）。
         #
         # 只有**院长本人**能改：别的角色这一位没有意义（`dean_only` 对他们
@@ -1374,3 +1459,97 @@ def create_accounts_from_students(db: Session, user: LoginUser) -> dict:
 
     plan["createdUsers"] = created
     return _plan_view(plan, executed=True)
+# ==================== 学院层：班主任账号管理（第六十轮） ====================
+
+def _teacher_target(db: Session, account_id: int) -> SysUser:
+    """学院层**只管班主任账号**。
+
+    院长 / 学生 / 生活委员一律当「不存在」处理——这个入口不给看、不给改、
+    不给停用，连「存在与否」都不轻易透露（语义同 404，防止被拿去探测账号）。
+    """
+    row = db.get(SysUser, account_id)
+    if row is None or row.role != "TEACHER":
+        raise BizException.bad_request("该账号不存在或不是班主任账号")
+    return row
+
+
+def update_teacher_account(
+    db: Session,
+    user: LoginUser,
+    account_id: int,
+    *,
+    real_name: str | None = None,
+    username: str | None = None,
+    phone: str | None = None,
+) -> dict:
+    """编辑班主任账号（姓名 / 登录名 / 手机号）。
+
+    - **登录名全局唯一**（和 `create_user` 同一条规则）；
+    - 本人改名请走个人信息页；这里是运营帮他改（比如真名打错了）。
+    """
+    if real_name is None and username is None and phone is None:
+        raise BizException.bad_request("没有需要修改的内容")
+    with db.begin():
+        row = _teacher_target(db, account_id)
+        values: dict = {}
+        if real_name is not None:
+            rn = real_name.strip()
+            if not rn:
+                raise BizException.bad_request("姓名不能为空")
+            if len(rn) > 32:
+                raise BizException.bad_request("姓名最多 32 字")
+            values["real_name"] = rn
+        if username is not None:
+            un = username.strip()
+            if not un:
+                raise BizException.bad_request("登录名不能为空")
+            if any(c in " \t\r\n" for c in un):
+                raise BizException.bad_request("登录名不能包含空格")
+            if len(un) > 64:
+                raise BizException.bad_request("登录名最多 64 字")
+            if un != (row.username or "") and db.scalar(
+                select(func.count()).select_from(SysUser)
+                .where(SysUser.username == un, SysUser.id != row.id)
+            ):
+                raise BizException.bad_request(f"登录名「{un}」已被占用")
+            values["username"] = un
+        if phone is not None:
+            p = phone.strip()
+            if len(p) > 20:
+                raise BizException.bad_request("手机号最多 20 位")
+            values["phone"] = p or None
+        if values:
+            db.execute(
+                update(SysUser).where(SysUser.id == row.id).values(**values)
+            )
+        db.refresh(row)
+    return account_vo(row, managed_class_ids(db, row.id, row.role, row.class_id))
+
+
+def reset_teacher_password(
+    db: Session, user: LoginUser, account_id: int, password: str | None = None
+) -> dict:
+    """重置班主任账号密码。默认 `DEFAULT_INITIAL_PASSWORD`（123456）。"""
+    with db.begin():
+        row = _teacher_target(db, account_id)
+        pwd = (password or "").strip() or DEFAULT_INITIAL_PASSWORD
+        if len(pwd) < 6 or len(pwd) > 32:
+            raise BizException.bad_request("密码需为 6-32 位")
+        row.password = hash_password(pwd)
+    return {
+        "id": row.id,
+        "username": row.username,
+        "message": f"「{row.real_name or row.username}」的密码已重置为 {pwd}",
+    }
+
+
+def set_teacher_status(
+    db: Session, user: LoginUser, account_id: int, status: int
+) -> dict:
+    """启用/停用班主任账号（status: 1=启用 0=停用）。"""
+    if status not in (0, 1):
+        raise BizException.bad_request("状态只能是 1（启用）或 0（停用）")
+    with db.begin():
+        row = _teacher_target(db, account_id)
+        row.status = status
+    return {"id": row.id, "status": status}

@@ -19,11 +19,26 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { exportTaskDetail, exportTaskOverview, fetchTaskOverview } from '@/api/tasks'
+import { fetchCollegeFields } from '@/api/college'
 import { getErrorMessage } from '@/api/request'
 import { useUserStore } from '@/stores/user'
-import type { Task, TaskOverviewPayload } from '@/types'
+import type { CollegeClassChoice, Task, TaskOverviewPayload } from '@/types'
 
 const userStore = useUserStore()
+
+/** 筛选班级（第六十轮）：只给院长，看他关心的那个班。全部班级 = null */
+const classFilter = ref<number | null>(null)
+const allClasses = ref<CollegeClassChoice[]>([])
+
+async function loadClasses() {
+  try {
+    const f = await fetchCollegeFields()
+    allClasses.value = f.classes
+  } catch {
+    // 下拉空着也不影响看全院数据，不弹错误
+    allClasses.value = []
+  }
+}
 
 /**
  * 纯院长（第三十轮）：只管学院，不参与班级事务——
@@ -41,7 +56,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    data.value = await fetchTaskOverview()
+    data.value = await fetchTaskOverview(classFilter.value)
   } catch (e) {
     data.value = null
     error.value = getErrorMessage(e, '任务统计加载失败')
@@ -100,7 +115,7 @@ const exporting = ref(false)
 async function onExportOverview() {
   exporting.value = true
   try {
-    await exportTaskOverview()
+    await exportTaskOverview(classFilter.value)
     ElMessage.success('已导出任务总览')
   } catch (e) {
     ElMessage.error(getErrorMessage(e, '导出失败'))
@@ -109,7 +124,11 @@ async function onExportOverview() {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  // 班级下拉不依赖主数据；先拿到它就能筛，但**不阻塞**主加载
+  void loadClasses()
+  await load()
+})
 </script>
 
 <template>
@@ -118,11 +137,26 @@ onMounted(load)
       <div>
         <h2>任务总览</h2>
         <p>
-          现在任务是什么状况：多少条、还开着几条、回收了多少。统计范围是全校。
+          现在任务是什么状况：多少条、还开着几条、回收了多少。统计范围可在这里按班级切换。
           <router-link v-if="!isPureDean" to="/tasks" class="link">去班级任务里填 →</router-link>
         </p>
       </div>
       <div style="display: flex; gap: 8px">
+        <el-select
+          v-model="classFilter"
+          placeholder="全部班级（全学院）"
+          clearable
+          style="width: 180px"
+          aria-label="按班级筛选"
+          @change="load"
+        >
+          <el-option
+            v-for="c in allClasses"
+            :key="c.id"
+            :label="(c.grade ? c.grade + ' · ' : '') + c.className"
+            :value="c.id"
+          />
+        </el-select>
         <el-button :loading="exporting" @click="onExportOverview">导出总览</el-button>
         <el-button @click="load">刷新</el-button>
       </div>

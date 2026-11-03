@@ -243,13 +243,37 @@ export interface StudentDashboard {
     className?: string
   }[]
   /**
-   * 学籍异动人次。**目前恒为 `null`**——库里没有异动表、没有历史快照，
-   * 画一条全零折线会被读成「本年零异动」，那是撒谎。`null` 才如实表达
-   * 「这个功能还没有数据源」。配套的 `changeSupported` 让界面能显式
-   * 说明原因，而不是画个空图。
+   * 「学籍变化」= **当前不在籍的人数**（毕业 / 入伍 / 休学 / 退学 / 其他）。
+   *
+   * 库里没有异动表，给不了时间口径的「人次」；这张卡与右边的
+   * 「学籍状态分布」**同源**（都从 `statusBreakdown` 出），所以改一次学籍状态
+   * 两边一起变 —— 用户反馈「学籍变化不能同步学籍信息」就是因为它一直空着。
+   * `null` 只在老后端或压根没数据时出现。
    */
   changeTotal: number | null
   changeSupported: boolean
+  /** 异动按档拆开（只有非零的档），界面上写成「入伍 1 · 休学 5 · 退学 1」 */
+  changeBreakdown?: { status: string; count: number }[]
+  /**
+   * 点「学籍变化」卡片弹出的名单（第六十一轮）：**当前不在籍的那些人**。
+   *
+   * 与 `changeTotal` 同一个口径——卡片上显示 8，这里就是 8 行；
+   * 按档位顺序排（毕业→入伍→休学→退学→其他），档内按班级+学号。
+   */
+  changeStudents?: {
+    id: number
+    studentNo: string
+    name: string
+    regStatus: string | null
+    regStatusCanon: string
+    grade: string | null
+    majorName: string | null
+    enrollDate: string | null
+    updatedAt: string | null
+    /** 名单里的人全都不在籍（前端拿它决定配色） */
+    registered: boolean
+    className: string
+  }[]
 }
 
 /** 月度趋势点 */
@@ -513,6 +537,13 @@ export interface CollegeTaskRow {
   canSeeDetail: boolean
   /** 和 canEdit 同义，给需要区分「改内容」与「管状态」的地方用 */
   canManage: boolean
+  /**
+   * 能不能**填**这条（学院任务专用，第六十轮）。
+   *
+   * 只有各班班主任、不是发布人、还在收答案时为 true。按钮显隐只认它，
+   * 前端不再自己拼 `scope && !canEdit && open`（那样纯院长也会看到按钮）。
+   */
+  canFill: boolean
   deadline: string | null
   createdAt: string | null
   /** 已答人数 */
@@ -782,6 +813,12 @@ export interface ProfileUpdateRequest {
    * 只有运营角色以上能改（普通同学不是班主任）。
    */
   classIds?: number[]
+  /**
+   * 登录名（第六十轮）：**自己也能改**，全局唯一、不能带空格。
+   *
+   * 改完走 `/auth/me` 刷新即可，会话不用踢下线（鉴权只认 id，不认登录名）。
+   */
+  username?: string
 }
 
 /**
@@ -1211,6 +1248,14 @@ export interface Task {
   /** 是否还在收答案（status 开关 + deadline 时间闸门，两个都过才算开） */
   open: boolean
   canAnswer: boolean
+  /**
+   * 能不能**填**这条（学院任务专用，第六十轮）。
+   *
+   * 学院任务没有「本人作答」（`canAnswer` 恒为 false），填 = 班主任打开自己班
+   * 的名册逐个学生标记。纯院长 / 发布人 / 已关闭的都是 false——按钮显隐只认
+   * 这一个标志，前端不再自己拼 `scope && open`（那样会把纯院长也放进来）。
+   */
+  canFill: boolean
   createdBy: number
   /** 是不是我发的 */
   isMine: boolean
@@ -1231,6 +1276,13 @@ export interface Task {
   classId: number
   /** 班级名（界面上要显示「谁发的」） */
   className: string
+  /**
+   * **发布人姓名**（真名）。
+   *
+   * 班级任务要显示「谁发的」——比发布人 id 更能说明问题（老师一眼认得出是谁）。
+   * 院长看全院一览时，`className` 是发布人的班，`publisherName` 是他自己的姓名。
+   */
+  publisherName: string
   /** 是否置顶：置顶的、还在开放的任务会出现在所有人仪表盘的「置顶任务」里 */
   pinned: boolean
   createdAt: string | null
@@ -1244,6 +1296,14 @@ export interface TaskListPayload {
   canPublish: boolean
   /** 我能不能发**学院任务**（只有院长，第三十二轮） */
   canPublishCollege: boolean
+  /**
+   * 我能不能**看见**学院任务（只有班主任和院长，第六十轮）。
+   *
+   * 同一套口径的两个出口：后端 `_visible_task_query` 负责不把数据发出来，
+   * 这个标志负责不显示「学院任务」这一档——两条腿都要走，
+   * 否则同学会看到一个点进去永远是空的页签。
+   */
+  canSeeCollege: boolean
   /** 这次看的是哪一块 */
   view: TaskView
 }

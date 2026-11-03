@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getErrorMessage } from '@/api/request'
 import {
+  setCollegeClassTeacher,
   createCollegeTeacher,
+  deleteCollegeAdviserAccounts,
   deleteCollegeClasses,
   downloadAdviserTemplate,
   fetchCollegeAdvisers,
   fetchCollegeTeacherCandidates,
   importCollegeAdvisers,
-  setCollegeClassTeacher,
+  updateCollegeTeacher,
+  resetCollegeTeacherPassword,
+  setCollegeTeacherStatus,
 } from '@/api/college'
 import type { CollegeAdviserList, CollegeAdviserRow } from '@/types'
 
@@ -34,15 +38,12 @@ import type { CollegeAdviserList, CollegeAdviserRow } from '@/types'
  * 「一个老师带好几个班」不受影响——那是**人**的属性；只有「一个班几个
  * 班主任」被收成了一位（用户口径：一个班不可能有两个班主任）。
  *
- * ## 两个来源都给出
+ * ## 名册只看「班主任账号」
  *
- * - 班级信息里登记的班主任**姓名**（`cls_class.head_teacher`）
- * - 该班的**班主任账号**：能登录、有手机号
- *
- * 两者可能对不上（登记了名字没建号，或建了号没填班级信息）。
- * 硬合成一个字段就会丢信息：名字对了但没有账号（没法通知），
- * 或者有账号但班级信息没填（名字是空的）。所以**两列分开摆**，
- * 缺哪个就留空，不编一个「待定」出来。
+ * 第六十二轮起撤掉了「登记班主任」那一列（`cls_class.head_teacher`，
+ * 班级信息页里手填的姓名）：它是个**纯文本名字**，不能登录、没有手机号，
+ * 摆在名册上只会让人以为「这个班有班主任了」，其实连账号都没建。
+ * 班级信息页里那个字段还在，只是不在名册上显示。
  *
  * ## 批量删除班主任账号（第五十三轮）
  *
@@ -118,14 +119,19 @@ const covered = computed(
   () => new Set(rows.value.filter((r) => r.teacherId !== null).map((r) => r.classId)).size,
 )
 
-/** 一个班都没有班主任账号/登记姓名——这是名册最该被看见的问题 */
+/**
+ * 一个班都没有班主任**账号**——这是名册最该被看见的问题。
+ *
+ * 第六十二轮起不再看 `headTeacher`（班级信息里手填的姓名）：那一列已经从
+ * 名册上撤掉了，看一个界面上不存在的字段没有意义。名册只关心「能不能登录」。
+ */
 const uncovered = computed(() => {
   const seen = new Set<string>()
   const out: CollegeAdviserRow[] = []
   for (const r of rows.value) {
     if (seen.has(String(r.classId))) continue
     seen.add(String(r.classId))
-    if (r.teacherId === null && !r.headTeacher) out.push(r)
+    if (r.teacherId === null) out.push(r)
   }
   return out
 })
@@ -340,6 +346,144 @@ async function saveArrange() {
   }
 }
 
+/* ==================== 班主任账号管理（第六十轮） ====================
+ *
+ * 班主任名册兼顾看班 + 简单运营：行尾给在岗老师一个「管理」按钮——
+ * 编辑姓名 / 登录名 / 手机号、重置密码、停用启用、删除账号。
+ *
+ * 「删除」复用已有的批量删除接口（`DELETE /college/advisers`）：它已经
+ * 处理好「有流水/缴费引用的账号跳过并给原因」，单个删只是传一个 id。
+ */
+const manageOpen = ref(false)
+const manageRow = ref<CollegeAdviserRow | null>(null)
+const manageForm = reactive({
+  id: 0,
+  username: '',
+  realName: '',
+  phone: '',
+  status: 1,
+})
+const manageSaving = ref(false)
+
+function openManage(row: CollegeAdviserRow) {
+  if (row.teacherId === null) return
+  manageRow.value = row
+  manageForm.id = row.teacherId
+  manageForm.username = row.username || ''
+  manageForm.realName = row.realName || ''
+  manageForm.phone = row.phone || ''
+  manageForm.status = row.status ?? 1
+  manageOpen.value = true
+}
+
+async function saveManage() {
+  const realName = manageForm.realName.trim()
+  const username = manageForm.username.trim()
+  const phone = manageForm.phone.trim()
+  if (!realName) {
+    ElMessage.warning('姓名不能为空')
+    return
+  }
+  if (!username) {
+    ElMessage.warning('登录名不能为空')
+    return
+  }
+  manageSaving.value = true
+  try {
+    await updateCollegeTeacher(manageForm.id, {
+      realName,
+      username,
+      phone,
+    })
+    ElMessage.success('资料已更新')
+    manageOpen.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e))
+  } finally {
+    manageSaving.value = false
+  }
+}
+
+async function resetManagedPassword() {
+  const row = manageRow.value
+  if (!row) return
+  try {
+    await ElMessageBox.confirm(
+      `将「${manageForm.realName || manageForm.username}」的密码重置为 **123456**？他下次登录就得用新密码。`,
+      '重置密码',
+      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const r = await resetCollegeTeacherPassword(manageForm.id)
+    ElMessage.success(r.message)
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e))
+  }
+}
+
+async function toggleManagedStatus() {
+  const row = manageRow.value
+  if (!row) return
+  const next = manageForm.status === 1 ? 0 : 1
+  const label = manageForm.realName || manageForm.username
+  try {
+    await ElMessageBox.confirm(
+      next === 0
+        ? `停用「${label}」吗？该账号将无法登录，已发出的任务/账目保留。`
+        : `启用「${label}」吗？`,
+      next === 0 ? '停用账号' : '启用账号',
+      {
+        type: 'warning',
+        confirmButtonText: next === 0 ? '停用' : '启用',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  try {
+    await setCollegeTeacherStatus(manageForm.id, next)
+    manageForm.status = next
+    ElMessage.success(next === 0 ? '已停用' : '已启用')
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e))
+  }
+}
+
+async function deleteManagedAccount() {
+  const id = manageForm.id
+  const label = manageForm.realName || manageForm.username
+  try {
+    await ElMessageBox.confirm(
+      `删除账号「${label}」？该班会回到「未建账号」。有流水/缴费引用的会被跳过并说明原因。`,
+      '删除账号',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const r = await deleteCollegeAdviserAccounts([id])
+    if (r.deleted > 0) ElMessage.success('账号已删除')
+    if (r.skipped.length > 0) {
+      await ElMessageBox.alert(
+        r.skipped.map((s) => `账号 #${s.userId}：${s.reason}`).join('\n'),
+        '账号没删掉',
+        { confirmButtonText: '知道了' },
+      )
+    }
+    manageOpen.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(e))
+  }
+}
+
 /* ==================== 导入班主任（方案 A） ==================== */
 const importing = ref(false)
 const templateLoading = ref(false)
@@ -459,12 +603,12 @@ onMounted(load)
               </th>
               <th scope="col">班级</th>
               <th scope="col">年级</th>
-              <th scope="col">登记班主任</th>
               <th scope="col">班主任</th>
               <th scope="col">登录名</th>
               <th scope="col">手机号</th>
               <th scope="col">账号状态</th>
               <th scope="col">最近登录</th>
+              <th scope="col">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -478,10 +622,6 @@ onMounted(load)
               </td>
               <td>{{ row.className }}</td>
               <td>{{ row.grade || '—' }}</td>
-              <td>
-                <span v-if="row.headTeacher">{{ row.headTeacher }}</span>
-                <span v-else class="muted">未登记</span>
-              </td>
               <td>
                 <span v-if="row.realName">{{ row.realName }}</span>
                 <span v-else class="muted">未建账号</span>
@@ -500,6 +640,18 @@ onMounted(load)
                 <span v-else class="muted">—</span>
               </td>
               <td class="num">{{ fmtTime(row.lastLoginAt) }}</td>
+              <td>
+                <el-button
+                  v-if="row.teacherId !== null"
+                  link
+                  type="primary"
+                  size="small"
+                  @click="openManage(row)"
+                >
+                  管理
+                </el-button>
+                <span v-else class="muted">—</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -518,7 +670,7 @@ onMounted(load)
       共 {{ classCount }} 个班级、{{ rows.filter((r) => r.teacherId !== null).length }} 位班主任，
       其中 {{ covered }} 个班有班主任账号。
       <span v-if="uncovered.length > 0">
-        <b>{{ uncovered.length }}</b> 个班级既没登记班主任姓名、也没有班主任账号
+        <b>{{ uncovered.length }}</b> 个班级还没有班主任账号
         （{{ uncovered.map((c) => c.className).join('、') }}）。
       </span>
     </p>
@@ -593,6 +745,45 @@ onMounted(load)
       <template #footer>
         <el-button @click="createOpen = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 班主任账号管理（第六十轮）：编辑资料 / 重置密码 / 停用启用 / 删除 -->
+    <el-dialog
+      v-model="manageOpen"
+      :title="`管理账号：${manageForm.realName || manageForm.username || '—'}`"
+      width="480px"
+      append-to-body
+    >
+      <p class="hint" style="margin: 0 0 14px">
+        这里改的是<strong>{{ manageForm.realName || '该' }}</strong>的登录凭据——
+        角色不变（班主任），带的班不受影响。
+      </p>
+      <el-form label-width="80px" @submit.prevent>
+        <el-form-item label="姓名" required>
+          <el-input v-model="manageForm.realName" maxlength="32" placeholder="班主任姓名" />
+        </el-form-item>
+        <el-form-item label="登录名" required>
+          <el-input v-model="manageForm.username" maxlength="32" placeholder="用于登录，全局唯一" />
+        </el-form-item>
+        <el-form-item label="手机号">
+          <el-input v-model="manageForm.phone" maxlength="20" placeholder="选填" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end">
+          <el-button @click="manageOpen = false">取消</el-button>
+          <el-button type="primary" :loading="manageSaving" @click="saveManage">保存</el-button>
+          <el-button @click="resetManagedPassword">重置密码</el-button>
+          <el-button
+            :type="manageForm.status === 1 ? 'warning' : 'success'"
+            plain
+            @click="toggleManagedStatus"
+          >
+            {{ manageForm.status === 1 ? '停用账号' : '启用账号' }}
+          </el-button>
+          <el-button type="danger" plain @click="deleteManagedAccount">删除账号</el-button>
+        </div>
       </template>
     </el-dialog>
   </div>
