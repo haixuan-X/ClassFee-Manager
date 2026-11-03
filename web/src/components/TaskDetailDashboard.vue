@@ -233,12 +233,20 @@ const filteredRows = computed<TaskDetailStudentRow[]>(() => {
     : allRows.value.filter((r) => groupKeyOf(r.value) === k)
 })
 
-/** 下面要展示的班：筛选时**没有命中学生的班不出现**（一排空表会像漏了人） */
+/**
+ * 下面要展示的班：**先套班级筛选**，再按状态筛选掉「没命中学生的班」
+ * （一排空表会像漏了人）。
+ *
+ * ⚠ 必须基于 `scopedViews` 而不是 `classViews`：上面卡片的数字走 `allRows`
+ * （= `scopedViews` 摊平），这里若用 `classViews` 就会「上面只剩一个班、
+ * 下面还是全列出来」——用户实测踩到的就是这个（选了机电一体化2601，
+ * 下面照样列云计算/大数据）。
+ */
 const visibleViews = computed<ClassView[]>(() => {
   const k = filter.value
   return k === null
-    ? classViews.value
-    : classViews.value.filter((v) => (v.byKey.get(k)?.length ?? 0) > 0)
+    ? scopedViews.value
+    : scopedViews.value.filter((v) => (v.byKey.get(k)?.length ?? 0) > 0)
 })
 
 interface GroupView {
