@@ -151,7 +151,9 @@ def payment_vo(p: FeePayment, member: SysUser | None) -> dict[str, Any]:
         "status": p.status,
         "amount": p.amount,
         "channel": p.channel,
-        "paidAt": fmt_dt(p.paid_at),
+        # 状态不是 PAID 就不该有缴费时间：老库里可能留着删除/作废后没清干净的
+        # `paid_at`，这里兜一层，界面上不会再出现「未缴费 + 有缴费时间」。
+        "paidAt": fmt_dt(p.paid_at) if p.status == "PAID" else None,
         "recordId": p.record_id,
         "remark": p.remark,
     }
@@ -180,7 +182,7 @@ def member_vo(u: SysUser, batch: FeeBatch | None, payment: FeePayment | None) ->
             vo["payStatus"] = payment.status
             vo["amount"] = payment.amount
             vo["channel"] = payment.channel
-            vo["paidAt"] = fmt_dt(payment.paid_at)
+            vo["paidAt"] = fmt_dt(payment.paid_at) if payment.status == "PAID" else None
             vo["recordId"] = payment.record_id
     return vo
 

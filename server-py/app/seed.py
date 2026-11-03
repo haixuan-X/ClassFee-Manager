@@ -20,28 +20,18 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import SessionLocal, engine
-from .models import ClsClass, FeeCategory, StudentField, SysUser, SysUserClass
+from .models import ClsClass, StudentField, SysUser, SysUserClass
 from .security import hash_password
+from .services.category_service import ensure_default_categories
 
 log = logging.getLogger("classfee")
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 
-INCOME_CATEGORIES = [
-    ("班费收取", "Money"),
-    ("义卖收入", "Sell"),
-    ("捐款", "Present"),
-    ("退款", "RefreshLeft"),
-    ("其他", "MoreFilled"),
-]
-EXPENSE_CATEGORIES = [
-    ("活动物资", "Goods"),
-    ("打印资料", "Document"),
-    ("饮用水", "Cup"),
-    ("班会布置", "House"),
-    ("交通", "Bus"),
-    ("其他", "MoreFilled"),
-]
+# 默认收支类别的**唯一出处**在 `services/category_service.py`
+# （`INCOME_CATEGORIES` / `EXPENSE_CATEGORIES` / `ensure_default_categories`）：
+# 建班的三条路径和启动补种都要用它，常量放这里会逼 service 反过来 import seed，
+# 绕成循环依赖。
 
 # 账号不再写死：空库只建「班级 + 类别」等基础数据；
 # 班主任账号由部署配置声明（CLASSFEE_TEACHER_USERNAME / CLASSFEE_TEACHER_PASSWORD），
@@ -88,7 +78,13 @@ def init_data() -> None:
     with SessionLocal() as db:
         with db.begin():
             class_id = _init_class(db, cfg)
-            _init_categories(db, class_id)
+            # 每个启用班都要有默认收支类别，**不只是**配置里的默认班：
+            # 界面新建的班以前一个类别都没有，代为登记会直接 400
+            # 「缺少可用的收入类别」。按 kind 分别幂等补齐，已有的不动。
+            for cid in db.execute(
+                select(ClsClass.id).where(ClsClass.status == 1)
+            ).scalars():
+                ensure_default_categories(db, int(cid))
             _init_teacher_account(db, cfg, class_id)
             # 第二十三轮：学生信息字段模板。**每次启动都调**（内部按 field_key 幂等），
             # 这样「班主任在界面上删掉了某个模板字段」不会被下次启动悄悄加回来，
@@ -222,46 +218,6 @@ def _init_teacher_account(db: Session, cfg: dict, class_id: int) -> None:
         username,
         role,
         "，纯院长：只管学院事务" if cfg["dean_only"] and role == "DEAN" else "",
-    )
-
-
-def _init_categories(db: Session, class_id: int) -> None:
-    count = (
-        db.scalar(
-            select(func.count())
-            .select_from(FeeCategory)
-            .where(FeeCategory.class_id == class_id)
-        )
-        or 0
-    )
-    if count > 0:
-        return
-    for sort, (name, icon) in enumerate(INCOME_CATEGORIES, start=1):
-        db.add(
-            FeeCategory(
-                class_id=class_id,
-                name=name,
-                kind="INCOME",
-                icon=icon,
-                sort=sort * 10,
-                status=1,
-            )
-        )
-    for sort, (name, icon) in enumerate(EXPENSE_CATEGORIES, start=1):
-        db.add(
-            FeeCategory(
-                class_id=class_id,
-                name=name,
-                kind="EXPENSE",
-                icon=icon,
-                sort=sort * 10,
-                status=1,
-            )
-        )
-    log.info(
-        "已初始化默认收支类别：收入 %d 个，支出 %d 个",
-        len(INCOME_CATEGORIES),
-        len(EXPENSE_CATEGORIES),
     )
 
 

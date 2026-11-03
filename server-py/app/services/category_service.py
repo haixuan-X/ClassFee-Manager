@@ -163,3 +163,83 @@ def delete_category(db: Session, user: LoginUser, category_id: int) -> None:
             .where(FeeCategory.id == existing.id)
             .values(status=0)
         )
+
+
+# ==================== 默认类别 ====================
+
+#: 默认收入类别（新班自动下发；`ensure_default_categories` 幂等补齐）
+INCOME_CATEGORIES: list[tuple[str, str]] = [
+    ("班费收取", "Money"),
+    ("义卖收入", "Sell"),
+    ("捐款", "Present"),
+    ("退款", "RefreshLeft"),
+    ("其他", "MoreFilled"),
+]
+
+#: 默认支出类别
+EXPENSE_CATEGORIES: list[tuple[str, str]] = [
+    ("活动物资", "Goods"),
+    ("打印资料", "Document"),
+    ("饮用水", "Cup"),
+    ("班会布置", "House"),
+    ("交通", "Bus"),
+    ("其他", "MoreFilled"),
+]
+
+
+def ensure_default_categories(db: Session, class_id: int) -> int:
+    """给一个班补齐**默认收支类别**，返回新增条数（幂等）。
+
+    ## 为什么按 kind 分别判空
+
+    原先的口径是「这个班**一条类别都没有**才铺」。于是只要收入类别被删光、
+    支出还剩几条，收入那边就永远是空的——代为登记直接 400
+    「缺少可用的收入类别，请先在类别字典中配置」，而用户根本不知道要先跑去
+    另一个页面补一条。
+
+    现在两个方向各判各的：哪个方向没有**启用中**的类别，就补哪个方向的默认值；
+    已经有的不碰（用户自己的增删改名必须保住）。
+
+    ## 只算启用中的
+
+    删除是软删（`status=0`），列表里已经看不见了，所以判空也只看 `status=1`——
+    否则「全删光」之后永远补不回来。
+
+    ## 谁会调它
+
+    - 启动时 `seed.init_data()`：遍历**所有启用班**（老库升级也能补上）
+    - 建班的三条路径：`college_service.create_class`、转班/编辑时自动建班、
+      `college_excel._create_class`（导入名单时自动建班）
+    """
+    added = 0
+    for kind, defaults in (
+        ("INCOME", INCOME_CATEGORIES),
+        ("EXPENSE", EXPENSE_CATEGORIES),
+    ):
+        alive = (
+            db.scalar(
+                select(func.count())
+                .select_from(FeeCategory)
+                .where(
+                    FeeCategory.class_id == class_id,
+                    FeeCategory.kind == kind,
+                    FeeCategory.status == 1,
+                )
+            )
+            or 0
+        )
+        if alive:
+            continue
+        for sort, (name, icon) in enumerate(defaults, start=1):
+            db.add(
+                FeeCategory(
+                    class_id=class_id,
+                    name=name,
+                    kind=kind,
+                    icon=icon,
+                    sort=sort * 10,
+                    status=1,
+                )
+            )
+            added += 1
+    return added

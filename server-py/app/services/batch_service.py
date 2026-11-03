@@ -268,7 +268,11 @@ def _my_vo_fields(db: Session, payment: FeePayment | None) -> dict:
     return {
         "myStatus": payment.status if payment is not None else None,
         "myAmount": payment.amount if payment is not None else None,
-        "myPaidAt": fmt_dt(payment.paid_at) if payment is not None else None,
+        "myPaidAt": (
+            fmt_dt(payment.paid_at)
+            if payment is not None and payment.status == "PAID"
+            else None
+        ),
         "myAmountDue": _remarkable_after_void(db, payment),
     }
 

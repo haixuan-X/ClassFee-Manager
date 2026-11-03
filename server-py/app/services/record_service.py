@@ -229,7 +229,11 @@ def void_record(db: Session, user: LoginUser, record_id: int) -> None:
 
         add_balance(db, record.class_id, -_delta(record))
 
-        # 批次自动流水被作废 → 同事务把缴费状态退回未缴
+        # 批次自动流水被作废 → 同事务把缴费状态退回未缴。
+        # **缴费时间必须一起清**：状态已经回到「未缴费」了，还挂着一个
+        # 缴费时间，成员缴费页就会出现「未缴费 + 有缴费时间」这种自相矛盾的行
+        # （用户报障原话：「在账目处删除缴费时，成员缴费还存在之前的缴费时间」）。
+        # `record_id` 保留：作废后要能顺着它找回那条 VOID 流水提示「重新标记」。
         if record.batch_id is not None:
             db.execute(
                 update(FeePayment)
@@ -237,7 +241,7 @@ def void_record(db: Session, user: LoginUser, record_id: int) -> None:
                     FeePayment.record_id == record.id,
                     FeePayment.status == "PAID",
                 )
-                .values(status="UNPAID")
+                .values(status="UNPAID", paid_at=None)
             )
 
 
@@ -263,12 +267,14 @@ def delete_record(db: Session, user: LoginUser, record_id: int) -> None:
         if record.status == "NORMAL":
             add_balance(db, record.class_id, -_delta(record))
 
-        # 批次流水被删 → 缴费行退回未缴并解除关联
+        # 批次流水被删 → 缴费行退回未缴、解除关联，**并且清掉缴费时间**。
+        # 少清 `paid_at` 的话，成员缴费页会显示「未缴费」却还挂着一个缴费时间
+        # （用户报障原话：「在账目处删除缴费时，成员缴费还存在之前的缴费时间」）。
         if record.batch_id is not None:
             db.execute(
                 update(FeePayment)
                 .where(FeePayment.record_id == record.id)
-                .values(status="UNPAID", record_id=None)
+                .values(status="UNPAID", record_id=None, paid_at=None)
             )
         receipt_path = record.receipt_url
 

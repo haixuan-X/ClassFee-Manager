@@ -1583,6 +1583,25 @@ def test_a14b_payable_roles():
                  {"userId": adm_id, "amount": 12.34, "channel": "CASH"}, T)
     chk("班主任代生活委员登记缴费 -> 200", st == 200, f"st={st} {msg_of(j)}")
 
+    # 删掉那笔自动流水 → 缴费行必须**连缴费时间一起**退回未缴。
+    # 只把 status 改回 UNPAID 而留着 paid_at，成员缴费页就会出现
+    # 「未缴费 + 有缴费时间」这种自相矛盾的行（用户报障原图就是这样一行）。
+    st, j = call("GET", f"/members?batchId={bid}", None, T)
+    row = next((r for r in (data_of(j) or []) if r["userId"] == adm_id), {})
+    rid = row.get("recordId")
+    chk("代登记后拿到自动流水 id", bool(rid), str(row)[:200])
+    if rid:
+        chk("登记后 paidAt 有值", bool(row.get("paidAt")), str(row)[:200])
+        st, j = call("DELETE", f"/records/{rid}", None, T)
+        chk("删掉缴费流水 -> 200", st == 200, f"st={st} {msg_of(j)}")
+        st, j = call("GET", f"/members?batchId={bid}", None, T)
+        row2 = next((r for r in (data_of(j) or []) if r["userId"] == adm_id), {})
+        chk("★ 删流水后缴费状态退回 UNPAID", row2.get("payStatus") == "UNPAID",
+            str(row2)[:200])
+        chk("★ 缴费时间一并清空（不留旧时间）", row2.get("paidAt") is None,
+            str(row2)[:200])
+        chk("★ 自动流水关联也解除", row2.get("recordId") is None, str(row2)[:200])
+
     st, j = call("DELETE", f"/batches/{bid}", None, T)
     chk("清理批次 -> 200", st == 200, f"st={st} {msg_of(j)}")
 
@@ -6307,6 +6326,26 @@ def test_a35_create_class() -> None:
         made.append(int(cid))
         check("回执 created=True", d.get("created") is True, str(d)[:160])
         check("回执报了复制了多少列", (d.get("fieldsCopied") or 0) > 0, str(d)[:160])
+
+        # ---------- 新班自动带默认收支类别 ----------
+        # 以前只给「配置里的默认班」铺类别，界面新建的班一个类别都没有：
+        # 班主任进这个班，收入/支出登记页是空的，成员缴费代登记直接 400
+        # 「缺少可用的收入类别」。
+        with _engine.connect() as c:
+            cats = dict(
+                c.execute(
+                    _t(
+                        "SELECT kind, COUNT(*) FROM fee_category "
+                        "WHERE class_id = :c AND status = 1 GROUP BY kind"
+                    ),
+                    {"c": int(cid)},
+                ).all()
+            )
+        check(
+            "★ 新班自动带默认收支类别（收入/支出都非空）",
+            int(cats.get("INCOME") or 0) > 0 and int(cats.get("EXPENSE") or 0) > 0,
+            str(cats),
+        )
 
         # ---------- ③ 新班立刻能选到 ----------
         st, j = call("GET", "/class/choices", None, D)

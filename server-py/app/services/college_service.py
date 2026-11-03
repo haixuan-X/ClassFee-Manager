@@ -55,6 +55,7 @@ from ..models import (
 from ..security import DEAN_ROLE, LoginUser
 from ..serializers import fmt_dt
 from . import student_service as svc
+from .category_service import ensure_default_categories
 from .task_service import (
     can_see_detail,
     college_recovery,
@@ -656,6 +657,8 @@ def update_student_cells(
                 )
                 db.add(target)
                 db.flush()
+                # 新班要有默认收支类别——不然进了这个班，登记页一个类别都没有
+                ensure_default_categories(db, target.id)
             if target.id != rec.class_id:
                 moved = _move_student_to_class(db, user, rec, target)
         db.flush()
@@ -922,6 +925,9 @@ def create_class(
         )
         db.add(clazz)
         db.flush()
+        # 新班要有默认收支类别（同 seed 口径）：否则这个班的登记页/代为登记
+        # 会直接报「缺少可用的收入类别」
+        ensure_default_categories(db, clazz.id)
         src = db.scalars(
             select(StudentField)
             .where(StudentField.class_id == user.class_id, StudentField.status == 1)

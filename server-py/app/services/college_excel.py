@@ -46,6 +46,7 @@ from ..models import (
 from ..security import DEAN_ROLE, LoginUser
 from . import student_excel as se
 from . import student_service as svc
+from .category_service import ensure_default_categories
 from .college_service import _active_classes, _grade_choices, _unified_columns
 
 #: 学院表里的锚点列。**学号/姓名是行的身份**，不能没有。
@@ -658,6 +659,8 @@ def _create_class(db: Session, name: str, grade: str) -> ClsClass:
     )
     db.add(c)
     db.flush()
+    # 导入名单时自动建的班也要有默认类别，否则新班的登记页是空的
+    ensure_default_categories(db, c.id)
     return c
 
 
