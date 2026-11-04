@@ -590,7 +590,6 @@ onMounted(load)
       <article class="glass-card">
         <div class="card-head">
           <h3>账号信息</h3>
-          <span class="hint">只读；要改去左边「我的资料」</span>
         </div>
 
         <dl class="detail-list" :aria-busy="loading">
