@@ -76,26 +76,6 @@
 | 院长账号 | 院长账号管理：新增纯院长 / 兼班主任院长，指派管辖班 |
 | 班级管理 | 学院视角建班、停用、批量删除、改班主任安排 |
 
-### 角色与权限
-
-| 界面名 | 标识 | 等级 | 权限 | 缴费对象 |
-|--------|------|------|------|---------|
-| 普通成员 | `MEMBER` | 0 | 只读（含自己的缴费/任务） | ✅ 交班费 |
-| 访客 | `GUEST` | 0 | 只读**受限范围**（班主任逐项指定） | ✅ |
-| 生活委员 | `ADMIN` | 1 | 运营 | ✅ 交班费 |
-| 班长 | `MONITOR` | 2 | 运营 | ✅ 交班费 |
-| 班主任 | `TEACHER` | 3 | 运营 + 本班管理 | ❌ 不参与 |
-| 院长 | `DEAN` | 4 | **系统管理员**（学院层全权） | ❌ 不参与 |
-
-- **运营权限三者一致**（班主任之下的 ADMIN/MONITOR/TEACHER 记账/作废/小票/成员管理/批次/公告同权），差别在两处：
-  - **等级护栏**：不能创建或操作比自己等级高的账号（`院长 > 班主任 > 班长 > 生活委员 > 成员`），判定一律看 `ROLE_LEVEL` 等级，不写角色名；
-  - **管辖范围**：班主任管自己的班；院长管整个学院（账号管理、班级管理、学院任务、名册）。
-- **院长分两种**：① **兼班主任院长**（院长 + 本班班主任 → 同班主任权限 + 学院权限）；② **纯院长**（`dean_only=1`，只管学院事务，班级事务一概不参与）。
-- **权限由后端强制**：`_STAFF_ROUTES` 角色路由表 + 端点级 `require_role` 双闸，
-  前端路由守卫只负责隐藏入口，**不构成安全边界**。
-- **归属权**：改 / 删 / 作废 / 关闭只能操作**自己创建**的数据。
-- 班级信息里的「班主任」是 `cls_class.head_teacher` 独立字段（填姓名），与角色无关。
-
 ---
 
 ## 快速开始
@@ -116,7 +96,7 @@ python -m venv .venv
 cd web && npm install && npm run dev
 ```
 
-打开 <http://localhost:5173>，用**部署时声明的账号**登录（见「账号体系」）。
+打开 <http://localhost:5173>，用**部署时声明的账号**登录（见「[账号与权限](docs/账号权限.md)」）。
 
 > Windows 下也可以直接双击 `start-all.bat`（同时拉起前后端）。
 
@@ -135,41 +115,19 @@ cd web && npm install && npm run dev
 
 | 日志 | 含义 |
 |------|------|
-| `未配置 CLASSFEE_TEACHER_USERNAME / PASSWORD` | 没声明账号，见「账号体系」 |
+| `未配置 CLASSFEE_TEACHER_USERNAME / PASSWORD` | 没声明账号，见「账号与权限」 |
 | `已升级 sys_user.role 枚举：新增 'MONITOR'` | 一次性枚举升级，第二次不再出现 |
 | `已补审计列：…` / `已把 N 条缴费行补进进行中的批次` | 一次性迁移/回填，第二次不再出现 |
 
 ---
 
-## 账号体系
+## 账号与权限
 
-**没有注册页，只有登录页。** 账号不写死在代码里，也**没有默认口令**。
+账号体系与权限模型见 **[`docs/账号权限.md`](docs/账号权限.md)**。最短口径：
 
-| 来源 | 账号 | 密码 | 角色 |
-|------|------|------|------|
-| **部署配置声明** | `CLASSFEE_TEACHER_USERNAME` | `CLASSFEE_TEACHER_PASSWORD` | 班主任（默认）/ 生活委员 |
-| 运营在页面创建 | 「成员管理 → 新增成员」时指定 | 运营设定 | 四档任选 |
-| 院长在学院页创建 | 「学院 → 院长账号 → 新增」 | 运营设定 | 院长 / 院长+班主任 |
-
-```bash
-cp .env.example .env        # 编辑；docker compose 会自动读取仓库根目录的 .env
-```
-
-```bash
-# 手动部署时等价的环境变量
-CLASSFEE_TEACHER_USERNAME=test              # 必填（与 PASSWORD 同时）
-CLASSFEE_TEACHER_PASSWORD=换成强口令          # 必填
-CLASSFEE_TEACHER_NAME=测试班主任              # 可选，默认同用户名
-CLASSFEE_TEACHER_ROLE=TEACHER                # 可选，ADMIN | TEACHER | DEAN
-CLASSFEE_DEAN_ONLY=0                         # 仅 ROLE=DEAN 时有意义：0=院长兼班主任（默认） 1=纯院长
-CLASSFEE_COLLEGE_NAME=智能汽车学院            # 可选，侧栏顶部显示的学院名
-CLASSFEE_JWT_SECRET=<openssl rand -hex 32>   # 令牌签名密钥，生产必填
-```
-
-- **仅首次创建**：账号已存在则跳过，**不覆盖**库里改过的密码/角色/停用状态。
-- **纯院长**（`CLASSFEE_DEAN_ONLY=1`）：只管学院，看不到班级的账目/任务/成员入口。
-- **可管理**：改资料/学号、重置密码、停用（保历史、禁登录）、删除（**仅限零引用**账号）。
-- **停用即时生效**：中间件每次请求都查 `sys_user.status`。
+- **没有注册页，只有登录页**：账号由部署方声明 `CLASSFEE_TEACHER_*` 创建（仅首次，不覆盖库里改过的东西），或在「成员管理 / 学院 → 院长账号」里创建，代码里不写死任何默认口令。
+- **权限按 `ROLE_LEVEL` 六档推导**：成员 0 < 生活委员 1 < 班长 2 < 班主任 3 < 院长 4；后端 `_STAFF_ROUTES` + 端点级 `require_role` 双闸，**判定一律看等级不写角色名**。
+- **归属权**：改 / 删 / 作废 / 关闭只能操作**自己创建**的数据；院长分兼班主任院长 / 纯院长（`CLASSFEE_DEAN_ONLY=1`）。
 
 ---
 
@@ -274,7 +232,7 @@ classfee-manager/
 ├─ web/                    前端（Vue 3 + Vite，:5173）
 │  └─ src/                 api / views（dashboard · college · records · batches · tasks ...）/ components / stores
 ├─ log/                    运行日志（backend / frontend / database，不入库）
-├─ docs/部署-Linux.md      部署指南（手动 systemd+nginx / Docker Compose）
+├─ docs/                   入库仅两份：部署指南 · 账号与权限
 ├─ docker-compose.yml                 一键部署（自带数据库容器）
 ├─ docker-compose.use-existing-db.yml 复用服务器上已有的 MySQL/MariaDB
 ├─ start-*.bat             Windows 一键启动
@@ -291,6 +249,7 @@ classfee-manager/
 |------|------|--------|
 | [`log/README.md`](log/README.md) | 运行日志：三类目录、启停、隐私底线 | 查线上问题 |
 | [`docs/部署-Linux.md`](docs/部署-Linux.md) | **部署指南**：手动（systemd + nginx）/ Docker Compose（含外部库）、验证清单、排障、日志配置 | 部署运维 |
+| [`docs/账号权限.md`](docs/账号权限.md) | **账号与权限**：角色六档与 `ROLE_LEVEL`、账号来源与特性、访客可见范围、跨班授权、权限判定代码位置 | 排权限/建号 |
 | [`design-system/classfee-manager/MASTER.md`](design-system/classfee-manager/MASTER.md) | **UI 规范**：色彩 token、间距、组件规格、响应式断点、**交付前检查清单** | 改界面样式 |
 | [`server-py/tests/api_regression.py`](server-py/tests/api_regression.py) | **1263 项契约回归**断言，改后端必跑 | 改接口 |
 | [`.env.example`](.env.example) | 全部部署变量（含中文注释） | 部署运维 |
