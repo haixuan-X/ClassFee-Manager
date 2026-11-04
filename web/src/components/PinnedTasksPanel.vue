@@ -27,7 +27,7 @@ function fmtTime(value: string | null | undefined) {
  * 「我还欠着哪几道」，而不是「有几道题」。已填的在下面单独标出来，
  * 免得填完的人以为漏看了。
  *
- * 班主任和访客拿不到 `canAnswer`（后端口径：他们不是被统计的同学），
+ * 班主任及以上拿不到 `canAnswer`（后端口径：他们不是被统计的同学），
  * 这里自然就不会出现「待填」——不另写角色判断。
  */
 const myPending = computed(() => props.tasks.filter((t) => t.canAnswer && !t.myAnswer))
@@ -51,7 +51,7 @@ const myPending = computed(() => props.tasks.filter((t) => t.canAnswer && !t.myA
           {{ t.title }}
           <!-- 只在「这条我不用答」时出现，解释右上角为什么没有「去填写」。
                标签刻意不叫「只读」——那个词会被读成「这题已关闭」，
-               这里说的其实是「你不用填」（班主任和访客都不是被统计的同学）。 -->
+               这里说的其实是「你不用填」（班主任及以上都不是被统计的同学）。 -->
           <el-tag v-if="!t.canAnswer" size="small" type="info" effect="plain">
             不需填写
           </el-tag>

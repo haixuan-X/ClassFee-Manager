@@ -4,11 +4,11 @@
 
 | 端点 | 权限 |
 |------|------|
-| GET  /api/tasks | 全员（含访客）。**只到汇总为止**，不含别人的答案 |
+| GET  /api/tasks | 全员。**只到汇总为止**，不含别人的答案 |
 | GET  /api/tasks/pinned | 全员。仪表盘面板用，形状与列表一致 |
 | POST /api/tasks | 班主任 / 班长 |
 | PUT  /api/tasks/{id} · .../close · .../reopen · .../pin · .../unpin · DELETE | **仅发布人自己** |
-| PUT  /api/tasks/{id}/answer | 全员；**班主任与访客除外**（都不是被统计的同学） |
+| PUT  /api/tasks/{id}/answer | 全员；**班主任及以上除外**（都不是被统计的同学） |
 | GET  /api/tasks/{id}/detail | **仅发布人和班主任**（唯一出现别人答案的出口） |
 | GET  /api/tasks/{id}/export | 同 detail |
 | POST /api/tasks/{id}/export | 同 detail；**按状态筛选导出**（只导屏幕勾中的那些行） |
@@ -335,7 +335,7 @@ def submit_answer(
     user: LoginUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """提交或修改**自己**的答案（一人一任务一条）。访客 403。"""
+    """提交或修改**自己**的答案（一人一任务一条）。班主任及以上 403。"""
     return ok(svc.submit_answer(db, user, task_id, req.value, req.note))
 
 

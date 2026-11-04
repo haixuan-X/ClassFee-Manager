@@ -20,7 +20,7 @@ classfee-manager/
 ├─ server-py/              后端（FastAPI，:8080）
 │  ├─ app/                 routers（HTTP 层）· services（业务/事务）· models / security / seed
 │  ├─ db/schema.sql        15 张表（启动时幂等执行）
-│  └─ tests/api_regression.py   契约回归（零依赖，1263 项）
+│  └─ tests/api_regression.py   契约回归（零依赖，1185 项）
 ├─ web/                    前端（Vue 3 + Vite + Element Plus，:5173）
 │  └─ src/                 api · views · components · stores · router
 ├─ assets/screenshots/     README 截图（演示数据）

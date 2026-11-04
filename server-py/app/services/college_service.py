@@ -676,7 +676,7 @@ def update_student_cells(
 #:
 #: 只有**学生账号**跟着走——他换班了，登录后该看到新班。
 #: 老师/班委/院长的账号是「岗位」不是「人」，不该因为一条学生记录被挪走。
-TRANSFER_USER_ROLES = frozenset({"MEMBER", "GUEST"})
+TRANSFER_USER_ROLES = frozenset({"MEMBER"})
 
 
 def transfer_student(
@@ -702,7 +702,7 @@ def transfer_student(
 
     ## 登录账号
 
-    学生账号（MEMBER/GUEST）**跟着转**：人换班了，登录后该看到新班。
+    学生账号（MEMBER）**跟着转**：人换班了，登录后该看到新班。
     老师账号不动（那是岗位，不是人）。
     """
     with db.begin():

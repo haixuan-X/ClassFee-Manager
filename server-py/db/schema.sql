@@ -22,8 +22,7 @@ CREATE TABLE IF NOT EXISTS sys_user (
   real_name     VARCHAR(32) NOT NULL,
   student_no    VARCHAR(20) NULL,
   role          ENUM('ADMIN','MEMBER','GUEST','MONITOR','TEACHER','DEAN') NOT NULL DEFAULT 'MEMBER'
-                COMMENT 'MEMBER普通成员/GUEST访客/ADMIN生活委员/MONITOR班长/TEACHER班主任/DEAN院长(系统管理员,等级最高)',
-  guest_scopes  TEXT NULL COMMENT '第二十六轮·仅访客用：可见范围 JSON 数组（DASHBOARD/RECORDS/STUDENTS/TASKS）；NULL=全部可见',
+                COMMENT 'MEMBER普通成员/ADMIN生活委员/MONITOR班长/TEACHER班主任/DEAN院长(系统管理员,等级最高)；GUEST 仅历史行兼容，代码已不再创建/识别',
   dean_only     TINYINT     NOT NULL DEFAULT 0      COMMENT '第三十轮·仅院长用：1=纯院长（只管学院，不参与班级事务）；0=兼班主任',
   phone         VARCHAR(20) NULL,
   status        TINYINT     NOT NULL DEFAULT 1      COMMENT '1启用 0停用',

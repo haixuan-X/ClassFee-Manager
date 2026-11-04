@@ -52,7 +52,7 @@ const isDean = computed(() => userStore.user?.role === 'DEAN')
 /**
  * 有没有「学号」这一项。
  *
- * 学号是**学生**的标识（缴费名单、批次排序要用）；院长 / 班主任 / 访客
+ * 学号是**学生**的标识（缴费名单、批次排序要用）；院长 / 班主任
  * 是教职工或校方，本来就没有学号，给他们摆一个输入框只会让人以为要填。
  */
 const showStudentNo = computed(() => {
@@ -284,7 +284,7 @@ async function onSubmit() {
     const updated = await updateProfile({
       realName: form.realName.trim(),
       // 沿用「空串=清空」语义（后端 None=不改）
-      // 院长 / 班主任 / 访客没有学号：干脆不传，避免写一个空值
+      // 院长 / 班主任没有学号：干脆不传，避免写一个空值
       studentNo: showStudentNo.value ? form.studentNo.trim() : undefined,
       phone: form.phone.trim(),
       // 第三十二轮：职务范围。只给院长传（别的角色传了后端会忽略）

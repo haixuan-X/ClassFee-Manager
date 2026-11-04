@@ -6,7 +6,7 @@ export interface ApiResponse<T = unknown> {
 }
 
 /** 角色 */
-export type Role = 'ADMIN' | 'MEMBER' | 'GUEST' | 'MONITOR' | 'TEACHER' | 'DEAN'
+export type Role = 'ADMIN' | 'MEMBER' | 'MONITOR' | 'TEACHER' | 'DEAN'
 
 /** 当前用户信息（后端 UserVO） */
 export interface UserInfo {
@@ -14,12 +14,6 @@ export interface UserInfo {
   username: string
   realName: string
   role: Role
-  /**
-   * 访客的可见范围（第二十六轮），非访客为 `null`。
-   * 侧栏和路由守卫都按它过滤——但它只是**入口**层面的过滤，
-   * 真正的边界在后端（`security` 中间件），手输 URL 也绕不过去。
-   */
-  guestScopes?: GuestScope[] | null
   /**
    * 是不是**纯院长**（第三十轮）。只有院长会有 true。
    *
@@ -290,7 +284,7 @@ export interface PieItem {
 }
 
 /**
- * 角色中文名：普通成员(只读) / 访客(只读·给领导看) / 生活委员 / 班长 / 班主任 / 院长
+ * 角色中文名：普通成员(只读) / 生活委员 / 班长 / 班主任 / 院长
  * （后四者为运营角色 `STAFF_ROLES`；院长是系统管理员，等级最高）。
  *
  * ⚠ 必须与后端 `security.ROLE_LEVEL` 的键**完全一致**：多一个少一个，
@@ -299,7 +293,6 @@ export interface PieItem {
 export const ROLE_TEXT: Record<Role, string> = {
   ADMIN: '生活委员',
   MEMBER: '普通成员',
-  GUEST: '访客',
   MONITOR: '班长',
   TEACHER: '班主任',
   DEAN: '院长',
@@ -332,7 +325,6 @@ export const STAFF_ROLES: Role[] = ['ADMIN', 'MONITOR', 'TEACHER', 'DEAN']
  */
 export const ROLE_LEVEL: Record<Role, number> = {
   MEMBER: 0,
-  GUEST: 0, // 访客（只读，给领导看）
   ADMIN: 1, // 生活委员
   MONITOR: 2, // 班长
   TEACHER: 3, // 班主任
@@ -344,7 +336,7 @@ export function roleLevel(role: Role | null | undefined): number {
   return role ? (ROLE_LEVEL[role] ?? 0) : 0
 }
 
-/** 「班主任及以上」= 够格管理访客 / 建访客 / 按学生建号的最低档。 */
+/** 「班主任及以上」= 按学生建号的最低档。 */
 export const TEACHER_MIN_LEVEL = ROLE_LEVEL.TEACHER
 
 /** 「院长及以上」= 管理级看板（如仪表盘的「学生情况总览」）的最低档。 */
@@ -875,32 +867,6 @@ export interface AppVersion {
 
 /* ============================ 第七轮 账号管理（老师建班） ============================ */
 
-/** 账号（后端 GET/POST /api/users 行；含停用账号） */
-/**
- * 访客的可见范围（第二十六轮）。**只有访客用得上**，其他角色一律 `null`。
- *
- * 与后端 `security.GUEST_SCOPE_KEYS` 一一对应，改一处必须同时改另一处。
- * 这四项就是访客本来就能进的全部页面；「个人信息」不在其中——
- * 他自己的账号，没什么可限制的。
- *
- * ⚠ 这里是**范围**，不是**页面**：一个范围可能盖住不止一条接口。
- * 「账本明细」除了流水和缴费，还管收费批次（`/api/batches`）——那里面有
- * 金额和截止时间，是账目信息，所以第二十六轮把它从 `_STAFF_ROUTES` 挪进来。
- */
-export type GuestScope = 'DASHBOARD' | 'RECORDS' | 'STUDENTS' | 'TASKS'
-
-/** 范围项的中文名与说明。与后端 `GUEST_SCOPE_LABELS` 保持一致。 */
-export const GUEST_SCOPE_OPTIONS: { value: GuestScope; label: string; hint: string }[] = [
-  { value: 'DASHBOARD', label: '仪表盘', hint: '班级余额、收支趋势和最新流水' },
-  {
-    value: 'RECORDS',
-    label: '账本明细',
-    hint: '全部记账流水、缴费记录，以及收费批次（要收多少钱、什么时候截止）',
-  },
-  { value: 'STUDENTS', label: '学生信息', hint: '全班学生的登记信息，可勾选导出' },
-  { value: 'TASKS', label: '班级任务', hint: '任务题目和填写情况（只有汇总，不含谁填了什么）' },
-]
-
 export interface UserAccount {
   id: number
   username: string
@@ -908,12 +874,6 @@ export interface UserAccount {
   studentNo: string | null
   phone: string | null
   role: Role
-  /**
-   * 访客能看的页面范围。非访客恒为 `null`。
-   * **不传 / 传空数组 = 全部可见**（后端 `dump_guest_scopes` 归一成 NULL），
-   * 这样第二十四轮那批访客账号不需要任何数据迁移，行为保持原样。
-   */
-  guestScopes?: GuestScope[] | null
   /** 是不是纯院长（只管学院，不参与班级事务）。非院长恒为 false。 */
   deanOnly?: boolean
   classId: number
@@ -940,14 +900,6 @@ export interface UserCreateRequest {
   phone?: string
   role?: Role
   /**
-   * 访客的可见范围（第二十六轮）。**只有 `role='GUEST'` 时有意义**，
-   * 其他角色传了会被后端忽略。
-   *
-   * 勾选框的状态就是真实权限：四项全传 = 全部可见，**传 `[]` = 一个页面都进不去**
-   * （只剩自己的「个人信息」）。不传 = 全部可见。
-   */
-  guestScopes?: GuestScope[]
-  /**
    * 是不是纯院长（第三十轮）。**只有 `role='DEAN'` 时有意义**，
    * 其他角色传了会被后端忽略。
    *
@@ -970,12 +922,6 @@ export interface UserUpdateRequest {
   phone?: string
   status?: 0 | 1
   password?: string
-  /**
-   * 访客的可见范围。第二十六轮：传了就改、**不传=不改**。
-   * 传 `[]` = 什么都看不到；四项全传 = 全部可见。
-   * 改完**立刻生效**，访客不用重新登录（后端中间件每个请求都重读这一列）。
-   */
-  guestScopes?: GuestScope[]
   /**
    * 是不是纯院长（第三十轮）。传了就改、**不传=不改**；只有院长有效。
    * 改完**立刻生效**（后端中间件每个请求都重读这一列）。
@@ -1093,8 +1039,6 @@ export interface StudentRow {
 export interface StudentPermission {
   scopes: StudentScope[]
   isTeacher: boolean
-  /** 访客（领导）：能看全部、只能看，主用途是勾选导出 */
-  isGuest?: boolean
   canViewAll: boolean
   canEditAll: boolean
   canEditOwn: boolean
@@ -1367,7 +1311,7 @@ export interface TaskOverviewPayload {
  * 仪表盘「置顶任务」面板的数据（`GET /api/tasks/pinned`）。
  *
  * 和任务列表**同一个 `Task` 类型**、同一套可见性口径（后端都走 `_build_rows`）：
- * 访客看得到置顶任务，但拿不到「我的答案」、`canAnswer` 恒为 false，
+ * 非被统计角色拿不到「我的答案」、`canAnswer` 恒为 false，
  * 明细在这里根本不存在。
  *
  * 只含**置顶且还在开放**的，最多 3 条，快到期的排前面。

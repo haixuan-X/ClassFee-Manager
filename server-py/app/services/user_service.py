@@ -34,12 +34,8 @@ from ..schemas import (
 from ..security import (
     DEAN_ROLE,
     STAFF_ROLES,
-    GUEST_MANAGER_MIN_LEVEL,
-    GUEST_ROLE,
     LoginUser,
-    dump_guest_scopes,
     hash_password,
-    parse_guest_scopes,
     require_role_higher,
     role_level,
 )
@@ -292,8 +288,6 @@ def account_vo(u: SysUser, managed_ids: list[int] | None = None) -> dict:
         "studentNo": u.student_no,
         "phone": u.phone,
         "role": u.role,
-        # 只有访客用得上；非访客一律给 null，别让前端对每个角色都判一遍
-        "guestScopes": parse_guest_scopes(u.guest_scopes) if u.role == GUEST_ROLE else None,
         # 第三十轮：只有院长用得上。1 = 纯院长（只管学院，不参与班级事务）。
         # 非院长一律给 false —— 前端据此决定侧栏里给不给「账目」「班级」两组。
         "deanOnly": u.role == DEAN_ROLE and bool(u.dean_only),
@@ -361,9 +355,6 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             raise BizException.bad_request("账号已存在")
 
         role = req.role or "MEMBER"
-        # 第二十六轮：访客的「可见范围」。只对访客有意义，其他角色一律 NULL，
-        # 免得库里躺着一堆永远不会被读的 JSON。
-        guest_scopes = dump_guest_scopes(req.guestScopes) if role == GUEST_ROLE else None
         # 第三十轮：纯院长。只对院长有意义，其他角色一律 0（库里不留死数据）。
         # 第三十三轮：新建院长**默认纯院长**（只管学院，不参与班级事务）。
         # 想「院长 + 班主任」的，自己去「个人信息 → 职务范围」里切，
@@ -379,14 +370,6 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             raise BizException.bad_request(
                 "权限不足：不能创建权限高于自己的账号"
             )
-        # 第二十四轮：访客**只由班主任及以上创建**（用户原话「访客权限由班主任创建」）。
-        # 等级校验拦不住这条——GUEST 和 MEMBER 同为 0 级，班长等级高、反而"能建"。
-        # 但访客是给领导/校方开的只读账号，属于"对外"的口子，
-        # 不该由班长随手开一个。
-        # 第二十八轮改成等级判定：院长(4) 也够格，否则会出现「院长管不了访客、
-        # 班主任却管得了」的倒挂。
-        if role == GUEST_ROLE and role_level(user.role) < GUEST_MANAGER_MIN_LEVEL:
-            raise BizException.forbidden("访客账号只能由班主任及以上创建")
         # 第五十一轮：**一个班一个班主任**。新建 role=TEACHER 会自动把他挂成
         # 「操作者当前班」的班主任（下面的 SysUserClass 行），所以当前班已有
         # 班主任就先在这里拦下——否则名册上一个班挂出两个账号，
@@ -421,7 +404,6 @@ def create_user(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             student_no=student_no,
             phone=req.phone or None,
             role=role,
-            guest_scopes=guest_scopes,
             dean_only=dean_only,
             status=1,
         )
@@ -575,7 +557,6 @@ def create_dean(db: Session, user: LoginUser, req: UserCreateRequest) -> dict:
             student_no=None,
             phone=(req.phone or None),
             role=DEAN_ROLE,
-            guest_scopes=None,
             dean_only=1 if dean_only else 0,
             status=1,
         )
@@ -653,7 +634,6 @@ def create_teacher(db: Session, user: LoginUser, req: TeacherCreateRequest) -> d
             real_name=real_name,
             phone=(req.phone or "").strip() or None,
             role="TEACHER",
-            guest_scopes=None,
             dean_only=0,
             status=1,
         )
@@ -800,7 +780,6 @@ def update_user(
             and req.phone is None
             and req.status is None
             and req.password is None
-            and req.guestScopes is None
             and req.deanOnly is None
             and req.classIds is None
         ):
@@ -824,14 +803,6 @@ def update_user(
             values["status"] = req.status
         if req.password is not None:
             values["password"] = hash_password(req.password)
-        # 第二十六轮：改访客的可见范围。要求是「创建时选、编辑时也能改」，
-        # 所以改完**立刻生效**——访客不用重新登录，中间件每个请求都会重读这一列
-        # （见 `security._account_active`）。
-        #
-        # 只对访客生效：给普通成员写一串 guest_scopes 不会起作用，
-        # 却会在库里躺一份永远读不到的死数据，所以非访客一律存 NULL。
-        if req.guestScopes is not None and target.role == GUEST_ROLE:
-            values["guest_scopes"] = dump_guest_scopes(req.guestScopes)
         # 第三十轮：改「是否纯院长」。要求是「创建时选、编辑时也能改」，
         # 改完**立刻生效**（中间件每个请求都重读这一列）。
         #

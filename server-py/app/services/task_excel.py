@@ -33,7 +33,6 @@ ROLE_TEXT = {
     "MONITOR": "班长",
     "ADMIN": "生活委员",
     "MEMBER": "普通成员",
-    "GUEST": "访客",
 }
 
 

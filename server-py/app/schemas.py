@@ -20,11 +20,8 @@ from .errors import BizException, FIELD_CONSTRAINT
 _ENUM_KIND = re.compile(r"INCOME|EXPENSE")
 _ENUM_CHANNEL = re.compile(r"CASH|WECHAT|ALIPAY|BANK|OTHER")
 _ENUM_PAY_STATUS = re.compile(r"UNPAID|PAID|REFUNDED")
-# 角色白名单。GUEST（访客，第二十四轮）：给领导/校方看的纯只读账号——
-# 能看全班学生信息、能勾选导出，但改不了任何东西、不进成员管理。
-# 注意它**不在** STAFF_ROLES 里，所以访客调任何记账/账号管理接口都是 403。
-# DEAN（院长，第二十八轮）：**系统管理员**，等级在班主任之上。
-_ENUM_ROLE = re.compile(r"ADMIN|MEMBER|GUEST|MONITOR|TEACHER|DEAN")
+# 角色白名单。DEAN（院长，第二十八轮）：**系统管理员**，等级在班主任之上。
+_ENUM_ROLE = re.compile(r"ADMIN|MEMBER|MONITOR|TEACHER|DEAN")
 # 小票相对路径（file_service.save_receipt 生成 receipts/<uuid>.<ext>，只认这一形态）
 _ENUM_RECEIPT = re.compile(r"receipts/[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -660,19 +657,11 @@ class StudentAccessRequest(_BodyModel):
 class UserCreateRequest(_BodyModel):
     """新建账号（运营建班）：username=登录名；password 缺省 123456；role 缺省 MEMBER。
 
-    role 六选一：MEMBER(普通成员，只读) / GUEST(访客，只读·给领导看) /
-    ADMIN(生活委员) / MONITOR(班长) / TEACHER(班主任) / DEAN(院长·系统管理员)，
-    后四者同为运营角色（STAFF_ROLES）。等级：MEMBER/GUEST 0 < ADMIN 1 <
+    role 五选一：MEMBER(普通成员，只读) / ADMIN(生活委员) / MONITOR(班长) /
+    TEACHER(班主任) / DEAN(院长·系统管理员)，
+    后四者同为运营角色（STAFF_ROLES）。等级：MEMBER 0 < ADMIN 1 <
     MONITOR 2 < TEACHER 3 < DEAN 4；**只能创建不高于自己的角色**。
     studentNo=学号（可与登录名不同）：留空时 MEMBER 默认回填登录名（超 20 字则留空）。
-
-    guestScopes（第二十六轮，**仅 role=GUEST 时有意义**）：访客能看的页面范围，
-    取值 DASHBOARD / RECORDS / STUDENTS / TASKS。
-
-    **不传 = 全部可见**（和第二十四轮那批访客账号的既有行为一致，升级不用迁移数据）；
-    四项全传同样归一成「全部可见」落库；**传空数组 = 一个页面都进不去**，
-    只剩自己的「个人信息」。勾选框的状态就是真实权限，不存在「都没勾但其实全开」。
-    非访客传了会被忽略并在库里存 NULL，不留死数据。
     """
 
     username: str | None = None
@@ -681,7 +670,6 @@ class UserCreateRequest(_BodyModel):
     password: str | None = None
     phone: str | None = None
     role: str | None = None
-    guestScopes: list[str] | None = None
     # 第三十轮：**仅 role=DEAN 有效**。1 = 纯院长（只管学院，不参与班级事务）。
     #
     # 第三十三轮起，**不传 = 纯院长**（新建院长默认只管学院）；
@@ -763,10 +751,6 @@ class UserUpdateRequest(_BodyModel):
 
     studentNo 语义同 phone：**空串=清空、不传=None=不改**。
 
-    guestScopes（第二十六轮，**仅访客有效**）：传了就改、不传=None=不改。
-    传空数组 = 什么都看不到（只剩自己的「个人信息」）；四项全传 = 全部可见
-    （`dump_guest_scopes` 归一成 NULL，和老账号同一个表示）。
-
     deanOnly（第三十轮，**仅院长有效**）：1 = 纯院长（只管学院，不参与班级事务），
     0 = 兼班主任。不传=None=不改；改完**立刻生效**（中间件每个请求重读这一列）。
     """
@@ -776,7 +760,6 @@ class UserUpdateRequest(_BodyModel):
     phone: str | None = None
     status: int | None = None
     password: str | None = None
-    guestScopes: list[str] | None = None
     deanOnly: bool | None = None
     # 第三十二轮：改成「这个账号能管哪些班」。不传=None=不改；
     # 传了就把关联表按它重写（当前班永远包含在内）。

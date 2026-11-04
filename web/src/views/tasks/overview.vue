@@ -210,7 +210,7 @@ onMounted(async () => {
         />
         <p class="filter-hint">
           已答 {{ data.classAnswered }} 份，应答对象共 {{ data.classBase }} 人。
-          <strong>班级任务</strong>由本班同学应答；班主任和访客不算，发布人自己也不算。
+          <strong>班级任务</strong>由本班同学应答；班主任及以上不算，发布人自己也不算。
         </p>
       </div>
 

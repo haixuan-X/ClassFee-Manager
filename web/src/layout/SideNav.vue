@@ -4,11 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { fetchMe } from '@/api/auth'
 import { fetchVersion } from '@/api/meta'
 import { useUserStore } from '@/stores/user'
-import type { GuestScope, Role } from '@/types'
-import { GUEST_SCOPE_OPTIONS, STAFF_ROLES } from '@/types'
-
-/** 四项全开。后端把库里的 NULL 展开成这个，前端拿不到 scope 时也用它兜底。 */
-const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
+import type { Role } from '@/types'
+import { STAFF_ROLES } from '@/types'
 
 /** `v1.2.0`。拉不到就空串，模板不渲染——宁可少一行，不要挂个假版本号。 */
 const versionLabel = ref('')
@@ -133,63 +130,11 @@ const userStore = useUserStore()
 const STAFF = STAFF_ROLES
 
 /**
- * 访客能看到哪几个页面（用户口径：总览、账目、学生信息、我的，就这些；
- * 第二十五轮加了班级任务）。
- *
- * 用**路径**而不是路由 name，和这里其余 items 的 `index` 同一口径。
- * ⚠ 必须与 `router/index.ts` 的 `GUEST_ALLOWED` 保持一致，两处各写一份必然漂移。
- *
- * 这张表漏一项的后果：访客**侧栏里看不到入口但手输 URL 能进去**（路由守卫放行）
- * —— 是个半通不通的页面。所以改任何一边必须同时改另一边。
- */
-/**
- * 访客能看到哪几个页面 —— **第二十六轮起按账号逐个定**，不再是写死的一张表。
- *
- * 用**路径**而不是路由 name，和这里其余 items 的 `index` 同一口径。
- * ⚠ 这张 scope→路径 映射必须与 `router/index.ts` 的 `GUEST_PAGE_SCOPE` 保持一致，
- * 两处各写一份必然漂移——漏掉的后果是「侧栏有入口但路由守卫拦掉」或反过来。
- *
- * 「个人信息」不在表里：访客自己的账号，没什么可限制的，永远可进。
- *
- * 收费批次（`/batches`）也不在表里——**即使访客勾了「账本明细」也不给入口**，
- * 因为那是记账的人用的页面。侧栏不给，后端却仍然放行（批次信息归 RECORDS 管，
- * 见 `security.required_guest_scope`），两边口径不同是有意的：批次那套接口本来
- * 就该跟着账目权限走，界面却不给它入口。真要收紧应该改后端，不是往这张表里加。
- */
-const GUEST_SCOPE_OF_PATH: Record<string, GuestScope> = {
-  '/dashboard': 'DASHBOARD',
-  '/records': 'RECORDS',
-  '/student-info': 'STUDENTS',
-  '/tasks': 'TASKS',
-  // 任务总览（第三十二轮）：统计的就是任务，和「班级任务」同源，
-  // 所以跟着 TASKS 范围走（路由守卫那份表里也是同一个口径）。
-  '/tasks/overview': 'TASKS',
-}
-
-/**
- * 访客（GUEST，第二十四轮）是**纯只读**，给领导/校方看情况用的。
- *
- * 用户口径：「能看见总览、账目、学生信息、还有我的，就这些」。
- * 这里**不需要为它写任何配置**——下面每个受限入口的 `roles` 白名单里本来就没有
- * GUEST，所以它天然只剩：仪表盘 / 账本明细 / 学生信息 / 班级任务 / 个人信息。
- *
- * 刻意不给它的、以及为什么：
- * - 收入登记 / 支出登记是**写表单**，给了就是个提交必报错的死页面
- * - 我的缴费 / 成员缴费 / 收费批次 / 成员管理 里全是别人的姓名学号和账号
- * - 班级信息 用户没提，不给
- *
- * 后端同样兜底：访客不在 `STAFF_ROLES`，所有记账/账号管理接口一律 403。
- * 路由守卫另有一张访客白名单（`router/index.ts` 的 `GUEST_ALLOWED`）。
- */
-
-/**
- * 「我的缴费」可见角色 = 全部角色减去班主任和访客。
+ * 「我的缴费」可见角色 = 全部角色减去班主任。
  *
  * 与后端 `batch_service._class_members` 同口径：缴费名单只列 MEMBER，运营角色
  * 不会被生成缴费行，也就不存在「我交没交」。班主任是 .env 声明的老师账号、不是学生，
  * 给他一个永远显示「你不属于缴费对象」的死胡同页面毫无意义（第二十轮移除）。
- *
- * 访客同理，而且更明确：领导不是本班学生，压根不该出现在缴费名单里。
  */
 const PAYABLE: Role[] = ['ADMIN', 'MONITOR', 'MEMBER']
 
@@ -278,10 +223,9 @@ const groups: NavGroup[] = [
     items: [
       // 学生信息（第二十三轮）：**全员可见**——默认只显示自己那一行，要看/改别人的
       // 走页面内的申请流程。路由不设 roles，拦在路由层会让同学连自己的信息都看不到。
-      // 访客例外：他能看**全部**（服务端 scope 决定的），但一行都改不了。
       { index: '/student-info', label: '学生信息', icon: 'Postcard' },
       // 班级任务（第二十五轮）：**本班**的任务，能发布、能答题。
-      // 全员可读（填答案是全员动作），访客也能看但只能看汇总。
+      // 全员可读（填答案是全员动作）。
       // 发布按钮在页面内按 `canPublish` 显示，这里不设 roles —— 和学生信息同理，
       // 拦在侧栏会让同学连题都看不到。真正的闸门在 task_service。
       //
@@ -313,28 +257,10 @@ const groups: NavGroup[] = [
 
 /**
  * 按角色过滤入口：用户信息未拉到时默认隐藏受限入口（角色不符 = 回仪表盘，服务端角色表兜底）。
- *
- * 访客走的是**独立判断**而不是 `item.roles`：学生信息、班级任务、班级信息这类
- * 「全员可读」的入口本来就没有 roles 限制，光靠 `roles` 拦不住它们；
- * 访客能看哪几项是**班主任给这个账号单独勾的**（第二十六轮）。
- *
- * 这里是**入口层面**的过滤，不是安全边界——真正的边界在后端中间件
- * （`security.required_guest_scope`），手输 URL 也绕不过去。
  */
 function canSee(item: NavItem): boolean {
   if (item.disabled) return true
   if (!userStore.user) return false
-  if (userStore.user.role === 'GUEST') {
-    const need = GUEST_SCOPE_OF_PATH[item.index]
-    // ⚠ **默认必须是不给**。这张表是「受限页面 → 范围」的映射，
-    // 没命中的页面（收入登记、成员管理、班级信息…）一律对访客隐藏，
-    // 只有「个人信息」显式放行——那是访客自己的账号，没什么可限制的。
-    //
-    // 这里翻过一次车：写成「没命中 = 不受限 = 放行」之后，访客侧栏立刻冒出
-    // 收入登记、成员管理，而他真正该看的仪表盘反被限掉了。**方向反了就全错。**
-    if (need === undefined) return item.index === '/profile'
-    return (userStore.user.guestScopes ?? ALL_GUEST_SCOPES).includes(need)
-  }
   if (!item.roles) return true
   return item.roles.includes(userStore.user.role)
 }

@@ -90,19 +90,6 @@ def _roles_at_least(role_name: str) -> frozenset[str]:
 FIELD_ADD_ROLES = _roles_at_least("MONITOR")   # 班长 + 班主任 + 院长
 APPROVER_ROLES = _roles_at_least("TEACHER")    # 班主任 + 院长
 
-# 访客（第二十四轮）：**纯只读**。
-#
-# 定位是给领导/校方看情况的：能看全班学生信息、能勾选导出，但一行都改不了。
-# 与普通成员（MEMBER）的区别在两处，都刻意做得很窄：
-#   1. 能看**所有**学生的信息——MEMBER 默认只看得到自己那一行，对领导毫无意义
-#   2. 不能改、不能加字段、不能审批、不能进成员管理
-#
-# 刻意**不放进** APPROVER_ROLES / FIELD_ADD_ROLES：那是「班长及以上」的特权，
-# 访客等级为 0，永远进不去。
-GUEST_ROLE = "GUEST"
-#: 访客可见哪些 scope。只给「看全部」，不给任何编辑权。
-GUEST_SCOPES = frozenset({SCOPE_VIEW_ALL})
-
 _KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
 #: 锚点列的列标识。这两列不在字段表里，是后端拼在最前面的。
@@ -160,11 +147,7 @@ def visibility(db: Session, user: LoginUser) -> dict:
     返回体是给前端用的**权限快照**，前端据此决定锁图标、按钮显隐——
     但真正的闸门在 `_assert_can_*` 里，前端只是体验。
     """
-    is_guest = user.role == GUEST_ROLE
-    # 访客的可见范围是**角色内建的**，不查 student_grant：
-    # 领导账号不该出现在「授权清单」里被审批流程管着，那会让班主任
-    # 看到一堆莫名其妙的授权记录。
-    scopes = GUEST_SCOPES if is_guest else granted_scopes(db, user.class_id, user.id)
+    scopes = granted_scopes(db, user.class_id, user.id)
     is_teacher = user.role in APPROVER_ROLES
     mine = _my_record(db, user.class_id, user)
     can_view_all = is_teacher or SCOPE_VIEW_ALL in scopes or SCOPE_EDIT_ALL in scopes
@@ -177,7 +160,6 @@ def visibility(db: Session, user: LoginUser) -> dict:
     return {
         "scopes": sorted(scopes),
         "isTeacher": is_teacher,
-        "isGuest": is_guest,
         "canViewAll": can_view_all,
         "canEditAll": can_edit_all,
         "canEditOwn": can_edit_own,
@@ -838,7 +820,7 @@ def dashboard_stats(db: Session, user: LoginUser, *, months: int = DEFAULT_TREND
 
     走 `_visible_record_ids`，而不是「无条件 COUNT 全班」。普通同学默认只看得到
     自己那一行——仪表盘上给他显示「全班 68 人」是**越权**：人数本身也是信息，
-    能据此推知班里有多少人、还差几个。访客有独立范围，同理。
+    能据此推知班里有多少人、还差几个。
 
     所以 `canViewAll=false` 时返回的是**他自己那一行**的统计（通常 studentTotal=1），
     界面必须把这一点说出来，不能让「1 人」看起来像「班里只有 1 个人」。
@@ -1348,13 +1330,6 @@ def create_request(db: Session, user: LoginUser, scope: str, reason: str | None)
         raise BizException.bad_request("申请类型不合法")
     if user.role in APPROVER_ROLES:
         raise BizException.bad_request("班主任本来就拥有全部权限，无需申请")
-    if user.role == GUEST_ROLE:
-        # 访客是**角色内建**的只读权限，不走 `student_grant`。
-        # 放他进申请流程会出现很怪的状态：他申请到 EDIT_ALL，班主任批了，
-        # `granted_scopes` 里有了这条授权——可 `visibility` 对 GUEST 直接返回
-        # 内建的 `GUEST_SCOPES`、根本不查这张表，授权批了个寂寞。
-        # 所以这里直接拒绝，别让班主任做一次没有效果的审批。
-        raise BizException.forbidden("访客是只读账号，不能申请编辑权限")
     with db.begin():
         if scope in granted_scopes(db, user.class_id, user.id):
             raise BizException.bad_request("你已拥有该权限，无需重复申请")

@@ -13,7 +13,6 @@
 | 题型 | 是/否(+文字说明) / 单选 / 多选 / 日期 |
 | 学生能看到别人的答案吗 | **只能看汇总，不含具体是谁** |
 | 谁能发布 | 班主任 + 班长 |
-| 访客能看吗 | 能，只读 |
 | 班主任要不要自己填 | **不要**——「统计班主任干什么」 |
 
 ## 可见性（本模块的核心）
@@ -25,21 +24,16 @@
 | 生活委员 | ✅ | ✅ | ❌ | ✅ |
 | 班长 | ✅ | ✅（除非他是这条的发布人） | ❌ | ✅ |
 | 普通成员 | ✅ | ✅ | ❌ | ✅ |
-| 访客 | ✅ | **❌** | ❌ | ✅ |
 
 「明细」这个口子必须**只**开给发布人和班主任，理由很直接：题目可以是
 「你家里有没有人在做兼职」「你最近身体好吗」——汇总（多少人是/多少否）用来
 催人交，「张伟没返校」这类具体到人的答案不该出现在非发布人的页面上。
 
-访客能看的是**汇总**，不是明细：领导要看的是「返校率怎么样」，
-不是「谁没返校」。这条口径也决定了访客**不能**答题（他是校方，不是被统计的人）。
-
 ## 应答对象
 
-**全部启用账号，减去班主任和访客（`NON_ANSWER_ROLES`），再减去发布人自己。**
+**全部启用账号，减去班主任及以上（`NON_ANSWER_ROLES`），再减去发布人自己。**
 
 - 排除班主任：他是老师，发题、催交、看明细都行，但**自己不填、也不算进分母**。
-- 排除访客：校方人员，是看情况的人，不是被统计的同学。
 - 排除发布人：你出的题你自己不算（班长是同学，出的题照样不算自己的分）。
 
 后两条必须和 `can_answer` 同步，否则会出现「进了分母却永远交不上」的人，
@@ -72,11 +66,8 @@ def _roles_at_least(role_name: str) -> frozenset[str]:
 # 静默降权（院长发不了题），这类问题没有报错、只能靠人撞见。
 PUBLISH_ROLES = _roles_at_least("MONITOR")   # 班长 + 班主任 + 院长
 
-# 访客角色名。刻意用常量而不是到处写字面量：它是「应答对象」这条规则的
+# 班主任角色名。刻意用常量而不是到处写字面量：它是「应答对象」这条规则的
 # 排除条件之一，写错了两边就不配套（见 is_answer_target）。
-GUEST_ROLE = "GUEST"
-
-# 班主任角色名。同上——它也是「应答对象」的排除条件。
 TEACHER_ROLE = "TEACHER"
 
 # 院长角色名（第三十二轮）：**学院任务**只有院长能发。
@@ -84,14 +75,13 @@ DEAN_ROLE = "DEAN"
 
 # **不被统计的角色**。
 #
-# - 班主任及以上（含院长）：老师，不是被点名的同学。他们发题、催交、看明细，
-#   但自己不填。（用户原话「统计班主任干什么」。）注意这条和「排除发布人」
-#   是**两回事**：班长发题时班主任不在应答名单里，靠的就是这里，不是靠 creator_id。
-# - 访客：校方/领导，是看的人不是被统计的人。
+# 班主任及以上（含院长）：老师，不是被点名的同学。他们发题、催交、看明细，
+# 但自己不填。（用户原话「统计班主任干什么」。）注意这条和「排除发布人」
+# 是**两回事**：班长发题时班主任不在应答名单里，靠的就是这里，不是靠 creator_id。
 #
 # 生活委员和班长**是**同学（他们就是班委），所以要答、能被统计。
 # 院长与班主任同理——他是校方的人，不是被点名的同学。
-NON_ANSWER_ROLES = _roles_at_least("TEACHER") | {GUEST_ROLE}
+NON_ANSWER_ROLES = _roles_at_least("TEACHER")
 
 # 四种题型。刻意不设 TEXT：单问题 + 有结构的选项，够覆盖点名/统计，
 # 开放式文字题反而会让「回收率」这种统计失去意义（用户没选它）。
@@ -155,13 +145,10 @@ def is_college_answer_target(u: SysUser) -> bool:
 
     - **班主任及以上**：每个班有一份答案，这就是「各班交上来」的意思。
       纯院长（dean_only=1）不参与班级事务 → 不算应答对象。
-    - **访客**：校方的人，是看情况的不是交情况的。
     - **普通成员 / 生活委员 / 班长**：学院任务问的是**班**的情况，答的人
       是班主任；让每个同学都答一遍，等于让班主任收全班同学的答案再交上来，
       那正是「班级任务」干的事。
     """
-    if u.role == GUEST_ROLE:
-        return False
     if u.role == DEAN_ROLE and u.dean_only:
         return False
     return u.role in _roles_at_least(TEACHER_ROLE)
@@ -172,12 +159,12 @@ def is_answer_target(u: SysUser, creator_id: int, scope: str = SCOPE_CLASS) -> b
 
     **按任务类型分流**（第三十二轮）：
 
-    - 班级任务：应答对象是**本班同学**（排除班主任及以上、访客、发布人）。
+    - 班级任务：应答对象是**本班同学**（排除班主任及以上、发布人）。
     - 学院任务：应答对象是**各班班主任**（一个人代表一个班）。
 
     班级任务的两个排除条件，缺一不可：
 
-    1. u.role in NON_ANSWER_ROLES（班主任 / 访客）——他们不是被点名的同学。
+    1. u.role in NON_ANSWER_ROLES（班主任及以上）——他们不是被点名的同学。
        这条**不能**用 creator_id 顶替：班主任自己发的题靠 creator_id 已经排除了，
        但**班长发的题**班主任既不是发布人、也不该被统计，只靠 creator_id
        他就会混进分母和未填名单。
@@ -260,7 +247,7 @@ def can_answer(task: ClsTask, user: LoginUser) -> bool:
         # 学院任务：只能走点名页逐个学生填，本人没有「答案」这回事
         return False
     if user.role in NON_ANSWER_ROLES:
-        return False  # 班主任发题催交，访客看情况——都不是被统计的同学
+        return False  # 班主任发题催交——不是被统计的同学
     if task.created_by == user.id:
         return False  # 你出的题你自己不算（班长是同学，但出的题也不答自己的）
     if task.status != 1:
@@ -771,8 +758,8 @@ def pinned_tasks(db: Session, user: LoginUser, limit: int = PINNED_LIMIT) -> lis
     2. **快到期的排前面**。置顶位是有限的（`limit`），同一个截止时间的东西
        先到先处理才对；不限时的排最后。
 
-    可见性口径与任务列表**完全一致**（走同一个 `_build_rows`）：访客看得到但
-    拿不到「我的答案」、`canAnswer` 为 false；明细在这里根本不存在。
+    可见性口径与任务列表**完全一致**（走同一个 `_build_rows`）：
+    非被统计角色拿不到「我的答案」、`canAnswer` 为 false；明细在这里根本不存在。
     """
     if is_pure_dean(user):
         cond = (ClsTask.scope == SCOPE_COLLEGE) & (ClsTask.pinned == 1)
@@ -987,7 +974,8 @@ def get_detail(db: Session, user: LoginUser, task_id: int) -> dict:
 
     rows, answered, with_note = [], 0, 0
     for u in everyone:
-        # 发布人自己不答；访客永远交不上，列出来只会让「未填」永远挂着一个人
+        # 发布人自己不答；班主任及以上不是被统计的同学，
+        # 列出来只会让「未填」永远挂着一个人
         if not is_answer_target(u, task.created_by, task.scope):
             continue
         a = answers.get(u.id)
@@ -1368,7 +1356,7 @@ def submit_answer(
             )
         elif user.role in NON_ANSWER_ROLES:
             raise BizException.forbidden(
-                "班主任和访客不在被统计的同学名单里，只能发题和查看，不能填写"
+                "班主任及以上不在被统计的同学名单里，只能发题和查看，不能填写"
             )
         if task.created_by == user.id:
             raise BizException.forbidden("发布人可以查看答题情况，不用填自己的题")

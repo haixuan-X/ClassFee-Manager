@@ -506,7 +506,6 @@ def import_advisers(db: Session, user: LoginUser, content: bytes) -> dict:
                     student_no=None,
                     phone=phone or None,
                     role="TEACHER",
-                    guest_scopes=None,
                     dean_only=0,
                     status=1,
                 )

@@ -1,11 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { fetchMe } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
-import type { GuestScope } from '@/types'
-import { GUEST_SCOPE_OPTIONS, STAFF_ROLES } from '@/types'
-
-/** 四项全开。后端把库里的 NULL 展开成这个；前端拿不到 scope 时也用它兜底。 */
-const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
+import { STAFF_ROLES } from '@/types'
 
 /**
  * 路由表：M2 起接入记账页面（账本明细 / 收入登记 / 支出登记），
@@ -17,40 +13,6 @@ const ALL_GUEST_SCOPES: GuestScope[] = GUEST_SCOPE_OPTIONS.map((o) => o.value)
  * 的页面（学生信息、班级任务、班级信息）不设 roles——写操作由后端 service 逐条判，
  * 页面内再按角色隐藏按钮。拦在路由层会造成「同学连题都看不到」。
  */
-
-/**
- * 访客（GUEST，第二十四轮）能进的页面**白名单**。
- *
- * 用户口径：「能看见总览、账目、学生信息、还有我的，就这些」，
- * 第二十五轮加了班级任务（领导要看「返校率怎么样」，但看不到「谁没返校」）。
- *
- * 刻意用白名单而不是逐页 `roles` 排除：往反了写的话，以后新加一个页面
- * 忘了加 `roles`，访客就能进——白名单的默认方向是「关」，漏掉的是新页面，
- * 代价是访客少看一个页面（可发现、可补）；反向的漏是静默放行（不可发现）。
- *
- * 后端同样兜底：访客不在 `STAFF_ROLES`，所有记账/账号管理接口一律 403；
- * 访客答题由 `task_service.can_answer` 拦掉。任务这里放行是**只读**的：
- * 后端对非发布人一律只返回汇总，明细端点 403。
- */
-/**
- * 访客可见范围 -> 路由 name（第二十六轮）。
- *
- * ⚠ 必须与 `layout/SideNav.vue` 的 `GUEST_SCOPE_OF_PATH` 保持一致，
- * 两处各写一份必然漂移。漏一项的后果是「侧栏有入口但这里拦掉」或反过来。
- *
- * 不在这张表里的路由（`login`、`profile`）对访客永远放行——
- * 个人信息是他自己的账号，没什么可限制的。
- *
- * 这只是**界面层**的第一道门。后端 `security` 中间件同样按访客范围拦接口，
- * 手输 URL 或直接调接口都绕不过去——前端这套的作用是「不给一个点进去就报错的入口」。
- */
-const GUEST_PAGE_SCOPE: Record<string, GuestScope> = {
-  dashboard: 'DASHBOARD',
-  records: 'RECORDS',
-  'student-info': 'STUDENTS',
-  tasks: 'TASKS',
-  'tasks-overview': 'TASKS',
-}
 
 /**
  * 纯院长（第三十轮）能进的页面。
@@ -149,7 +111,7 @@ const routes: RouteRecordRaw[] = [
       },
       {
         // 班级任务（第二十五轮）：发出去还要回收答案，所以三个"看"分得很开——
-        // 任务列表全员可读（但只到汇总）、明细只有发布人和班主任、答题访客被拦。
+        // 任务列表全员可读（但只到汇总）、明细只有发布人和班主任、答题按角色在后端拦。
         // 路由不设 roles：同学要能答题，拦在路由层会连题都看不到。
         path: 'tasks',
         name: 'tasks',
@@ -317,30 +279,6 @@ router.beforeEach(async (to) => {
   if (userStore.user?.role === 'DEAN' && userStore.user.deanOnly === true) {
     if (!COLLEGE_FREE_PATHS.has(String(to.name ?? ''))) {
       return { path: '/dashboard' }
-    }
-  }
-  // 访客范围（第二十六轮）：meta.roles 拦不住「不设 roles 的全员可读页」
-  // （学生信息、班级任务、班级信息），所以对 GUEST 按**他自己账号的范围**判断。
-  if (userStore.user?.role === 'GUEST') {
-    const name = String(to.name ?? '')
-    const need = GUEST_PAGE_SCOPE[name]
-    // ⚠ **默认必须是不给**，与 `SideNav.vue` 同一条规则、同一个方向。
-    // 两处都翻过一次车：写成「没命中 = 放行」之后，访客能进收入登记、成员管理，
-    // 而真正该看、也确实勾了的仪表盘反被限掉——白名单方向反了就是这种结果。
-    // 只有 `profile` 显式放行（访客自己的账号，没什么可限制的）。
-    const scopes = userStore.user.guestScopes ?? ALL_GUEST_SCOPES
-    const allowed = need === undefined ? name === 'profile' : scopes.includes(need)
-
-    if (!allowed) {
-      // ⚠ 也不能一律弹 /dashboard：访客可能恰恰没勾仪表盘，
-      // 那会把他弹进一个自己同样进不去的页面，在守卫里反复弹、看起来像卡死。
-      // 弹到他**第一个有权进的**页面（顺序 = GUEST_PAGE_SCOPE 的定义序）。
-      const home = (Object.keys(GUEST_PAGE_SCOPE) as string[]).find((n) =>
-        scopes.includes(GUEST_PAGE_SCOPE[n]),
-      )
-      // 四个路由名和路径本来就一一相同（dashboard/records/student-info/tasks），
-      // 直接拼路径即可。一个范围都没勾时兜底到个人信息——那个永远开着。
-      return { path: home ? `/${home}` : '/profile' }
     }
   }
 

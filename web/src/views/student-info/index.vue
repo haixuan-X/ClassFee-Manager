@@ -770,7 +770,7 @@ async function removeColumn(col: StudentColumn) {
 /**
  * 勾选行 id。
  *
- * 访客（领导）的主要用途就是「勾几个人、把他们的信息导出来看」，
+ * 勾选导出的用途是「勾几个人、把他们的信息导出来看」，
  * 之前只能整表导出，40 多列 50 个人全倒出来，没法挑。
  */
 const selectedIds = ref<number[]>([])
@@ -1168,11 +1168,6 @@ const NEEDED: { scope: StudentScope; label: string; hint: string }[] = [
 
 const needApply = computed(() => {
   if (!perm.value) return []
-  // 访客直接返回空：他不是班上的人，「申请修改自己的信息 / 申请编辑全班」
-  // 对他不成立。而且访客的权限是**角色内建**的（GUEST_SCOPES，只读），
-  // 压根不走申请/授权那张表——后端 `create_request` 对他是 403，
-  // 页面摆这个按钮等于「放一个点下去必然报错的东西」。
-  if (perm.value.isGuest) return []
   const have = new Set(perm.value.scopes)
   return NEEDED.filter((n) => !have.has(n.scope))
 })
@@ -1323,10 +1318,7 @@ const accNothingToDo = computed(() => {
       <div>
         <h2>学生信息</h2>
         <p class="sub">
-          <template v-if="perm?.isGuest">
-            本班共 {{ rows.length }} 人 · 只读，勾选后可导出
-          </template>
-          <template v-else-if="perm?.canViewAll">
+          <template v-if="perm?.canViewAll">
             <strong>本班</strong>共 {{ rows.length }} 人 ·
             <template v-if="perm?.canEditAll">点任意格子即可修改，回车保存</template>
             <template v-else>当前只读</template>
@@ -1642,11 +1634,6 @@ const accNothingToDo = computed(() => {
       <template v-if="canAddField" class="foot-tip">
         · 点列名可改名，点类型小标签可改类型；鼠标移到列名上会出现 ＋ 和 ✕，
         ＋ 在这一列前面插入新字段（想在末尾加就点最后一列的），✕ 停用该字段
-      </template>
-      <template v-else-if="perm?.isGuest">
-        <!-- 访客只看不改，也没有申请渠道（他的只读权限是角色内建的），
-             说「找班主任申请」是骗他 -->
-        访客只可查看，不可修改
       </template>
       <template v-else>当前为只读，如需修改请向班主任申请</template>
     </p>

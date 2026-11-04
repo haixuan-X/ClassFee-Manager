@@ -237,6 +237,9 @@ def migrate_role_enum() -> None:
     那样老库上会出现枚举值顺序不稳定的问题。
     """
     wanted = ("ADMIN", "MEMBER", "GUEST", "MONITOR", "TEACHER", "DEAN")
+    # 注：GUEST（访客，第二十四轮～第六十六轮）已整体下线，行为代码全部删除；
+    # 这里**保留**枚举值只是兜底——万一某个老库里还躺着 role='GUEST' 的行，
+    # 收紧枚举会让该行变成非法值（DataError）。代码不再创建、不再识别这个角色。
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         column_type = conn.execute(
             text(
@@ -342,11 +345,6 @@ def add_audit_columns() -> None:
         # 和上面几列同理由：逐列查 INFORMATION_SCHEMA，缺了才 ALTER，幂等。
         ("cls_task", "pinned", "TINYINT(1) NOT NULL DEFAULT 0 "
                                "COMMENT '置顶：会出现在所有人仪表盘的「置顶任务」里'"),
-        # 第二十六轮：`sys_user` 建于第一轮，当时没有「访客可见范围」这个概念
-        # （那是二十多轮之后才加的），所以老库的 sys_user 没这一列。
-        # NULL = 全部可见，正好等于这批账号升级前后的行为，不用改任何存量值。
-        ("sys_user", "guest_scopes", "TEXT NULL "
-                                     "COMMENT '仅访客用：可见范围 JSON 数组；NULL=全部'"),
         # 第三十轮：`sys_user.dean_only` —— 1 = 纯院长（只管学院，不参与班级事务）。
         # DEFAULT 0 = 兼班主任，与第二十八轮的行为完全一致，存量账号一行都不用改。
         ("sys_user", "dean_only", "TINYINT(1) NOT NULL DEFAULT 0 "
@@ -392,6 +390,24 @@ def add_audit_columns() -> None:
         log.info("已补列：%s", "、".join(added))
     else:
         log.info("列已齐全，跳过迁移")
+
+    # 第六十六轮：访客角色整体下线 —— `sys_user.guest_scopes`（第二十六轮加的
+    # 「访客可见范围」）一并退役。删列是**幂等**的：查 INFORMATION_SCHEMA，
+    # 列还在才 DROP，老库没这一列就直接跳过。
+    dropped: list[str] = []
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        exists = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sys_user' "
+                "AND COLUMN_NAME = 'guest_scopes'"
+            )
+        ).scalar()
+        if exists:
+            conn.execute(text("ALTER TABLE sys_user DROP COLUMN guest_scopes"))
+            dropped.append("sys_user.guest_scopes")
+    if dropped:
+        log.info("已下线并删列：%s", "、".join(dropped))
     # 只在这一列**刚刚被加出来**时回填：老库的所有行都还是 DEFAULT 0，
     # 需要按旧语义（有行=班主任）还原一位；新库由建表语句直接带列，
     # 不会走到这里（也不该走——那时还没有数据）。
@@ -574,7 +590,7 @@ def backfill_user_classes() -> int:
         with db.begin():
             # 只回填**运营角色**（班主任 / 生活委员 / 班长 / 兼班主任的院长）。
             #
-            # ⚠ 普通同学和访客**不是班主任**——把他们的默认班也写进关联表，
+            # ⚠ 普通同学**不是班主任**——把他们的默认班也写进关联表，
             # 名册上就会变成「这个班的班主任是全班同学」（实测过，很怪）。
             rows = db.execute(
                 select(SysUser.id, SysUser.class_id, SysUser.role).where(
