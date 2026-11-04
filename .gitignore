@@ -56,6 +56,11 @@ backups/
 *.log
 logs/
 
+# 运行时日志（log/）：按扩展名忽略（目录本身不排除——`.gitkeep` 还可以入库）。
+# 日志里会写带姓名/学号的操作痕迹，绝不入库；其余文件（README、.gitkeep）可入库。
+log/**/*.log
+log/**/*.log.*
+
 # ---- 编码提醒（不是 gitignore 规则，是给维护者看的）----
 # 提交前请确认：nginx / shell / Dockerfile / *.sql / *.json / *.yml 这些
 # **被程序按字节解析**的文件保存为 UTF-8 **无 BOM**（带 BOM 会让 nginx 报

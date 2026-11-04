@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:log": "vite >> ../log/frontend/vite-dev.log 2>&1",
     "dev:watch": "powershell -NoProfile -ExecutionPolicy Bypass -File dev-watch.ps1",
     "build": "vite build",
     "type-check": "vue-tsc --noEmit",

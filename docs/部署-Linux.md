@@ -504,3 +504,27 @@ docker compose -f docker-compose.use-existing-db.yml ps      # backend → healt
 | `Access denied for user 'classfee'@'172.17.x.x'` | 账号只授权给 `localhost` | 补 `CREATE USER 'classfee'@'%' …` + `GRANT` |
 | `Can't connect to MySQL server on '127.0.0.1'` | 容器里 `127.0.0.1` 指容器自己 | 数据库在不同机就填它的内网 IP |
 | `(2003) Can't connect` / `Connection refused` | 数据库没监听外部地址 | 改 `bind-address = 0.0.0.0` 并重启数据库 |
+
+---
+
+## 10. 运行日志（`log/`）
+
+仓库根下的 **`log/`** 放系统运行时的日志，按**后端 / 前端 / 数据库**三类分离：
+`log/backend/`（后端应用 + uvicorn）、`log/frontend/`（nginx access/error 或 Vite dev）、
+`log/database/`（MariaDB 错误日志）。**除 `README.md` 与各目录 `.gitkeep` 外一律不入库**（日志含姓名学号等操作痕迹）。
+详见 `log/README.md`；部署时差异速览：
+
+- **Docker（`docker-compose.yml`）**：`./log/frontend` 挂进 nginx 容器、`./log/database` 挂进 MariaDB 容器
+  （db 服务已带 `--log-error=/var/log/mysql/error.log`）。首次：
+  ```bash
+  mkdir -p log/backend log/frontend log/database && chmod 0777 log/database
+  docker compose up -d --build
+  ```
+  （改动需要**重建**：只 `restart` 加载不了新挂载点和 nginx 配置。）
+- **Docker（`docker-compose.use-existing-db.yml`，外部库）**：只前端日志生效；数据库日志去你的 MariaDB 主机上配
+  `log_error=/path/to/log/database/error.log` 并重启。
+- **直跑（systemd + 系统 nginx）**：后端**自动**写 `log/backend/backend.log`（5MB×6 轮转，
+  可用 `CLASSFEE_LOG_DIR` 改路径）；给 nginx 站点加
+  `access_log /opt/classfee/log/frontend/access.log;` 和 `error_log /opt/classfee/log/frontend/error.log warn;`。
+- **慢查询日志不要开**：SQLAlchemy/PyMySQL 客户端拼 SQL，慢日志会记下带姓名/学号的整条 SQL。
+- 日志查完即删，不外发、不提交。
