@@ -18,6 +18,9 @@ export function uploadReceipt(file: File) {
     method: 'post',
     data: form,
     headers: { 'Content-Type': 'multipart/form-data' },
+    // 线上实测「timeout of 10000ms exceeded」：共享实例 10s 不够原图上传。
+    // （提交前还会走 compressReceiptImage 压缩；这里再兜一层。）
+    timeout: 60_000,
   })
 }
 
@@ -26,6 +29,11 @@ export function uploadReceipt(file: File) {
  * <img src> 带不了请求头，统一在这里带 token 取回后转 objectURL 展示。
  */
 export async function fetchReceipt(path: string): Promise<Blob> {
-  const res = await service.get<Blob>(`/files/${path}`, { responseType: 'blob' })
+  // 查看同样放宽到 60s：5MB 小票慢网络下 10s 拉不完，
+  // 会被误报成「小票文件已删除」（同一句文案，两个完全不同的原因）
+  const res = await service.get<Blob>(`/files/${path}`, {
+    responseType: 'blob',
+    timeout: 60_000,
+  })
   return res.data
 }

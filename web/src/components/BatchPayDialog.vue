@@ -3,7 +3,8 @@ import { nextTick, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules, type UploadFile } from 'element-plus'
 import dayjs from 'dayjs'
 import { payBatchMember } from '@/api/batches'
-import { MAX_RECEIPT_BYTES, RECEIPT_ACCEPT, uploadReceipt } from '@/api/files'
+import { RECEIPT_ACCEPT, uploadReceipt } from '@/api/files'
+import { RECEIPT_ORIGINAL_MAX_BYTES, compressReceiptImage } from '@/utils/receipt'
 import { getErrorMessage } from '@/api/request'
 import { useModal } from '@/composables/useModal'
 import { disableFutureDates, isFutureDateTime } from '@/utils/date'
@@ -49,8 +50,9 @@ function onReceiptChange(file: UploadFile) {
     clearReceipt()
     return
   }
-  if (raw.size > MAX_RECEIPT_BYTES) {
-    receiptError.value = '图片大小不能超过 5MB'
+  // 放宽到原图上限（压缩前）：手机原图常见 3–9MB，提交时自动压缩后再传
+  if (raw.size > RECEIPT_ORIGINAL_MAX_BYTES) {
+    receiptError.value = '原图太大（超过 20MB），请先截图或压缩后再选择'
     clearReceipt()
     return
   }
@@ -141,10 +143,13 @@ async function onSubmit() {
       return
     }
 
-    // 先传小票拿相对路径，再随缴费一起落库（上传失败=整单失败，不产生半截缴费）
+    // 先传小票拿相对路径，再随缴费一起落库（上传失败=整单失败，不产生半截缴费）。
+    // 提交前先把原图压缩掉（最长边 1600px / JPEG q0.8）：共享 axios 10s 超时
+    // 顶不住原图上传（线上「timeout of 10000ms exceeded」），压缩后通常 < 1MB。
     let receiptUrl: string | undefined
     if (receiptFile.value) {
-      receiptUrl = (await uploadReceipt(receiptFile.value)).path
+      const compressed = await compressReceiptImage(receiptFile.value)
+      receiptUrl = (await uploadReceipt(compressed)).path
     }
     await payBatchMember(props.batch.id, {
       userId: props.member.userId,
@@ -268,7 +273,7 @@ async function onSubmit() {
           <el-button>选择图片</el-button>
         </el-upload>
         <p v-if="receiptError" class="receipt-error" role="alert">{{ receiptError }}</p>
-        <p class="receipt-hint">支持 JPG / PNG / WebP / GIF，不超过 5MB；保存后可在账本明细查看</p>
+        <p class="receipt-hint">支持 JPG / PNG / WebP / GIF；选图后在提交前自动压缩（长边 1600px）；保存后可在账本明细查看</p>
       </el-form-item>
       </el-form>
     </div>

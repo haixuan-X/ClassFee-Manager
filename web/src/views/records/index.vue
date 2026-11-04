@@ -274,6 +274,8 @@ const statusText = (row: FeeRecord) => STATUS_TEXT[row.status]
 const receiptVisible = ref(false)
 const receiptLoading = ref(false)
 const receiptFailed = ref(false)
+/** 失败原因：'not-found' = 后端 404（文件真不在）；'network' = 拉取失败（多半网络慢） */
+const receiptFailReason = ref<'not-found' | 'network' | ''>('')
 const receiptSrc = ref('')
 const receiptPath = ref('')
 const receiptTitle = ref('')
@@ -311,13 +313,18 @@ const { restoreFocus } = useModal(receiptVisible, dialogRef)
 async function loadReceipt(path: string) {
   receiptSrc.value = ''
   receiptFailed.value = false
+  receiptFailReason.value = ''
   receiptLoading.value = true
   try {
     const url = URL.createObjectURL(await fetchReceipt(path))
     cacheReceipt(path, url)
     receiptSrc.value = url
-  } catch {
-    receiptFailed.value = true // 拦截器已提示；弹窗内保留重试入口
+  } catch (e) {
+    receiptFailed.value = true
+    // 404 = 文件真的不在服务器上；其余（含 10s 级别的网络慢）是拉取失败，
+    // 文案必须分开——否则传得上去却永远看不了，会被误报成「文件被删了」。
+    const status = (e as { response?: { status?: number } } | null)?.response?.status
+    receiptFailReason.value = status === 404 ? 'not-found' : 'network'
   } finally {
     receiptLoading.value = false
   }
@@ -333,6 +340,7 @@ async function viewReceipt(row: FeeRecord) {
   if (cached) {
     receiptSrc.value = cached
     receiptFailed.value = false
+    receiptFailReason.value = ''
     receiptLoading.value = false
     return
   }
@@ -689,7 +697,8 @@ onUnmounted(() => {
           class="receipt-img"
         />
         <div v-else-if="receiptFailed && !receiptLoading" class="receipt-fail" role="alert">
-          <p>小票加载失败，可能是文件已被删除</p>
+          <p v-if="receiptFailReason === 'not-found'">小票文件不在服务器上（可能已被删除）</p>
+          <p v-else>小票加载失败（多半是网络慢），请点「重试」再试</p>
           <el-button type="primary" plain size="small" @click="retryReceipt">重试</el-button>
         </div>
       </div>
