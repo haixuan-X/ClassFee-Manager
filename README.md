@@ -1,8 +1,8 @@
 ﻿<div align="center">
 
-# 学生信息管理系统 · Student Info Manager
+# 学生信息管理系统
 
-**一个班级的班费账本：公开、透明、可追溯、好对账。**
+**一个智能汽车学院级的班费 + 学籍名册 + 任务协同平台：公开、透明、可追溯。**
 
 记账有据（每笔可挂小票） · 缴费有序（批次逐人标记） · 错账可追（作废留痕而非抹除）
 
@@ -10,9 +10,11 @@
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](server-py/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5-42b883.svg)](web/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688.svg)](server-py/)
-[![回归 288](https://img.shields.io/badge/regression-288%20passed-success.svg)](server-py/tests/api_regression.py)
+[![回归 1263](https://img.shields.io/badge/regression-1263%20passed-success.svg)](server-py/tests/api_regression.py)
 
 `Vue 3 + Element Plus` ｜ `FastAPI + SQLAlchemy 2.0` ｜ `MySQL 8 / MariaDB`
+
+**版本：v1.5.0**
 
 </div>
 
@@ -21,56 +23,77 @@
 ## 界面一览
 
 > **截图已移除（脱敏）**：本仓库曾放过界面截图，其中带有真实姓名与学号。
-> 为避免个人信息外泄，`docs/screenshots/` 已整体删除，此处不再内嵌图片。
-> 想看效果请在本地跑起来自己点：前后端启动后用 `.env` 声明的账号登录即可
-> （空库首启只建班级与类别脚手架，不带任何真实数据）。
+> 为避免个人信息外泄，此处不再内嵌图片。
+> 想看效果请在本地跑起来自己点：前后端启动后用 `.env` 声明的账号登录即可。
 
 ---
 
 ## 这是什么
 
-一个**给单个班级用**的班费管理系统。班主任（/ 班长 / 生活委员）负责记账和收钱，同学们能看账本、能看自己交没交。
+一个面向**单个学院**（智能汽车学院）的系统，同时管三件事：
+
+- **班费账本**：按班记收入/支出，批次逐人收班费，生成流水，对账可追溯；
+- **学生信息名册**：班主任逐人维护学生字段（六字班级名册 + 自填报表），
+  学院侧可申请看 / 授权看非管辖班学生数据；
+- **学院任务协同**：院长发全学院任务（是/否、单选），各班班主任逐人接龙回收；
+  班主任也可给自己班发班级任务（是/否、单选、多选、日期）。
 
 **没有注册页，只有登录页。** 账号由部署方声明或由运营在页面创建，代码里不写死任何默认口令。
 
-适合的场景：一个 30–60 人的大学班级或一个初中班级，需要一笔笔把班费记清楚、期末能对得上账。
-不适合的场景：多学校/多租户的 SaaS、需要审批流的财务系统。
+适合的场景：一个学院按班推进班费收缴、数据填报与信息核对。
+不适合的场景：多学院多租户 SaaS、需要审批流的财务系统。
 
 ---
 
 ## 功能
 
+### 班级层（班主任 / 班长 / 生活委员 / 普通成员）
+
 | 模块 | 说明 | 谁能用 |
 |------|------|--------|
 | 登录 / 会话 | 账号密码登录，JWT（HS256 / 2h），改密码 | 全部 |
-| 仪表盘 | 余额、本月收支、缴费完成率、近 6 月趋势、支出分类占比、最新流水、置顶公告 | 全部 |
+| 仪表盘 | 余额、本月收支、缴费完成率、近 6 月趋势、支出分类占比、最新流水、学籍变化、置顶公告、置顶任务 | 全部 |
 | 收入登记 | 班费 / 义卖 / 捐款 / 退款 | 运营 |
 | 支出登记 | 报销 / 采购，**可挂小票图片** | 运营 |
-| 账本明细 | 多条件筛选、分页、**按当前筛选导出 Excel**、作废红冲、删除 | 运营看全部；成员只读 |
+| 账本明细 | 多条件筛选、分页、**按当前筛选导出 Excel**、作废红冲、删除、**查看小票** | 运营看全部；成员只读 |
 | 我的缴费 | 我有没有班费要交 / 交没交 / 什么时候截止 | 成员（运营角色不参与缴费） |
-| 成员缴费 | 缴费名单、按人补录缴费、缴清筛选 | 运营 |
+| 成员缴费 | 缴费名单、按人补录缴费（**代缴可挂小票**）、缴清筛选 | 运营 |
 | 收费批次 | 建批次 → 逐人标记缴费 → 自动生成流水 → 关闭 / 删除 | 运营 |
 | 班级公告 | 发布 / 编辑 / 置顶 / 下架（可恢复）/ 彻底删除 | 运营写，全员读 |
 | 成员管理 | 建号（四档角色）、编辑资料与学号、重置密码、停用启用、删除 | 运营 |
+| 学生信息 | 班级名册：字段设计、批量导入（xlsx）、导出；删/改学生记录 | 运营写，成员按授权读 |
+| 班级任务 | 发班级任务（是/否、单选、多选、日期）、答题统计、置顶到仪表盘 | 全员 |
 | 班级信息 | 班级名称 / 年级 / 班主任（余额只读） | 运营写，全员读 |
-| 个人中心 | 改密码、改姓名 / 学号 / 手机号 | 全部 |
+| 个人信息 | 改密码、改姓名 / 学号 / 手机号 / 登录名、改「我带的班」 | 全部 |
+
+### 学院层（院长）
+
+| 模块 | 说明 |
+|------|------|
+| 学院任务 | 院长发全学院任务（是/否、单选），各班班主任逐人接龙回收；任务明细按题型分流展示（是/否/日期→返校四桶；单选/多选→按选项）；置顶到全员仪表盘 |
+| 学院名册 | 各班班主任名册（一人一行）：查看在管/空缺班级、登记/改安排班主任 |
+| 任务总览 | 全学院任务统计：总数 / 开放中 / 按班回收率 / 按发布人分布 / 最近任务，可按班筛选、导出 |
+| 院长账号 | 院长账号管理：新增纯院长 / 兼班主任院长，指派管辖班 |
+| 班级管理 | 学院视角建班、停用、批量删除、改班主任安排 |
 
 ### 角色与权限
 
 | 界面名 | 标识 | 等级 | 权限 | 缴费对象 |
 |--------|------|------|------|---------|
-| 普通成员 | `MEMBER` | 0 | 只读 | ✅ 交班费 |
+| 普通成员 | `MEMBER` | 0 | 只读（含自己的缴费/任务） | ✅ 交班费 |
+| 访客 | `GUEST` | 0 | 只读**受限范围**（班主任逐项指定） | ✅ |
 | 生活委员 | `ADMIN` | 1 | 运营 | ✅ 交班费 |
 | 班长 | `MONITOR` | 2 | 运营 | ✅ 交班费 |
-| 班主任 | `TEACHER` | 3 | 运营 | ❌ 不参与 |
+| 班主任 | `TEACHER` | 3 | 运营 + 本班管理 | ❌ 不参与 |
+| 院长 | `DEAN` | 4 | **系统管理员**（学院层全权） | ❌ 不参与 |
 
-- **运营权限三者一致**（记账 / 作废 / 小票 / 成员管理 / 批次 / 公告），差别在两处：
-  - **账号管理有等级护栏**——不能创建或操作比自己等级高的账号（`班主任 > 班长 > 生活委员 > 普通成员`）
-  - **缴费对象不同**——缴费名单只列**除班主任外的全部学生**，因为班主任是部署时声明的**老师账号、不是学生**（见 [设计文档 §1](docs/系统设计文档.md)）
-- **权限由后端强制**：`_STAFF_ROUTES` 角色路由表 + 端点级 `require_role`，共 **22** 条受限路由。
+- **运营权限三者一致**（班主任之下的 ADMIN/MONITOR/TEACHER 记账/作废/小票/成员管理/批次/公告同权），差别在两处：
+  - **等级护栏**：不能创建或操作比自己等级高的账号（`院长 > 班主任 > 班长 > 生活委员 > 成员`），判定一律看 `ROLE_LEVEL` 等级，不写角色名；
+  - **管辖范围**：班主任管自己的班；院长管整个学院（账号管理、班级管理、学院任务、名册）。
+- **院长分两种**：① **兼班主任院长**（院长 + 本班班主任 → 同班主任权限 + 学院权限）；② **纯院长**（`dean_only=1`，只管学院事务，班级事务一概不参与）。
+- **权限由后端强制**：`_STAFF_ROUTES` 角色路由表 + 端点级 `require_role` 双闸，
   前端路由守卫只负责隐藏入口，**不构成安全边界**。
-- **归属权（A 方案）**：改 / 删 / 作废 / 关闭只能操作**自己创建**的数据。代价是班主任也动不了班长的数据——
-  这是为了责任可追溯而接受的取舍，报错信息会带上创建人。
+- **归属权**：改 / 删 / 作废 / 关闭只能操作**自己创建**的数据。
 - 班级信息里的「班主任」是 `cls_class.head_teacher` 独立字段（填姓名），与角色无关。
 
 ---
@@ -80,7 +103,7 @@
 需要 **Python 3.13+**、**Node 22+**、一个 MySQL 8 / MariaDB 库。
 
 ```bash
-# 1. 建库（账号 / 库名按需改）
+# 1. 建库（账号/库名按需改）
 mysql -uroot -p -e "CREATE DATABASE classfee DEFAULT CHARSET utf8mb4;"
 
 # 2. 后端 :8080 —— 建表与种子数据由启动时幂等执行，无需手动导 SQL
@@ -93,20 +116,28 @@ python -m venv .venv
 cd web && npm install && npm run dev
 ```
 
-打开 <http://localhost:5173>，用**部署时声明的账号**登录（见下方「账号体系」，代码里没有默认口令）。
+打开 <http://localhost:5173>，用**部署时声明的账号**登录（见「账号体系」）。
 
-> Windows 下也可以直接双击 `start-all.bat`（同时拉起前后端），
-> 或分别用 `start-backend.bat` / `start-frontend.bat`。
+> Windows 下也可以直接双击 `start-all.bat`（同时拉起前后端）。
+
+> ⚠️ **`.env` 不会自动进环境变量**：`run.py` 只读 `CLASSFEE_COLLEGE_NAME`，
+> 数据库账号、JWT 密钥、种子班主任都必须注入进程环境。从新开的终端起服务时先：
+> ```powershell
+> Get-Content '.env' -Encoding UTF8 | ForEach-Object {
+>   if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') {
+>     Set-Item -Path "Env:$($matches[1])" -Value $matches[2].Trim()
+>   }
+> }
+> ```
+> 不注入的后果：库连不上或空库不建 `test` 账号，回归第一步就报错退出。
 
 **首次启动日志里会看到这几类提示，都不是故障**：
 
 | 日志 | 含义 |
 |------|------|
-| `未配置 CLASSFEE_TEACHER_USERNAME / PASSWORD` | 没声明账号。库里若已有运营账号可忽略，否则见「账号体系」 |
-| `已升级 sys_user.role 枚举：新增 'MONITOR'` | 一次性枚举升级，第二次启动不再出现 |
-| `已补审计列：…` | 一次性 DDL 迁移，第二次启动不再出现 |
-| `已把 N 条缴费行补进进行中的批次` | 缴费对象口径升级后的一次性回填，第二次启动不再出现 |
-| `db/schema.sql 带 UTF-8 BOM` | **别忽略**——按下方「编码规则」存为无 BOM |
+| `未配置 CLASSFEE_TEACHER_USERNAME / PASSWORD` | 没声明账号，见「账号体系」 |
+| `已升级 sys_user.role 枚举：新增 'MONITOR'` | 一次性枚举升级，第二次不再出现 |
+| `已补审计列：…` / `已把 N 条缴费行补进进行中的批次` | 一次性迁移/回填，第二次不再出现 |
 
 ---
 
@@ -118,6 +149,7 @@ cd web && npm install && npm run dev
 |------|------|------|------|
 | **部署配置声明** | `CLASSFEE_TEACHER_USERNAME` | `CLASSFEE_TEACHER_PASSWORD` | 班主任（默认）/ 生活委员 |
 | 运营在页面创建 | 「成员管理 → 新增成员」时指定 | 运营设定 | 四档任选 |
+| 院长在学院页创建 | 「学院 → 院长账号 → 新增」 | 运营设定 | 院长 / 院长+班主任 |
 
 ```bash
 cp .env.example .env        # 编辑；docker compose 会自动读取仓库根目录的 .env
@@ -128,103 +160,229 @@ cp .env.example .env        # 编辑；docker compose 会自动读取仓库根�
 CLASSFEE_TEACHER_USERNAME=test              # 必填（与 PASSWORD 同时）
 CLASSFEE_TEACHER_PASSWORD=换成强口令          # 必填
 CLASSFEE_TEACHER_NAME=测试班主任              # 可选，默认同用户名
-CLASSFEE_TEACHER_ROLE=TEACHER                # 可选，ADMIN | TEACHER
+CLASSFEE_TEACHER_ROLE=TEACHER                # 可选，ADMIN | TEACHER | DEAN
+CLASSFEE_DEAN_ONLY=0                         # 仅 ROLE=DEAN 时有意义：0=院长兼班主任（默认） 1=纯院长
+CLASSFEE_COLLEGE_NAME=智能汽车学院            # 可选，侧栏顶部显示的学院名
 CLASSFEE_JWT_SECRET=<openssl rand -hex 32>   # 令牌签名密钥，生产必填
 ```
 
-- **仅首次创建**：账号已存在则跳过，**不覆盖**库里改过的密码 / 角色 / 停用状态。
-- **半配置不建号**：用户名与密码必须同时填写；两项都为空则不创建任何账号。
-- **可管理**：改资料 / 学号、重置密码、停用（保历史、禁登录）、删除（**仅限零引用**账号——有流水 / 缴费 / 公告 / 批次记录一律拒绝并引导改用停用）。
-- **停用即时生效**：中间件每次请求都查 `sys_user.status`，被停用的账号**已签发的 JWT 立即失效**。
-- **学号**：与登录名分开填，同班不可重复，留空默认取登录名。
+- **仅首次创建**：账号已存在则跳过，**不覆盖**库里改过的密码/角色/停用状态。
+- **纯院长**（`CLASSFEE_DEAN_ONLY=1`）：只管学院，看不到班级的账目/任务/成员入口。
+- **可管理**：改资料/学号、重置密码、停用（保历史、禁登录）、删除（**仅限零引用**账号）。
+- **停用即时生效**：中间件每次请求都查 `sys_user.status`。
 
 ---
 
 ## 部署到服务器
 
-看 **[`docs/部署-Linux.md`](docs/部署-Linux.md)**：手动部署（systemd + nginx 反代）或 **Docker Compose 一键部署**（§9，不用装 Python / Node / nginx）。
+**两条路线，选一条**：
 
-服务器上已有 MySQL/MariaDB 时用 `docker-compose.use-existing-db.yml`（复用现有库、不另起容器），见部署文档 §9.6。
+| 路线 | 服务器要装什么 | 适合 |
+|------|--------------|------|
+| **A. 手动部署** | Python 3.13、Node、MariaDB、nginx | 要自定义、反代已有站点 |
+| **B. Docker Compose** | Docker + compose | **最省事**，一键起 |
+
+### A. 手动部署（systemd + nginx）
 
 ```bash
+# 1. 服务器初始化（Ubuntu/Debian 示例）
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip nginx mariadb-server
+
+# 2. 建库建账号（'%' 表示允许容器网段连入；只要本机用则 'localhost' 即可）
+sudo mysql <<'SQL'
+CREATE DATABASE classfee DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'classfee'@'%' IDENTIFIED BY '你的强密码';
+GRANT ALL PRIVILEGES ON classfee.* TO 'classfee'@'%';
+FLUSH PRIVILEGES;
+SQL
+
+# 3. 上传产物（Windows 侧）
+scp -r D:\bj\server-py user@your-server:/tmp/server-py
+scp -r D:\bj\web\dist   user@your-server:/tmp/dist
+
+# 4. 归位 + 装依赖
+sudo mkdir -p /opt/classfee /var/www/classfee
+sudo mv /tmp/server-py /opt/classfee/ && sudo mv /tmp/dist/* /var/www/classfee/
+sudo chown -R www-data:www-data /var/www/classfee
+cd /opt/classfee/server-py && sudo -u www-data python3 -m venv .venv \
+  && sudo -u www-data .venv/bin/pip install -r requirements.txt
+```
+
+后端 systemd 单元 `/etc/systemd/system/classfee.service`：
+
+```ini
+[Unit]
+Description=ClassFee (FastAPI)
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/classfee/server-py
+Environment=TZ=Asia/Shanghai
+Environment=CLASSFEE_DB_URL=mysql+pymysql://localhost:3306/classfee?charset=utf8mb4
+Environment=CLASSFEE_DB_USERNAME=classfee
+Environment=CLASSFEE_DB_PASSWORD=你的强密码
+Environment=CLASSFEE_JWT_SECRET=openssl rand -hex 32 生成的随机串
+# Environment=CLASSFEE_TEACHER_USERNAME=test
+# Environment=CLASSFEE_TEACHER_PASSWORD=换成强口令
+ExecStart=/opt/classfee/server-py/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+nginx 站点配置 `/etc/nginx/sites-available/classfee`：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    root /var/www/classfee;
+    index index.html;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # 运行日志落到仓库 log/frontend/（见「运行日志」一节）
+    access_log /opt/classfee/log/frontend/access.log;
+    error_log  /opt/classfee/log/frontend/error.log warn;
+
+    # 前端路由 history 回退：刷新深层路径不 404
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # API 反代；client_max_body_size 默认 1m 会让 5MB 小票 413
+    location /api/ {
+        client_max_body_size 6m;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/classfee /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo systemctl enable --now classfee
+```
+
+自检：`curl -i http://127.0.0.1/` 返回 index.html；`curl -i http://127.0.0.1/api/version` 返回 `{"code":200,...}`；深链接 `curl -i http://127.0.0.1/records` 返回 200。
+
+### B. Docker Compose（最省事）
+
+```bash
+scp -r D:\bj user@your-server:/opt/classfee-src
+cd /opt/classfee-src
+cp .env.example .env        # 必填：CLASSFEE_JWT_SECRET / CLASSFEE_TEACHER_USERNAME / PASSWORD / DB_ROOT_PASSWORD
+docker compose up -d --build
+docker compose ps            # db → healthy，backend → healthy，frontend → running
+```
+
+| 文件 | 作用 |
+|------|------|
+| `docker-compose.yml` | db（MariaDB 11.4）+ backend + frontend，healthcheck 与数据卷齐全 |
+| `docker-compose.use-existing-db.yml` | **复用服务器已有库**（仅 backend + frontend 两容器；库账号需 `'%'` 主机授权、`bind-address=0.0.0.0`） |
+| `web/nginx.docker.conf` | SPA 回退 + `/api` 反代；**nginx.docker.conf 必须无 BOM** |
+
+```bash
+# 复用已有库（.env 填 DB_HOST/DB_PORT/DB_NAME/DB_USERNAME/DB_PASSWORD，不是 DB_ROOT_PASSWORD）
 docker compose -f docker-compose.use-existing-db.yml up -d --build
 ```
+
+首次构建约 2–5 分钟；`docker compose logs -f backend` 可以看建表与账号创建。
+
+### 运行日志（`log/`）
+
+仓库根下的 `log/` 放运行时日志，按**后端 / 前端 / 数据库**三类分离：
+
+| 目录 | 内容 | 开启方式 |
+|------|------|----------|
+| `log/backend/` | 后端应用日志 + uvicorn 访问/错误日志 | **自动**，`RotatingFileHandler` 5MB×6 份，`CLASSFEE_LOG_DIR` 可改路径 |
+| `log/frontend/` | nginx access/error；`npm run dev:log` 的 vite 输出 | docker：compose 已挂载 `./log/frontend → /var/log/classfee`；直跑：nginx 配两行；本地：`npm run dev:log` |
+| `log/database/` | MariaDB 错误日志 | docker：compose db 已带 `--log-error=/var/log/mysql/error.log` + 挂载 `./log/database`（先 `chmod 0777 log/database`，UID 999）；外部库：在本机配 `log_error` |
+
+**除 `log/README.md` 与各 `.gitkeep` 外一律不入库**（日志含姓名学号痕迹）。完整说明见 [`log/README.md`](log/README.md)。
+不开慢查询日志——SQLAlchemy/PyMySQL 拼出的 SQL 会带姓名学号字面量。
+
+**发布途中出了问题**：先看 `docker compose logs -f backend`（或 `journalctl -u classfee -f` + `log/backend/backend.log`），
+90% 是 `.env` 变量名拼错、JWT 密钥没换、或者库连不上——启动日志里都有明确提示。
 
 ---
 
 ## 设计要点
 
-- **单一事实**：收支共用一张 `fee_record` 流水表。**记错优先走「作废（红冲）」留痕**，运营也可物理删除（事务内回滚余额并联动缴费状态）；列表默认隐藏已作废。
-- **审计留痕**：作废 / 关闭 / 编辑都会记下**谁**在**什么时候**动的（`voided_by`、`closed_by`、`updated_by`）。
-  界面可见「由 X 于 … 作废」「最后由 X 编辑于 …」。
-  *删除仍是硬删、无痕——所以留痕路径是「作废 / 下架」，界面文案一律引导「记错优先作废」。*
-- **余额**：`SUM(收入 NORMAL) − SUM(支出 NORMAL)` 实时对账，`cls_class.balance` 作冗余列在**同一事务内原子 UPDATE**，不接受手改。
-- **金额**：数据库 `DECIMAL(10,2)`，Python 侧 `Decimal` + `HALF_UP` 量化，**全链路禁止 float**。
-- **缴费单一入口**：成员缴费与流水在「收费批次 → 标记缴费」一个事务里写入（`fee_record` + `fee_payment.status` + 余额），杜绝第二条资金写入路径。
-- **小票**：支出可挂票据图片（`POST /api/files` 上传 → `receiptUrl` 挂账 → 账本点「查看」带 token 取图），服务端魔数嗅探 + uuid 命名 + ≤5MB；仅支出可挂，删流水时回收文件。
-- **公告**：读全员、写运营；「下架」是软删（成员不可见、运营可恢复），「彻底删除」要求先下架，防误删无从找回。
-- **UI**：浅色玻璃拟态；**绿色 = 收入、红色 = 支出，但必须同时带 +/− 符号**，不靠颜色单独传达信息。
-- **无障碍**：正文对比度 ≥4.5:1，弹层三条关闭路径（Esc / × / 遮罩），`prefers-reduced-motion` 降级，图表带 `role="img"` 与动态 `aria-label`，侧栏用原生 `<a>`（可 Tab 可达、中键新开标签页）。
+- **单一事实源**：收支共用一张 `fee_record` 流水表。**记错优先走「作废（红冲）」留痕**，运营也可物理删除（事务内回滚余额并联动缴费状态）。
+- **审计留痕**：作废/关闭/编辑都会记下**谁**在**什么时候**动的；删除仍是硬删无痕，界面文案一律引导「记错优先作废」。
+- **余额**：`SUM(收入 NORMAL) − SUM(支出 NORMAL)`，`cls_class.balance` 冗余列在**同一事务内原子 UPDATE**，不接受手改。
+- **金额**：数据库 `DECIMAL(10,2)`，Python 侧 `Decimal` + `HALF_UP`，**全链路禁止 float**。
+- **缴费单一入口**：成员缴费在「收费批次 → 标记缴费」一个事务写入（`fee_record` + `fee_payment.status` + 余额）。
+- **小票**：支出可挂票据（`POST /api/files` 上传 → `receiptUrl` 挂账 → 账本点「查看」带 token 取图）。
+  前端选图**自动压缩**（最长边 1600px）再上传；服务端 ≤5MB、魔数嗅探、uuid 命名、仅支出可挂、删流水时回收文件。
+- **界面不只靠颜色**：收入 `+¥` 绿、支出 `−¥` 红，符号优先于颜色；无障碍对比度 ≥4.5:1。
+- **任务口径**：
+  - 题型 `BOOLEAN / SINGLE / MULTI / DATE`，发布时只开放「是/否」「单选」；
+  - 明细看板按题型分流：**是/否·日期 → 返校四桶；单选/多选 → 按选项**（零人选项也列）；
+  - 学院任务 `canAnswer` 恒 false（院长自己不填），「填写」按钮由 `canFill` 控制；
+  - 名册回收率 = 学生**全部点完名**的班数 / 分母=已登记班主任的班数（`_adviser_role_condition()` 共用判定）；
+  - 学籍变化（仪表盘 `changeTotal`）= **当前不在籍人数**（毕业/入伍/休学/退学/其它），无历史表，给不了「本学期异动人次」。
+- **权限判定全链路看 `ROLE_LEVEL`**（`MEMBER=0 … DEAN=4`），不写 `role == "TEACHER"`。
+- **学院口径接口不带 `classId`**：`web/src/api/request.ts` 的 `skipClassId` 名单
+  （`/college/`、`/dashboard/students`、`/tasks/overview`）+ **新增学院口径接口必须加进去**，否则会被塞「当前班」。
 
-### 数据模型
+### 数据模型（15 张表）
 
-7 张表，`schema.sql` 由后端启动时**幂等执行**（`CREATE TABLE IF NOT EXISTS`）。
+`schema.sql` 由后端启动时**幂等执行**；改列定义时**必须**同步两处：
+
+1. `server-py/db/schema.sql`（新库）
+2. `server-py/app/seed.py` 的幂等 `ALTER`（既有库）
 
 | 表 | 用途 |
 |----|------|
-| `cls_class` | 班级（含冗余余额列） |
-| `sys_user` | 用户，四档角色 ENUM |
-| `fee_category` | 收支类别字典（软删：`status=0`） |
+| `cls_class` | 班级（含冗余余额列、`head_teacher` 纯文本） |
+| `sys_user` / `sys_user_class` | 用户 + 多对多班级关联（`is_adviser=1` = 班主任） |
+| `fee_category` | 收支类别字典（启动时按 kind 幂等补齐 11 条） |
 | `fee_record` | **核心流水**，作废 = 红冲，审计列 `voided_by/voided_at` |
-| `fee_batch` | 收费批次，审计列 `closed_by/closed_at` |
-| `fee_payment` | 逐人缴费状态 |
+| `fee_batch` / `fee_payment` | 收费批次 + 逐人缴费状态 |
 | `sys_notice` | 班级公告，审计列 `updated_by/updated_at` |
-
-> 改列定义必须同时写**幂等 `ALTER` 迁移**（`seed.py` 里已有 3 个：角色枚举、审计列、缴费名单回填）——
-> `CREATE TABLE IF NOT EXISTS` 不会变更既有库。
+| `student_field` / `student_record` / `student_record_value` | 学籍名册字段设计 + 逐人取值 |
+| `student_access_request` / `student_grant` | 跨班数据访问申请与授权 |
+| `cls_task` / `cls_task_answer` / `cls_task_student_answer` | 任务 + 本人答案 + 院长视角学生级答案 |
 
 ---
 
 ## 参与开发
 
 ```bash
-# 后端热重载
-cd server-py && .venv/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
-
 # 前端类型检查 + 构建
 cd web && npm run type-check && npm run build
 
-# 契约回归（**需后端在运行**，零依赖）
+# 契约回归（**需后端在运行**，零依赖，当前 1263 项全绿）
 .venv/bin/python server-py/tests/api_regression.py
 ```
 
-**回归是本项目唯一常驻的自动化闸门**——`test_*` 命名可被 pytest 直接收集，也可当脚本跑。当前 **288 项断言全绿**，覆盖：流水与作废红冲、缴费批次与级联、类别软删、账号与四档角色等级、归属权、审计留痕、缴费对象口径、停用后 JWT 即时失效、跨班隔离、金额不变量、**文件编码闸门**。
+**回归是本项目唯一常驻的自动化闸门**——`test_*` 命名可被 pytest 直接收集，也可当脚本跑。
+改后端必须：**真重启后端 → 跑回归** → 浏览器点一遍。
 
 ### ⚠️ 编码规则：谁读这个文件，决定它有没有 BOM
 
 | 读者 | 编码 | 范围 |
 |------|------|------|
-| **程序**（nginx / MySQL / shell / Docker / 任何按字节或按行解析的解析器） | **UTF-8 无 BOM** | `*.conf`、`*.sh`、`Dockerfile*`、compose yml、`*.sql`、`*.json`、`*.toml`/`*.ini`/`*.cfg`、`*.bat`、`*.ps1`、`.env*`、CI 配置 |
-| **人**（编辑器 / GBK 工具 / Notepad） | **UTF-8 带 BOM** | `docs/*.md`、`README.md`、`*.txt` |
-| 人机都不敏感 | 无所谓 | 全部 `.py`（Python 自动识别源文件 BOM） |
+| **程序**（nginx / MySQL / Docker / 任何按字节解析的解析器） | **UTF-8 无 BOM** | `*.conf`、`Dockerfile*`、compose yml、`*.sql`、`*.json`、`*.toml`、`.env*` |
+| **人**（编辑器 / GBK 工具） | **UTF-8 带 BOM** | `README.md` |
+| 人机都不敏感 | 无所谓 | 全部 `.py` |
 
-**中文注释在「无 BOM」那一侧完全安全**——`nginx.docker.conf` 与 `schema.sql` 里的中文注释从来没出过问题，**坏的只有 BOM 本身**。
-
-踩过的坑：带 BOM 的 `nginx.docker.conf` 会让 nginx 报 `unknown directive " server"`、**frontend 容器起不来**；
-带 BOM 的 `schema.sql` 会让首行注释不被剔掉 → 第一条建表语句被 `except: continue` **静默吞掉** → **新库少一张表且启动日志零告警**。
-
-**保存为 UTF-8 无 BOM，不要用 Windows 记事本编辑**（它默认写 GBK，部分版本还会对已有文件追加 BOM）。
-VS Code 右下角能直接看到是 `UTF-8` 还是 `UTF-8 with BOM`。以上规则由回归的第一个用例
-`test_a00_encoding_guards` 自动检查（会扫描全仓库并逐个指名带 BOM 的文件）。
-
-### 数据库迁移
-
-改列定义时**必须**同步两处，缺一不可：
-
-1. `server-py/db/schema.sql`（新库靠它建表）
-2. `server-py/app/seed.py` 里的幂等 `ALTER`（既有库靠它升级）
-
-漏了第 2 步，已有的库不会变更；给 ENUM 加值还会直接 500（`DataError 1265`）。
+**中文注释在「无 BOM」那一侧完全安全，坏的只有 BOM 本身。**
+踩过的坑：带 BOM 的 `nginx.docker.conf` 让 frontend 容器起不来；带 BOM 的 `schema.sql` 静默少一张表。
+回归用例 `test_a00_encoding_guards` 会扫描全仓库并逐个指名带 BOM 的文件。
 
 ---
 
@@ -234,26 +392,21 @@ VS Code 右下角能直接看到是 `UTF-8` 还是 `UTF-8 with BOM`。以上规�
 classfee-manager/
 ├─ server-py/              后端（FastAPI，:8080）
 │  ├─ app/
-│  │  ├─ services/         业务规则与事务（record / batch / user / file / notice / class / export / dashboard / category / auth）
+│  │  ├─ services/         业务规则与事务（record / batch / user / file / notice / college / student / task / ...）
 │  │  ├─ routers/          HTTP 层，只做参数校验与响应包装
-│  │  └─ main / config / db / models / security / schemas / responses / errors / helpers / seed
-│  ├─ db/schema.sql        7 张表 DDL（启动时幂等执行）
-│  ├─ tests/               契约回归（api_regression.py，零依赖，288 项）
-│  └─ requirements.txt
+│  │  └─ main / config / db / models / security / schemas / responses / errors / seed
+│  ├─ db/schema.sql        15 张表 DDL（启动时幂等执行）
+│  └─ tests/               契约回归（api_regression.py，零依赖，1263 项）
 ├─ web/                    前端（Vue 3 + Vite，:5173）
-│  └─ src/                 api / views / components / stores / router / types / utils / styles
-├─ docs/
-│  ├─ 系统设计文档.md        权威设计文档：权限矩阵、DDL、全部接口、22 轮交付记录（含踩坑）
-│  └─ 部署-Linux.md         手动部署 / Docker Compose / 故障排查
-├─ design-system/          UI 设计规范（含交付前检查清单）
-├─ prototype/              可点击的高保真原型
-├─ docker-compose.yml               一键部署（自带数据库容器）
-├─ docker-compose.use-existing-db.yml  复用服务器上已有的 MySQL/MariaDB
+│  └─ src/                 api / views（dashboard · college · records · batches · tasks ...）/ components / stores
+├─ log/                    运行日志（backend / frontend / database，不入库）
+├─ docker-compose.yml                 一键部署（自带数据库容器）
+├─ docker-compose.use-existing-db.yml 复用服务器上已有的 MySQL/MariaDB
 ├─ start-*.bat             Windows 一键启动
 └─ .env.example            部署变量模板（复制为 .env 填写）
 ```
 
-**技术规模**：后端 34 个 Python 文件 / 约 4,500 行；前端 37 个文件 / 约 8,900 行；36 个 REST 端点；11 个页面。
+**技术规模**：后端 13 个路由模块 / 110 个 REST 端点；前端 17 个页面组件；15 张表。
 
 ---
 
@@ -261,11 +414,10 @@ classfee-manager/
 
 | 文档 | 内容 | 适合谁 |
 |------|------|--------|
-| [`docs/系统设计文档.md`](docs/系统设计文档.md) | **权威设计文档**：角色权限矩阵、模块清单、7 张表 DDL、全部 REST 接口与错误码、目录结构、安全方案、**22 轮交付记录（含踩坑与教训）** | 改代码前必读 |
-| [`docs/部署-Linux.md`](docs/部署-Linux.md) | Linux 手动部署、Docker Compose、复用已有数据库、生产注意事项、故障排查、备份更新 | 部署运维 |
-| [`design-system/classfee-manager/MASTER.md`](design-system/classfee-manager/MASTER.md) | **UI 规范**：色彩 token、字号、间距、组件规格、响应式断点、动效、**交付前检查清单** | 改界面样式 |
-| [`prototype/dashboard.html`](prototype/dashboard.html) | 高保真原型（仪表盘 + 记一笔弹窗），可双击直接打开 | 想先看效果 |
-| [`server-py/tests/api_regression.py`](server-py/tests/api_regression.py) | **288 项契约回归**断言（Python，零依赖），改后端必跑 | 改接口 |
+| [`log/README.md`](log/README.md) | 运行日志：三类目录、启停、隐私底线 | 查线上问题 |
+| [`design-system/classfee-manager/MASTER.md`](design-system/classfee-manager/MASTER.md) | **UI 规范**：色彩 token、间距、组件规格、响应式断点、**交付前检查清单** | 改界面样式 |
+| [`server-py/tests/api_regression.py`](server-py/tests/api_regression.py) | **1263 项契约回归**断言，改后端必跑 | 改接口 |
+| [`.env.example`](.env.example) | 全部部署变量（含中文注释） | 部署运维 |
 
 ---
 
@@ -273,21 +425,20 @@ classfee-manager/
 
 | 项 | 说明 |
 |----|------|
-| **契约回归** | 改后端后跑 `server-py/tests/api_regression.py`（**需后端在运行**），288 项断言 |
+| **契约回归** | 改后端后跑 `server-py/tests/api_regression.py`（需后端在运行），1263 项 |
 | **JWT 密钥** | `CLASSFEE_JWT_SECRET` 生产必须注入随机串；**改它会让所有已登录会话立即失效** |
-| **数据库备份** | `mysqldump -u classfee -p classfee > backup_$(date +%F).sql`，建议 cron 每日执行 |
-| **小票文件** | 落在磁盘（默认 `server-py/uploads/`，`CLASSFEE_UPLOAD_DIR` 可改），**不在数据库里**，备份要连目录一起备；nginx 需放开 `client_max_body_size 6m`（默认 1m 会让 5MB 小票 413） |
-| **Docker 卷** | compose 已挂 named volume `classfee_uploads` 持久化小票 |
-| **时区** | 应用内固定 `Asia/Shanghai`（systemd / compose 均已设 `TZ`），服务器系统时区不必改 |
-| **升级** | 替换源码后 `docker compose -f docker-compose.use-existing-db.yml up -d --build`；**只重启不生效**（配置是 `COPY` 进镜像的） |
+| **数据库备份** | `mysqldump -u classfee -p classfee > backup_$(date +%F).sql`，建议 cron 每日 |
+| **小票文件** | 落磁盘（`server-py/uploads/`，`CLASSFEE_UPLOAD_DIR` 可改；docker 落卷 `classfee_uploads`），**不在数据库里** |
+| **时区** | 应用内固定 `Asia/Shanghai`（systemd/compose 均已设 `TZ`） |
+| **升级** | 替换源码后 `docker compose -f docker-compose.use-existing-db.yml up -d --build`；**只重启不生效** |
 
 ### 已知限制
 
-- **硬删无痕**：`DELETE /records/{id}`、`/batches/{id}`、`/notices/{id}` 是物理删除，**留不下任何痕迹**。
-  这是物理事实而非疏漏——留痕路径是「作废 / 下架」，界面文案一律引导「记错优先作废」。
-- **多班级未实现**：`class_id` 字段已就位，但没有多班级切换与跨班汇总。
-- **金额无业务上限**：仅有 `DECIMAL(10,2)` 的存储约束（约 9999 万），未做业务层封顶。
-- **Docker 镜像未在开发机实测**（开发机无 Docker），`Dockerfile` 与 compose 只做过静态校对与 BOM 检查。
+- **硬删无痕**：`DELETE` 端点是物理删除，**留不下痕迹**；留痕路径是「作废 / 下架」。
+- **学籍变化无历史表**：仪表盘 `changeTotal` 是**当前不在籍人数**，给不了「本学期异动人次」。
+- **导出无行数上限**：`/records/export` 一次性在内存生成 xlsx（班级量级足够）。
+- **Docker 镜像未在开发机实测**：`Dockerfile` 与 compose 只做过静态校对与连通性验证；
+  首次部署请对照「部署到服务器」一节逐条自检。
 
 ---
 

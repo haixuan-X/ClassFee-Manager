@@ -52,6 +52,13 @@ backups/
 # 跟着 git 走才能让 clone 下来的人直接跑起来、也能进 Docker 构建上下文。
 !server-py/db/schema.sql
 
+# ---- 不上传 GitHub 的本地资料 ----
+# 智能体交接文档（本仓库工作方式，不对外）
+AGENTS.md
+HANDOFF.md
+# 用户报障/需求清单、手工验收用例、报障截图（含真实姓名学号）：全部仅本地保留
+docs/
+
 # ---- 日志 ----
 *.log
 logs/
