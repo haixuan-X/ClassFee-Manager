@@ -62,6 +62,7 @@ docs/**
 !docs/部署-Linux.md
 !docs/账号权限.md
 !docs/设计要点.md
+!docs/使用说明.docx
 
 # ---- 日志 ----
 *.log
