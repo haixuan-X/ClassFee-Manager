@@ -120,44 +120,12 @@ docker compose up -d --build
 
 ## 设计要点
 
-- **单一事实源**：收支共用一张 `fee_record` 流水表。**记错优先走「作废（红冲）」留痕**，运营也可物理删除（事务内回滚余额并联动缴费状态）。
-- **审计留痕**：作废/关闭/编辑都会记下**谁**在**什么时候**动的；删除仍是硬删无痕，界面文案一律引导「记错优先作废」。
-- **余额**：`SUM(收入 NORMAL) − SUM(支出 NORMAL)`，`cls_class.balance` 冗余列在**同一事务内原子 UPDATE**，不接受手改。
-- **金额**：数据库 `DECIMAL(10,2)`，Python 侧 `Decimal` + `HALF_UP`，**全链路禁止 float**。
-- **缴费单一入口**：成员缴费在「收费批次 → 标记缴费」一个事务写入（`fee_record` + `fee_payment.status` + 余额）。
-- **小票**：支出可挂票据（`POST /api/files` 上传 → `receiptUrl` 挂账 → 账本点「查看」带 token 取图）。
-  前端选图**自动压缩**（最长边 1600px）再上传；服务端 ≤5MB、魔数嗅探、uuid 命名、仅支出可挂、删流水时回收文件。
-- **界面不只靠颜色**：收入 `+¥` 绿、支出 `−¥` 红，符号优先于颜色；无障碍对比度 ≥4.5:1。
-- **任务口径**：
-  - 题型 `BOOLEAN / SINGLE / MULTI / DATE`，发布时只开放「是/否」「单选」；
-  - 明细看板按题型分流：**是/否·日期 → 返校四桶；单选/多选 → 按选项**（零人选项也列）；
-  - 学院任务 `canAnswer` 恒 false（院长自己不填），「填写」按钮由 `canFill` 控制；
-  - 名册回收率 = 学生**全部点完名**的班数 / 分母=已登记班主任的班数（`_adviser_role_condition()` 共用判定）；
-  - 学籍变化（仪表盘 `changeTotal`）= **当前不在籍人数**（毕业/入伍/休学/退学/其它），无历史表，给不了「本学期异动人次」。
-- **权限判定全链路看 `ROLE_LEVEL`**（`MEMBER=0 … DEAN=4`），不写 `role == "TEACHER"`。
-- **学院口径接口不带 `classId`**：`web/src/api/request.ts` 的 `skipClassId` 名单
-  （`/college/`、`/dashboard/students`、`/tasks/overview`）+ **新增学院口径接口必须加进去**，否则会被塞「当前班」。
+钱怎么记、小票怎么挂、任务回收率怎么算、权限怎么判定、15 张表怎么织网——见 **[`docs/设计要点.md`](docs/设计要点.md)**。一句话：
 
-### 数据模型（15 张表）
-
-`schema.sql` 由后端启动时**幂等执行**；改列定义时**必须**同步两处：
-
-1. `server-py/db/schema.sql`（新库）
-2. `server-py/app/seed.py` 的幂等 `ALTER`（既有库）
-
-| 表 | 用途 |
-|----|------|
-| `cls_class` | 班级（含冗余余额列、`head_teacher` 纯文本） |
-| `sys_user` / `sys_user_class` | 用户 + 多对多班级关联（`is_adviser=1` = 班主任） |
-| `fee_category` | 收支类别字典（启动时按 kind 幂等补齐 11 条） |
-| `fee_record` | **核心流水**，作废 = 红冲，审计列 `voided_by/voided_at` |
-| `fee_batch` / `fee_payment` | 收费批次 + 逐人缴费状态 |
-| `sys_notice` | 班级公告，审计列 `updated_by/updated_at` |
-| `student_field` / `student_record` / `student_record_value` | 学籍名册字段设计 + 逐人取值 |
-| `student_access_request` / `student_grant` | 跨班数据访问申请与授权 |
-| `cls_task` / `cls_task_answer` / `cls_task_student_answer` | 任务 + 本人答案 + 院长视角学生级答案 |
-
----
+- 收支一种流水（`fee_record`）、作废红冲留痕；余额实时对账，`Decimal(10,2)` 全链路不碰 float；
+- 成员缴费只有「批次标记缴费」一条写入路径；
+- 任务按题型分流展示，回收率按班主任名册统计；
+- 学院口径接口不带「当前班」，权限一律看 `ROLE_LEVEL` 等级。
 
 ## 参与开发
 
@@ -200,7 +168,7 @@ classfee-manager/
 ├─ web/                    前端（Vue 3 + Vite，:5173）
 │  └─ src/                 api / views（dashboard · college · records · batches · tasks ...）/ components / stores
 ├─ log/                    运行日志（backend / frontend / database，不入库）
-├─ docs/                   入库仅两份：部署指南 · 账号与权限
+├─ docs/                   入库仅三份：部署指南 · 账号与权限 · 设计要点
 ├─ docker-compose.yml                 一键部署（自带数据库容器）
 ├─ docker-compose.use-existing-db.yml 复用服务器上已有的 MySQL/MariaDB
 ├─ start-*.bat             Windows 一键启动
@@ -218,6 +186,7 @@ classfee-manager/
 | [`log/README.md`](log/README.md) | 运行日志：三类目录、启停、隐私底线 | 查线上问题 |
 | [`docs/部署-Linux.md`](docs/部署-Linux.md) | **部署指南**：手动（systemd + nginx）/ Docker Compose（含外部库）、验证清单、排障、日志配置 | 部署运维 |
 | [`docs/账号权限.md`](docs/账号权限.md) | **功能与权限**：功能模块总表（班级层/学院层 + 谁能用）、角色六档与 `ROLE_LEVEL`、账号来源与特性、访客可见范围、跨班授权 | 查有什么功能、排权限/建号 |
+| [`docs/设计要点.md`](docs/设计要点.md) | **设计口径**：资金单一流水与作废红冲、余额/金额/小票、任务分流与回收率、`skipClassId`、15 张表 DDL | 动数据结构/钱/任务前 |
 | [`design-system/classfee-manager/MASTER.md`](design-system/classfee-manager/MASTER.md) | **UI 规范**：色彩 token、间距、组件规格、响应式断点、**交付前检查清单** | 改界面样式 |
 | [`server-py/tests/api_regression.py`](server-py/tests/api_regression.py) | **1263 项契约回归**断言，改后端必跑 | 改接口 |
 | [`.env.example`](.env.example) | 全部部署变量（含中文注释） | 部署运维 |
