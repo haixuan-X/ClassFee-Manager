@@ -175,148 +175,22 @@ CLASSFEE_JWT_SECRET=<openssl rand -hex 32>   # 令牌签名密钥，生产必填
 
 ## 部署到服务器
 
-**两条路线，选一条**：
+部署文档：[`docs/部署-Linux.md`](docs/部署-Linux.md)，覆盖两条路线：
 
-| 路线 | 服务器要装什么 | 适合 |
-|------|--------------|------|
-| **A. 手动部署** | Python 3.13、Node、MariaDB、nginx | 要自定义、反代已有站点 |
-| **B. Docker Compose** | Docker + compose | **最省事**，一键起 |
-
-### A. 手动部署（systemd + nginx）
+| 路线 | 章节 | 服务器要装什么 | 适合 |
+|------|------|--------------|------|
+| **A. 手动部署** | §1–§5 | Python 3.13、Node、MariaDB、nginx | 要自定义、反代已有站点 |
+| **B. Docker Compose** | §6 | Docker + compose | **最省事**，一键起 |
 
 ```bash
-# 1. 服务器初始化（Ubuntu/Debian 示例）
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip nginx mariadb-server
-
-# 2. 建库建账号（'%' 表示允许容器网段连入；只要本机用则 'localhost' 即可）
-sudo mysql <<'SQL'
-CREATE DATABASE classfee DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'classfee'@'%' IDENTIFIED BY '你的强密码';
-GRANT ALL PRIVILEGES ON classfee.* TO 'classfee'@'%';
-FLUSH PRIVILEGES;
-SQL
-
-# 3. 上传产物（Windows 侧）
-scp -r D:\bj\server-py user@your-server:/tmp/server-py
-scp -r D:\bj\web\dist   user@your-server:/tmp/dist
-
-# 4. 归位 + 装依赖
-sudo mkdir -p /opt/classfee /var/www/classfee
-sudo mv /tmp/server-py /opt/classfee/ && sudo mv /tmp/dist/* /var/www/classfee/
-sudo chown -R www-data:www-data /var/www/classfee
-cd /opt/classfee/server-py && sudo -u www-data python3 -m venv .venv \
-  && sudo -u www-data .venv/bin/pip install -r requirements.txt
-```
-
-后端 systemd 单元 `/etc/systemd/system/classfee.service`：
-
-```ini
-[Unit]
-Description=ClassFee (FastAPI)
-After=network.target mysql.service mariadb.service
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/opt/classfee/server-py
-Environment=TZ=Asia/Shanghai
-Environment=CLASSFEE_DB_URL=mysql+pymysql://localhost:3306/classfee?charset=utf8mb4
-Environment=CLASSFEE_DB_USERNAME=classfee
-Environment=CLASSFEE_DB_PASSWORD=你的强密码
-Environment=CLASSFEE_JWT_SECRET=openssl rand -hex 32 生成的随机串
-# Environment=CLASSFEE_TEACHER_USERNAME=test
-# Environment=CLASSFEE_TEACHER_PASSWORD=换成强口令
-ExecStart=/opt/classfee/server-py/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-nginx 站点配置 `/etc/nginx/sites-available/classfee`：
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    root /var/www/classfee;
-    index index.html;
-
-    gzip on;
-    gzip_types text/css application/javascript application/json image/svg+xml;
-
-    # 运行日志落到仓库 log/frontend/（见「运行日志」一节）
-    access_log /opt/classfee/log/frontend/access.log;
-    error_log  /opt/classfee/log/frontend/error.log warn;
-
-    # 前端路由 history 回退：刷新深层路径不 404
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # API 反代；client_max_body_size 默认 1m 会让 5MB 小票 413
-    location /api/ {
-        client_max_body_size 6m;
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/classfee /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo systemctl enable --now classfee
-```
-
-自检：`curl -i http://127.0.0.1/` 返回 index.html；`curl -i http://127.0.0.1/api/version` 返回 `{"code":200,...}`；深链接 `curl -i http://127.0.0.1/records` 返回 200。
-
-### B. Docker Compose（最省事）
-
-```bash
+# 例：B 路线一键起
 scp -r D:\bj user@your-server:/opt/classfee-src
-cd /opt/classfee-src
-cp .env.example .env        # 必填：CLASSFEE_JWT_SECRET / CLASSFEE_TEACHER_USERNAME / PASSWORD / DB_ROOT_PASSWORD
+cd /opt/classfee-src && cp .env.example .env   # 必填 JWT 密钥 + 班主任账号 + DB 密码
 docker compose up -d --build
-docker compose ps            # db → healthy，backend → healthy，frontend → running
 ```
 
-| 文件 | 作用 |
-|------|------|
-| `docker-compose.yml` | db（MariaDB 11.4）+ backend + frontend，healthcheck 与数据卷齐全 |
-| `docker-compose.use-existing-db.yml` | **复用服务器已有库**（仅 backend + frontend 两容器；库账号需 `'%'` 主机授权、`bind-address=0.0.0.0`） |
-| `web/nginx.docker.conf` | SPA 回退 + `/api` 反代；**nginx.docker.conf 必须无 BOM** |
-
-```bash
-# 复用已有库（.env 填 DB_HOST/DB_PORT/DB_NAME/DB_USERNAME/DB_PASSWORD，不是 DB_ROOT_PASSWORD）
-docker compose -f docker-compose.use-existing-db.yml up -d --build
-```
-
-首次构建约 2–5 分钟；`docker compose logs -f backend` 可以看建表与账号创建。
-
-### 运行日志（`log/`）
-
-仓库根下的 `log/` 放运行时日志，按**后端 / 前端 / 数据库**三类分离：
-
-| 目录 | 内容 | 开启方式 |
-|------|------|----------|
-| `log/backend/` | 后端应用日志 + uvicorn 访问/错误日志 | **自动**，`RotatingFileHandler` 5MB×6 份，`CLASSFEE_LOG_DIR` 可改路径 |
-| `log/frontend/` | nginx access/error；`npm run dev:log` 的 vite 输出 | docker：compose 已挂载 `./log/frontend → /var/log/classfee`；直跑：nginx 配两行；本地：`npm run dev:log` |
-| `log/database/` | MariaDB 错误日志 | docker：compose db 已带 `--log-error=/var/log/mysql/error.log` + 挂载 `./log/database`（先 `chmod 0777 log/database`，UID 999）；外部库：在本机配 `log_error` |
-
-**除 `log/README.md` 与各 `.gitkeep` 外一律不入库**（日志含姓名学号痕迹）。完整说明见 [`log/README.md`](log/README.md)。
-不开慢查询日志——SQLAlchemy/PyMySQL 拼出的 SQL 会带姓名学号字面量。
-
-**发布途中出了问题**：先看 `docker compose logs -f backend`（或 `journalctl -u classfee -f` + `log/backend/backend.log`），
-90% 是 `.env` 变量名拼错、JWT 密钥没换、或者库连不上——启动日志里都有明确提示。
-
----
+服务器上已有 MySQL/MariaDB 时用 `docker-compose.use-existing-db.yml`（不另起库容器），详见部署文档 §6。
+运行时日志（后端 / 前端 nginx / MariaDB 三类分离）见部署文档 §7；**除 `log/README.md` 与 `.gitkeep` 外一律不入库**。
 
 ## 设计要点
 
@@ -400,6 +274,7 @@ classfee-manager/
 ├─ web/                    前端（Vue 3 + Vite，:5173）
 │  └─ src/                 api / views（dashboard · college · records · batches · tasks ...）/ components / stores
 ├─ log/                    运行日志（backend / frontend / database，不入库）
+├─ docs/部署-Linux.md      部署指南（手动 systemd+nginx / Docker Compose）
 ├─ docker-compose.yml                 一键部署（自带数据库容器）
 ├─ docker-compose.use-existing-db.yml 复用服务器上已有的 MySQL/MariaDB
 ├─ start-*.bat             Windows 一键启动
@@ -415,6 +290,7 @@ classfee-manager/
 | 文档 | 内容 | 适合谁 |
 |------|------|--------|
 | [`log/README.md`](log/README.md) | 运行日志：三类目录、启停、隐私底线 | 查线上问题 |
+| [`docs/部署-Linux.md`](docs/部署-Linux.md) | **部署指南**：手动（systemd + nginx）/ Docker Compose（含外部库）、验证清单、排障、日志配置 | 部署运维 |
 | [`design-system/classfee-manager/MASTER.md`](design-system/classfee-manager/MASTER.md) | **UI 规范**：色彩 token、间距、组件规格、响应式断点、**交付前检查清单** | 改界面样式 |
 | [`server-py/tests/api_regression.py`](server-py/tests/api_regression.py) | **1263 项契约回归**断言，改后端必跑 | 改接口 |
 | [`.env.example`](.env.example) | 全部部署变量（含中文注释） | 部署运维 |
@@ -438,7 +314,7 @@ classfee-manager/
 - **学籍变化无历史表**：仪表盘 `changeTotal` 是**当前不在籍人数**，给不了「本学期异动人次」。
 - **导出无行数上限**：`/records/export` 一次性在内存生成 xlsx（班级量级足够）。
 - **Docker 镜像未在开发机实测**：`Dockerfile` 与 compose 只做过静态校对与连通性验证；
-  首次部署请对照「部署到服务器」一节逐条自检。
+  首次部署请对照 [`docs/部署-Linux.md`](docs/部署-Linux.md) §5 逐条自检。
 
 ---
 
