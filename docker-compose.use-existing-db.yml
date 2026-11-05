@@ -12,9 +12,26 @@
 # 数据在服务器自己的库里：docker compose down 不影响数据（它本来就不归容器管）。
 
 services:
+  # 一次性初始化容器：自动建好日志目录并改属主（不用手动 mkdir/chmod）。
+  # log/backend 归后端容器用户 appuser（UID 10001）；log/frontend 由 nginx root 落盘。
+  # 每次 docker compose up 都会跑一遍（幂等，跑完即退出）。
+  log-init:
+    image: alpine:3.20
+    restart: "no"
+    command: >
+      sh -c "mkdir -p /logs/backend /logs/frontend &&
+             chown -R 10001:10001 /logs/backend &&
+             echo 'log dirs ready'"
+    volumes:
+      - ./log/backend:/logs/backend
+      - ./log/frontend:/logs/frontend
+
   backend:
     build: ./server-py
     restart: unless-stopped
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
     environment:
       TZ: Asia/Shanghai
       # 数据库连接（SQLAlchemy 原生写法）：URL 与账号密码分开给，凭据不进 URL
@@ -38,6 +55,8 @@ services:
       CLASSFEE_UPLOAD_DIR: ${CLASSFEE_UPLOAD_DIR:-/app/uploads}
     volumes:
       - classfee_uploads:/app/uploads
+      # 后端日志落宿主机仓库 log/backend/（目录由 log-init 自动初始化）
+      - ./log/backend:/app/log/backend
     healthcheck:
       # 单行可执行的 Python 探活：未带 token 拿到 401 = 服务已就绪
       test: ["CMD", "python", "-c", "import urllib.request,urllib.error,sys;exec(\"try:\\n r=urllib.request.urlopen('http://127.0.0.1:8080/api/auth/me',timeout=3)\\nexcept urllib.error.HTTPError as e:\\n sys.exit(0 if e.code in (401,403) else 1)\\nexcept Exception:\\n sys.exit(1)\")"]
@@ -55,8 +74,13 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      log-init:
+        condition: service_completed_successfully
     ports:
       - "${HTTP_PORT:-80}:80"
+    volumes:
+      # 前端运行日志（access.log / error.log）落宿主机仓库 log/frontend/
+      - ./log/frontend:/var/log/classfee
 
 volumes:
   # 只有小票图片在卷里；数据库归服务器自己管，本文件不碰它

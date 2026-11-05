@@ -18,6 +18,8 @@
 挂了一个 `RotatingFileHandler`：
 
 - 默认路径 `log/backend/backend.log`（相对仓库根目录的绝对路径解析，**与当前工作目录无关**）
+- **目录不存在会自动创建**（`mkdir -p`），不用手动建；docker 部署时 compose
+  已把 `./log/backend` 挂进容器（`/app/log/backend`），属主由 `log-init` 服务自动改好
 - 可用环境变量 `CLASSFEE_LOG_DIR` 覆盖目录（如服务器上想集中到 `/var/log/classfee/backend`）
 - 控制台输出保留：终端里看得到的同时，文件里也有一份
 - 轮转：单文件 5MB，`backend.log` + `backend.log.1` … `backend.log.5`
@@ -54,13 +56,10 @@ npm run dev:log    # 追加写到 log/frontend/vite-dev.log（不截断）
 **MariaDB（docker compose）**：`db` 服务带 `--log-error=/var/log/mysql/error.log`，
 compose 把 `./log/database` 挂载到容器 `/var/log/mysql`。
 
-⚠ 首次使用前（Linux 服务器上）给目录一个 mysql 用户可写的权限：
-
-```bash
-mkdir -p log/database && chmod 0777 log/database
-```
-
-（Windows Docker Desktop 下 bind mount 不卡 uid，直接跑即可。）
+**目录不用手动建**：compose 里有个一次性的 `log-init` 服务，每次
+`docker compose up` 时自动创建 `log/database / log/backend / log/frontend`
+并把属主改成对应容器用户（MariaDB=UID 999、后端=UID 10001），跑完即退出——
+Linux 服务器上也不再需要手动 `mkdir` / `chmod`。
 
 **不启用慢查询日志**：SQLAlchemy/PyMySQL 是客户端拼 SQL，慢日志会记下
 带**姓名/学号字面量**的整条 SQL，属于隐私事故。如确需排查慢查询，

@@ -261,15 +261,13 @@ docker run --rm -v classfee_uploads:/data -v "$PWD":/backup alpine \
 
 | 目录 | 内容 | 怎么开 |
 |------|------|--------|
-| `log/backend/` | 后端应用 + uvicorn 访问/错误日志 | **自动**（5MB×6 份；`CLASSFEE_LOG_DIR` 可改路径） |
+| `log/backend/` | 后端应用 + uvicorn 访问/错误日志 | **自动**（5MB×6 份；`CLASSFEE_LOG_DIR` 可改路径；docker 下 compose 已挂载 `./log/backend → /app/log/backend`） |
 | `log/frontend/` | nginx access/error；本地 `npm run dev:log` 的 vite 输出 | docker：compose 已挂载 `./log/frontend → /var/log/classfee`；直跑：nginx 配两行；本地 `npm run dev:log` |
-| `log/database/` | MariaDB 错误日志 | docker：compose db 已带 `--log-error=/var/log/mysql/error.log` + 挂载（先 `chmod 0777 log/database`，UID 999）；外部库：本机配 `log_error` 后重启 |
+| `log/database/` | MariaDB 错误日志 | docker：compose db 已带 `--log-error=/var/log/mysql/error.log` + 挂载；外部库：本机配 `log_error` 后重启 |
 
-```bash
-# docker 首次：给 MariaDB 容器建可写的日志目录
-mkdir -p log/backend log/frontend log/database && chmod 0777 log/database
-docker compose up -d --build
-```
+**目录不用手动建**：compose 里有一个一次性的 `log-init` 服务，每次 `up` 时自动
+创建三个目录并把属主改成对应容器用户（MariaDB=999、后端=10001），跑完即退出。
+`docker compose up -d --build` 一条命令即可，无需任何手动 mkdir/chmod。
 
 **不开慢查询日志**——SQLAlchemy/PyMySQL 拼出的 SQL 会带姓名/学号字面量。
 日志查完即删，不外发、不提交。详见 `log/README.md`。
